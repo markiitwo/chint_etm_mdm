@@ -35,7 +35,9 @@ class FieldCoverage:
     note: str
 
 
-def analyze_template_mapping(db_path: Path, template_path: Path, output_dir: Path) -> Path:
+def analyze_template_mapping(
+    db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None = None
+) -> Path:
     suffix = template_path.suffix.lower()
     if suffix not in {".xlsx", ".xlsm"}:
         raise ValueError("Анализ маппинга сейчас поддерживает только XLSX/XLSM, потому что нужен цвет заголовков.")
@@ -79,9 +81,13 @@ def analyze_template_mapping(db_path: Path, template_path: Path, output_dir: Pat
     for class81_code, class_products in sorted(by_class.items()):
         for header in yellow_headers:
             if header.startswith("Конфиг:"):
-                coverage, field_examples = analyze_config_field(class81_code, header, class_products)
+                coverage, field_examples = analyze_config_field(
+                    class81_code, header, class_products, rules_path
+                )
             elif is_reportable_header(header):
-                coverage, field_examples = analyze_direct_field(class81_code, header, class_products)
+                coverage, field_examples = analyze_direct_field(
+                    class81_code, header, class_products, rules_path
+                )
             else:
                 coverage = FieldCoverage(
                     class81_code=class81_code,
@@ -108,10 +114,13 @@ def analyze_template_mapping(db_path: Path, template_path: Path, output_dir: Pat
 
 
 def analyze_config_field(
-    class81_code: str, field: str, products: list[ProductRecord]
+    class81_code: str,
+    field: str,
+    products: list[ProductRecord],
+    rules_path: Path | None = None,
 ) -> tuple[FieldCoverage, list[list[str | int]]]:
     attr_name = field.removeprefix("Конфиг:").strip()
-    approved_sources = source_attributes_for(class81_code, field)
+    approved_sources = source_attributes_for(class81_code, field, rules_path)
     approved_count = 0
     exact_count = 0
     candidate_count = 0
@@ -151,7 +160,7 @@ def analyze_config_field(
 
         missing_count += 1
 
-    known_rules = rules_for(class81_code, field)
+    known_rules = rules_for(class81_code, field, rules_path)
     note = "Есть утвержденное правило для класса" if known_rules else "Требуется подтверждение правила для класса"
     if not wanted:
         note = "Пустое имя Конфиг-поля"
@@ -175,7 +184,10 @@ def analyze_config_field(
 
 
 def analyze_direct_field(
-    class81_code: str, field: str, products: list[ProductRecord]
+    class81_code: str,
+    field: str,
+    products: list[ProductRecord],
+    rules_path: Path | None = None,
 ) -> tuple[FieldCoverage, list[list[str | int]]]:
     filled_count = 0
     missing_count = 0
@@ -183,7 +195,7 @@ def analyze_direct_field(
     example_rows: list[list[str | int]] = []
 
     for product in products:
-        value, status, source = product_value(product, field)
+        value, status, source = product_value(product, field, rules_path)
         if status == "filled" and value:
             filled_count += 1
             sources[source] += 1
