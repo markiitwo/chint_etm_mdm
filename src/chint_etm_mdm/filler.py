@@ -126,10 +126,12 @@ def format_count(value: float | int | None) -> str:
     return format_decimal(number, 6)
 
 
-def suggested_attribute(product: ProductRecord, attr_name: str) -> tuple[str, str]:
+def suggested_attribute(
+    product: ProductRecord, attr_name: str, rules_path: Path | None = None
+) -> tuple[str, str]:
     attrs = product.attributes or {}
     template_field = f"Конфиг:{attr_name}"
-    for alias in source_attributes_for(product.class81_code, template_field):
+    for alias in source_attributes_for(product.class81_code, template_field, rules_path):
         value = attrs.get(alias, "")
         if value:
             return value, alias
@@ -137,7 +139,9 @@ def suggested_attribute(product: ProductRecord, attr_name: str) -> tuple[str, st
     return "", ""
 
 
-def product_value(product: ProductRecord, header: str) -> tuple[str, str, str]:
+def product_value(
+    product: ProductRecord, header: str, rules_path: Path | None = None
+) -> tuple[str, str, str]:
     if header in CONFIDENT_STATIC_VALUES:
         return CONFIDENT_STATIC_VALUES[header], "filled", "static"
     if header == "Расширенный артикул":
@@ -203,7 +207,7 @@ def product_value(product: ProductRecord, header: str) -> tuple[str, str, str]:
         value = (product.attributes or {}).get(attr_name, "")
         if value:
             return value, "filled", "product_attribute_values.attribute_name"
-        suggestion, source_name = suggested_attribute(product, attr_name)
+        suggestion, source_name = suggested_attribute(product, attr_name, rules_path)
         if suggestion:
             return suggestion, "suggested", f"product_attribute_values.attribute_name:{source_name}"
         return "", "blank", ""
@@ -332,16 +336,20 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
     workbook.save(path)
 
 
-def fill_template(db_path: Path, template_path: Path, output_dir: Path) -> FillResult:
+def fill_template(
+    db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None = None
+) -> FillResult:
     suffix = template_path.suffix.lower()
     if suffix == ".csv":
-        return fill_csv_template(db_path, template_path, output_dir)
+        return fill_csv_template(db_path, template_path, output_dir, rules_path)
     if suffix in {".xlsx", ".xlsm"}:
-        return fill_xlsx_template(db_path, template_path, output_dir)
+        return fill_xlsx_template(db_path, template_path, output_dir, rules_path)
     raise ValueError("Поддерживаются только CSV, XLSX и XLSM шаблоны.")
 
 
-def fill_csv_template(db_path: Path, template_path: Path, output_dir: Path) -> FillResult:
+def fill_csv_template(
+    db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None = None
+) -> FillResult:
     with template_path.open("r", newline="", encoding="utf-8-sig") as fh:
         sample = fh.read(4096)
         fh.seek(0)
@@ -379,7 +387,7 @@ def fill_csv_template(db_path: Path, template_path: Path, output_dir: Path) -> F
         for col_idx, header in enumerate(headers):
             if header == "Артикул":
                 continue
-            value, status, source = product_value(product, header)
+            value, status, source = product_value(product, header, rules_path)
             if status == "filled" and value:
                 row[col_idx] = value
                 filled_cells += 1
@@ -431,7 +439,9 @@ def fill_csv_template(db_path: Path, template_path: Path, output_dir: Path) -> F
     )
 
 
-def fill_xlsx_template(db_path: Path, template_path: Path, output_dir: Path) -> FillResult:
+def fill_xlsx_template(
+    db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None = None
+) -> FillResult:
     workbook = load_workbook(template_path)
     sheet = workbook.active
     header_cells = list(sheet[1])
@@ -468,7 +478,7 @@ def fill_xlsx_template(db_path: Path, template_path: Path, output_dir: Path) -> 
                 continue
             if col_idx not in fillable_columns:
                 continue
-            value, status, source = product_value(product, header)
+            value, status, source = product_value(product, header, rules_path)
             if status == "filled" and value:
                 row[col_idx].value = value
                 filled_cells += 1
