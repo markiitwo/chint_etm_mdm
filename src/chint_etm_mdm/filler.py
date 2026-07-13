@@ -19,6 +19,10 @@ CONFIDENT_STATIC_VALUES = {
     "Страна": "CHN",
     "Название упаковки": "шт",
 }
+CONFIG_ATTRIBUTE_ALIASES = {
+    "Напряжение, В": ["Напряжение лампы, В", "Напряжение лампы"],
+    "Цвет свечения": ["Цвет"],
+}
 DIRECT_DB_HEADERS = {
     "Расширенный артикул",
     "81 класс",
@@ -127,6 +131,11 @@ def format_count(value: float | int | None) -> str:
 
 def suggested_attribute(product: ProductRecord, attr_name: str) -> tuple[str, str]:
     attrs = product.attributes or {}
+    for alias in CONFIG_ATTRIBUTE_ALIASES.get(attr_name, []):
+        value = attrs.get(alias, "")
+        if value:
+            return value, alias
+
     wanted = comparable_text(attr_name)
     if not wanted:
         return "", ""
