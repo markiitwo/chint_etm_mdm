@@ -28,21 +28,27 @@ from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, load_config, save_config
 from .db import get_stats
 from .filler import FillResult, fill_template
+from .mapping_rules import ensure_default_rules, workdir_rules_path
 
 
 class FillWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, template_path: Path, output_dir: Path) -> None:
+    def __init__(
+        self, db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None
+    ) -> None:
         super().__init__()
         self.db_path = db_path
         self.template_path = template_path
         self.output_dir = output_dir
+        self.rules_path = rules_path
 
     def run(self) -> None:
         try:
-            self.done.emit(fill_template(self.db_path, self.template_path, self.output_dir))
+            self.done.emit(
+                fill_template(self.db_path, self.template_path, self.output_dir, self.rules_path)
+            )
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -51,15 +57,22 @@ class AnalyzeWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, template_path: Path, output_dir: Path) -> None:
+    def __init__(
+        self, db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None
+    ) -> None:
         super().__init__()
         self.db_path = db_path
         self.template_path = template_path
         self.output_dir = output_dir
+        self.rules_path = rules_path
 
     def run(self) -> None:
         try:
-            self.done.emit(analyze_template_mapping(self.db_path, self.template_path, self.output_dir))
+            self.done.emit(
+                analyze_template_mapping(
+                    self.db_path, self.template_path, self.output_dir, self.rules_path
+                )
+            )
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -214,6 +227,7 @@ class MainWindow(QMainWindow):
         )
         if self.config.work_path:
             ensure_work_dirs(self.config.work_path)
+            ensure_default_rules(self.config.work_path)
         save_config(self.config)
 
     def copy_db_to_workspace(self) -> None:
@@ -248,11 +262,16 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.status_text.setPlainText(f"Не удалось прочитать базу:\n{exc}")
             return
+        rules_text = "не выбран"
+        work_text = self.work_dir_edit.text().strip()
+        if work_text:
+            rules_text = str(workdir_rules_path(Path(work_text)))
 
         self.status_text.setPlainText(
             "\n".join(
                 [
                     f"Файл: {db_path}",
+                    f"Файл правил: {rules_text}",
                     f"Товаров: {stats.products_count}",
                     f"Габариты/вес: {stats.dimensions_count}",
                     f"ETIM-значений: {stats.attributes_count}",
@@ -267,10 +286,10 @@ class MainWindow(QMainWindow):
         paths = self.validated_paths()
         if paths is None:
             return
-        db_path, template_path, output_dir = paths
+        db_path, template_path, output_dir, rules_path = paths
 
         self.fill_log.append("Запуск заполнения...")
-        self.worker = FillWorker(db_path, template_path, output_dir)
+        self.worker = FillWorker(db_path, template_path, output_dir, rules_path)
         self.worker.done.connect(self.on_fill_done)
         self.worker.failed.connect(self.on_fill_failed)
         self.worker.start()
@@ -280,19 +299,23 @@ class MainWindow(QMainWindow):
         paths = self.validated_paths()
         if paths is None:
             return
-        db_path, template_path, output_dir = paths
+        db_path, template_path, output_dir, rules_path = paths
 
         self.fill_log.append("Анализирую желтые поля и кандидаты маппинга...")
-        self.worker = AnalyzeWorker(db_path, template_path, output_dir)
+        self.worker = AnalyzeWorker(db_path, template_path, output_dir, rules_path)
         self.worker.done.connect(self.on_mapping_analysis_done)
         self.worker.failed.connect(self.on_fill_failed)
         self.worker.start()
 
-    def validated_paths(self) -> tuple[Path, Path, Path] | None:
+    def validated_paths(self) -> tuple[Path, Path, Path, Path | None] | None:
         db_path = Path(self.db_path_edit.text().strip())
         template_path = Path(self.template_path_edit.text().strip())
         output_text = self.output_dir_edit.text().strip()
         output_dir = Path(output_text) if output_text else Path()
+        work_text = self.work_dir_edit.text().strip()
+        rules_path = None
+        if work_text:
+            rules_path = ensure_default_rules(Path(work_text))
 
         if not db_path.exists():
             QMessageBox.warning(self, "База не найдена", "Выберите существующую SQLite базу.")
@@ -303,7 +326,7 @@ class MainWindow(QMainWindow):
         if not output_text:
             QMessageBox.warning(self, "Нет папки результата", "Выберите папку результата.")
             return None
-        return db_path, template_path, output_dir
+        return db_path, template_path, output_dir, rules_path
 
     def on_fill_done(self, result: FillResult) -> None:
         self.fill_log.append("Готово.")
