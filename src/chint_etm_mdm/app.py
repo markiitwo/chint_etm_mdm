@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, load_config, save_config
 from .db import get_stats
 from .filler import FillResult, fill_template
@@ -46,13 +47,30 @@ class FillWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class AnalyzeWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, template_path: Path, output_dir: Path) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.template_path = template_path
+        self.output_dir = output_dir
+
+    def run(self) -> None:
+        try:
+            self.done.emit(analyze_template_mapping(self.db_path, self.template_path, self.output_dir))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("CHINT ETM MDM")
         self.resize(980, 680)
         self.config = load_config()
-        self.worker: FillWorker | None = None
+        self.worker: FillWorker | AnalyzeWorker | None = None
 
         self.work_dir_edit = QLineEdit(self.config.work_dir)
         self.db_path_edit = QLineEdit(self.config.db_path)
@@ -132,11 +150,17 @@ class MainWindow(QMainWindow):
         output_row.addWidget(choose_output)
         form.addRow("Папка результата", output_row)
 
+        actions = QHBoxLayout()
         run_button = QPushButton("Заполнить из базы")
         run_button.clicked.connect(self.run_fill)
+        analyze_button = QPushButton("Проанализировать маппинг")
+        analyze_button.clicked.connect(self.run_mapping_analysis)
+        actions.addWidget(run_button)
+        actions.addWidget(analyze_button)
+        actions.addStretch(1)
 
         layout.addWidget(box)
-        layout.addWidget(run_button, alignment=Qt.AlignLeft)
+        layout.addLayout(actions)
         layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.fill_log, stretch=1)
         return root
@@ -240,25 +264,46 @@ class MainWindow(QMainWindow):
 
     def run_fill(self) -> None:
         self.save_current_config()
-        db_path = Path(self.db_path_edit.text().strip())
-        template_path = Path(self.template_path_edit.text().strip())
-        output_dir = Path(self.output_dir_edit.text().strip())
-
-        if not db_path.exists():
-            QMessageBox.warning(self, "База не найдена", "Выберите существующую SQLite базу.")
+        paths = self.validated_paths()
+        if paths is None:
             return
-        if not template_path.exists():
-            QMessageBox.warning(self, "Шаблон не найден", "Выберите файл шаблона.")
-            return
-        if not output_dir:
-            QMessageBox.warning(self, "Нет папки результата", "Выберите папку результата.")
-            return
+        db_path, template_path, output_dir = paths
 
         self.fill_log.append("Запуск заполнения...")
         self.worker = FillWorker(db_path, template_path, output_dir)
         self.worker.done.connect(self.on_fill_done)
         self.worker.failed.connect(self.on_fill_failed)
         self.worker.start()
+
+    def run_mapping_analysis(self) -> None:
+        self.save_current_config()
+        paths = self.validated_paths()
+        if paths is None:
+            return
+        db_path, template_path, output_dir = paths
+
+        self.fill_log.append("Анализирую желтые поля и кандидаты маппинга...")
+        self.worker = AnalyzeWorker(db_path, template_path, output_dir)
+        self.worker.done.connect(self.on_mapping_analysis_done)
+        self.worker.failed.connect(self.on_fill_failed)
+        self.worker.start()
+
+    def validated_paths(self) -> tuple[Path, Path, Path] | None:
+        db_path = Path(self.db_path_edit.text().strip())
+        template_path = Path(self.template_path_edit.text().strip())
+        output_text = self.output_dir_edit.text().strip()
+        output_dir = Path(output_text) if output_text else Path()
+
+        if not db_path.exists():
+            QMessageBox.warning(self, "База не найдена", "Выберите существующую SQLite базу.")
+            return None
+        if not template_path.exists():
+            QMessageBox.warning(self, "Шаблон не найден", "Выберите файл шаблона.")
+            return None
+        if not output_text:
+            QMessageBox.warning(self, "Нет папки результата", "Выберите папку результата.")
+            return None
+        return db_path, template_path, output_dir
 
     def on_fill_done(self, result: FillResult) -> None:
         self.fill_log.append("Готово.")
@@ -274,6 +319,11 @@ class MainWindow(QMainWindow):
             "Заполнение завершено",
             f"Файл:\n{result.output_path}\n\nОтчет:\n{result.report_path}",
         )
+
+    def on_mapping_analysis_done(self, report_path: Path) -> None:
+        self.fill_log.append("Анализ маппинга готов.")
+        self.fill_log.append(f"Отчет: {report_path}")
+        QMessageBox.information(self, "Анализ готов", f"Отчет:\n{report_path}")
 
     def on_fill_failed(self, details: str) -> None:
         self.fill_log.append("Ошибка заполнения.")
