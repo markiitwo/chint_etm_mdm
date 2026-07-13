@@ -81,13 +81,48 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                 p.article,
                 COALESCE(ig.name, p.name, '') AS name,
                 COALESCE(ig.full_name, ig.name, p.name, '') AS full_name,
-                COALESCE(ig.class81_code, '') AS class81_code,
+                COALESCE(
+                    ig.class81_code,
+                    (
+                        SELECT class81_code
+                        FROM product_etm_class_suggestions s
+                        WHERE s.article = p.article
+                        ORDER BY confidence DESC
+                        LIMIT 1
+                    ),
+                    ''
+                ) AS class81_code,
                 COALESCE(p.unit, ig.manufacturer, '') AS unit,
                 d.length_mm,
                 d.width_mm,
                 d.height_mm,
-                d.weight_kg,
-                d.volume_m3,
+                COALESCE(
+                    d.weight_kg,
+                    (
+                        SELECT CAST(NULLIF(gross_weight_unit, '') AS REAL)
+                        FROM price_snapshot_items psi
+                        WHERE psi.article = p.article
+                        ORDER BY psi.snapshot_id DESC, psi.id DESC
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT CAST(NULLIF(net_weight_unit, '') AS REAL)
+                        FROM price_snapshot_items psi
+                        WHERE psi.article = p.article
+                        ORDER BY psi.snapshot_id DESC, psi.id DESC
+                        LIMIT 1
+                    )
+                ) AS weight_kg,
+                COALESCE(
+                    d.volume_m3,
+                    (
+                        SELECT CAST(NULLIF(unit_volume, '') AS REAL)
+                        FROM price_snapshot_items psi
+                        WHERE psi.article = p.article
+                        ORDER BY psi.snapshot_id DESC, psi.id DESC
+                        LIMIT 1
+                    )
+                ) AS volume_m3,
                 COALESCE((
                     SELECT tnved_code
                     FROM product_tnved_codes t
@@ -159,4 +194,3 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
             product.attributes[name] = value
 
     return products
-
