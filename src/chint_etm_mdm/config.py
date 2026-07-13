@@ -52,6 +52,5 @@ def save_config(config: AppConfig) -> None:
 
 
 def ensure_work_dirs(work_dir: Path) -> None:
-    for name in ["database", "input", "output", "downloads/price", "logs", "reports"]:
+    for name in ["database", "input", "output", "downloads/price", "logs", "reports", "rules"]:
         (work_dir / name).mkdir(parents=True, exist_ok=True)
-
