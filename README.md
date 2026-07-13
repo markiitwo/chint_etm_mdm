@@ -47,6 +47,11 @@ Filled confidently from the database:
 
 The database is not modified by the filler.
 
+For XLSX templates the filler writes and reports only columns whose header cells
+are yellow in the template. Non-yellow columns are treated as optional/manual
+fields for now. CSV templates do not contain color metadata, so they are filled
+by known column names.
+
 ## CLI Check
 
 The same filler can be run without the GUI:
