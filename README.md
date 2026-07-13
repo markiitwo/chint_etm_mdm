@@ -7,7 +7,7 @@ The first MVP is intentionally read-only for the SQLite MDM database:
 - opens an existing `chint_mdm.sqlite`;
 - shows basic database status;
 - fills ETM `upload_goods` CSV/XLSX templates by article;
-- saves a filled copy and a CSV report.
+- saves a filled copy and an XLSX report.
 
 ## Run From Source
 
@@ -62,12 +62,12 @@ PYTHONPATH=src python -m chint_etm_mdm.cli \
 The command creates:
 
 - a filled copy of the template;
-- a semicolon-separated report CSV.
+- an Excel report with summary and detailed action sheets.
 
 Report statuses:
 
 - `filled` means the value was written into the template;
-- `suggested` means a close ETIM attribute was found, but the value was left for review in the report;
+- `filled_suggested` means a close ETIM attribute was found, written into the template, and marked for review;
 - `not_found` means the article was not found in the database.
 
 ## Build EXE
