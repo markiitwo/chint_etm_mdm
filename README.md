@@ -62,6 +62,15 @@ Only `approved_class_rule` mappings are written into templates. Candidate
 matches are kept in the mapping analysis report until a human confirms the
 meaning for that class.
 
+On first workspace setup the app creates an editable rules file:
+
+```text
+<work-dir>/rules/attribute_mappings.json
+```
+
+If this file exists, it controls class-scoped mappings. This lets you add or
+remove approved mappings without rebuilding the EXE.
+
 ## CLI Check
 
 The same filler can be run without the GUI:
@@ -86,6 +95,7 @@ PYTHONPATH=src python -m chint_etm_mdm.cli \
   --db /path/to/chint_mdm.sqlite \
   --template /path/to/upload_goods_category_template.xlsx \
   --output-dir ./output \
+  --rules /path/to/work-dir/rules/attribute_mappings.json \
   --analyze-mapping
 ```
 
