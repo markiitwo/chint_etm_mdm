@@ -31,6 +31,24 @@ DIRECT_DB_HEADERS = {
     "Объем, м3",
     "Код ТН ВЭД",
     "Код ОКПД2",
+    "Упак3 Название",
+    "Упак3 Емкость",
+    "Упак3 Вес, кг",
+    "Упак3 Длина, м",
+    "Упак3 Ширина, м",
+    "Упак3 Высота, м",
+    "Упак3 Объем, м3",
+    "Штрих-код3",
+    "Штрих-код3уп",
+    "Отгрузка кратно УпЗавод",
+    "Упак5 Емкость",
+    "Упак5 Вес, кг",
+    "Упак5 Длина, м",
+    "Упак5 Ширина, м",
+    "Упак5 Высота, м",
+    "Упак5 Объем, м3",
+    "Штрих-код5",
+    "Штрих-код5уп",
 }
 
 
@@ -89,6 +107,15 @@ def mm_to_m(value: float | int | None) -> str:
     return format_decimal(float(value) / 1000.0, 6)
 
 
+def format_count(value: float | int | None) -> str:
+    if value is None:
+        return ""
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return format_decimal(number, 6)
+
+
 def suggested_attribute(product: ProductRecord, attr_name: str) -> tuple[str, str]:
     attrs = product.attributes or {}
     wanted = comparable_text(attr_name)
@@ -134,6 +161,36 @@ def product_value(product: ProductRecord, header: str) -> tuple[str, str, str]:
         return product.tnved_code, "filled", "product_tnved_codes.tnved_code"
     if header == "Код ОКПД2":
         return product.okpd2_code, "filled", "product_okpd2_codes.okpd2"
+    if header == "Упак3 Название" and product.min_shipment is not None:
+        return "УпЗавод", "filled", "generated"
+    if header == "Упак3 Емкость":
+        return format_count(product.min_shipment), "filled", "price_snapshot_items.min_shipment"
+    if header == "Упак3 Вес, кг":
+        return format_decimal(product.package_min_weight_kg, 6), "filled", "price_snapshot_items.gross_weight_min"
+    if header == "Упак3 Объем, м3":
+        return format_decimal(product.package_min_volume_m3, 9), "filled", "price_snapshot_items.min_volume"
+    if header == "Штрих-код3":
+        return product.gtin_inner, "filled", "material_data_items.gtin_inner"
+    if header == "Штрих-код3уп" and product.gtin_inner:
+        return "3", "filled", "static"
+    if header == "Отгрузка кратно УпЗавод" and product.min_shipment is not None:
+        return "ДА", "filled", "generated"
+    if header == "Упак5 Емкость":
+        return format_count(product.pack_multiple), "filled", "price_snapshot_items.pack_multiple"
+    if header == "Упак5 Вес, кг":
+        return format_decimal(product.transport_weight_kg, 6), "filled", "price_snapshot_items/material_data_items.transport_weight"
+    if header == "Упак5 Длина, м":
+        return mm_to_m(product.transport_length_mm), "filled", "material_data_items.outer_length_mm"
+    if header == "Упак5 Ширина, м":
+        return mm_to_m(product.transport_width_mm), "filled", "material_data_items.outer_width_mm"
+    if header == "Упак5 Высота, м":
+        return mm_to_m(product.transport_height_mm), "filled", "material_data_items.outer_height_mm"
+    if header == "Упак5 Объем, м3":
+        return format_decimal(product.transport_volume_m3, 9), "filled", "price_snapshot_items.transport_volume"
+    if header == "Штрих-код5":
+        return product.gtin_outer, "filled", "material_data_items.gtin_outer"
+    if header == "Штрих-код5уп" and product.gtin_outer:
+        return "5", "filled", "static"
     if header.startswith("Конфиг:"):
         attr_name = header.removeprefix("Конфиг:").strip()
         value = (product.attributes or {}).get(attr_name, "")
@@ -161,6 +218,10 @@ def missing_note(header: str) -> str:
         return "Нет значения в product_okpd2_codes"
     if header.startswith("Конфиг:"):
         return "Нет точного или близкого ETIM-атрибута в product_attribute_values"
+    if header.startswith("Упак3") or header in {"Штрих-код3", "Штрих-код3уп", "Отгрузка кратно УпЗавод"}:
+        return "Нет данных заводской упаковки в price_snapshot_items или material_data_items"
+    if header.startswith("Упак5") or header in {"Штрих-код5", "Штрих-код5уп"}:
+        return "Нет данных транспортной упаковки в price_snapshot_items или material_data_items"
     return "Нет значения в базе"
 
 
