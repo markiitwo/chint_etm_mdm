@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.spec
+.idea/
+.vscode/
+*.log
+
+# Local working folders and databases are user data.
+workspace/
+database/
+downloads/
+output/
+reports/
+*.sqlite
+*.sqlite3
+*.db
+
