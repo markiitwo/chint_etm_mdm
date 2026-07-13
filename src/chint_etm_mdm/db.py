@@ -29,6 +29,17 @@ class ProductRecord:
     volume_m3: float | None = None
     tnved_code: str = ""
     okpd2_code: str = ""
+    min_shipment: float | None = None
+    pack_multiple: float | None = None
+    package_min_weight_kg: float | None = None
+    package_min_volume_m3: float | None = None
+    transport_weight_kg: float | None = None
+    transport_volume_m3: float | None = None
+    transport_length_mm: float | None = None
+    transport_width_mm: float | None = None
+    transport_height_mm: float | None = None
+    gtin_inner: str = ""
+    gtin_outer: str = ""
     attributes: dict[str, str] | None = None
 
 
@@ -136,7 +147,93 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                     WHERE o.article = p.article
                     ORDER BY o.import_id DESC, o.id DESC
                     LIMIT 1
-                ), '') AS okpd2_code
+                ), '') AS okpd2_code,
+                (
+                    SELECT CAST(NULLIF(min_shipment, '') AS REAL)
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS min_shipment,
+                (
+                    SELECT CAST(NULLIF(pack_multiple, '') AS REAL)
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS pack_multiple,
+                (
+                    SELECT CAST(NULLIF(gross_weight_min, '') AS REAL)
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS package_min_weight_kg,
+                (
+                    SELECT CAST(NULLIF(min_volume, '') AS REAL)
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS package_min_volume_m3,
+                COALESCE(
+                    (
+                        SELECT CAST(NULLIF(gross_weight_transport, '') AS REAL)
+                        FROM price_snapshot_items psi
+                        WHERE psi.article = p.article
+                        ORDER BY psi.snapshot_id DESC, psi.id DESC
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT gross_weight_kg
+                        FROM material_data_items mdi
+                        WHERE mdi.article = p.article
+                        ORDER BY mdi.id DESC
+                        LIMIT 1
+                    )
+                ) AS transport_weight_kg,
+                (
+                    SELECT CAST(NULLIF(transport_volume, '') AS REAL)
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS transport_volume_m3,
+                (
+                    SELECT outer_length_mm
+                    FROM material_data_items mdi
+                    WHERE mdi.article = p.article
+                    ORDER BY mdi.id DESC
+                    LIMIT 1
+                ) AS transport_length_mm,
+                (
+                    SELECT outer_width_mm
+                    FROM material_data_items mdi
+                    WHERE mdi.article = p.article
+                    ORDER BY mdi.id DESC
+                    LIMIT 1
+                ) AS transport_width_mm,
+                (
+                    SELECT outer_height_mm
+                    FROM material_data_items mdi
+                    WHERE mdi.article = p.article
+                    ORDER BY mdi.id DESC
+                    LIMIT 1
+                ) AS transport_height_mm,
+                COALESCE((
+                    SELECT gtin_inner
+                    FROM material_data_items mdi
+                    WHERE mdi.article = p.article
+                    ORDER BY mdi.id DESC
+                    LIMIT 1
+                ), '') AS gtin_inner,
+                COALESCE((
+                    SELECT gtin_outer
+                    FROM material_data_items mdi
+                    WHERE mdi.article = p.article
+                    ORDER BY mdi.id DESC
+                    LIMIT 1
+                ), '') AS gtin_outer
             FROM products p
             LEFT JOIN (
                 SELECT *
@@ -169,6 +266,17 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                 volume_m3=row["volume_m3"],
                 tnved_code=str(row["tnved_code"] or ""),
                 okpd2_code=str(row["okpd2_code"] or ""),
+                min_shipment=row["min_shipment"],
+                pack_multiple=row["pack_multiple"],
+                package_min_weight_kg=row["package_min_weight_kg"],
+                package_min_volume_m3=row["package_min_volume_m3"],
+                transport_weight_kg=row["transport_weight_kg"],
+                transport_volume_m3=row["transport_volume_m3"],
+                transport_length_mm=row["transport_length_mm"],
+                transport_width_mm=row["transport_width_mm"],
+                transport_height_mm=row["transport_height_mm"],
+                gtin_inner=str(row["gtin_inner"] or ""),
+                gtin_outer=str(row["gtin_outer"] or ""),
                 attributes={},
             )
 
