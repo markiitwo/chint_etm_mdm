@@ -75,7 +75,7 @@ Report statuses:
 Planned packaging command:
 
 ```bash
-pyinstaller --noconfirm --windowed --name "CHINT ETM MDM" src/chint_etm_mdm/app.py
+python -m PyInstaller --noconfirm --windowed --onedir --name "CHINT ETM MDM" --paths src run_app.py
 ```
 
 Packaging will be refined after the MVP is tested on Windows.
