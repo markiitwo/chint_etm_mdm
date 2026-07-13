@@ -107,6 +107,8 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                 d.length_mm,
                 d.width_mm,
                 d.height_mm,
+                -- Main template weight is strictly unit weight. Do not fall back to
+                -- min/transport package weights here; those belong to Упак3/Упак5.
                 COALESCE(
                     d.weight_kg,
                     (
