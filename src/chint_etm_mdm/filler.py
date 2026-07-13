@@ -18,6 +18,20 @@ CONFIDENT_STATIC_VALUES = {
     "Страна": "CHN",
     "Название упаковки": "шт",
 }
+DIRECT_DB_HEADERS = {
+    "Расширенный артикул",
+    "81 класс",
+    "Название",
+    "Полное название",
+    "Краткое имя WMS",
+    "Вес, кг",
+    "Длина, м",
+    "Ширина, м",
+    "Высота, м",
+    "Объем, м3",
+    "Код ТН ВЭД",
+    "Код ОКПД2",
+}
 
 
 @dataclass(frozen=True)
@@ -132,6 +146,24 @@ def product_value(product: ProductRecord, header: str) -> tuple[str, str, str]:
     return "", "blank", ""
 
 
+def is_reportable_header(header: str) -> bool:
+    return header in CONFIDENT_STATIC_VALUES or header in DIRECT_DB_HEADERS or header.startswith("Конфиг:")
+
+
+def missing_note(header: str) -> str:
+    if header in {"Вес, кг", "Длина, м", "Ширина, м", "Высота, м", "Объем, м3"}:
+        return "Нет значения в product_dimensions_resolved"
+    if header == "81 класс":
+        return "Нет значения class81_code в ipro_goods"
+    if header == "Код ТН ВЭД":
+        return "Нет значения в product_tnved_codes"
+    if header == "Код ОКПД2":
+        return "Нет значения в product_okpd2_codes"
+    if header.startswith("Конфиг:"):
+        return "Нет точного или близкого ETIM-атрибута в product_attribute_values"
+    return "Нет значения в базе"
+
+
 def find_article_index(headers: list[str]) -> int | None:
     for candidate in ARTICLE_HEADERS:
         if candidate in headers:
@@ -161,6 +193,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
             "Статус",
             "Заполнено точно",
             "Заполнено по предложению",
+            "Не заполнено",
             "Комментарий",
         ]
     )
@@ -174,6 +207,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
             {
                 "filled": 0,
                 "suggested": 0,
+                "missing": 0,
                 "status": "ok",
                 "notes": [],
             },
@@ -183,6 +217,9 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
         elif item.status == "filled_suggested":
             bucket["suggested"] = int(bucket["suggested"]) + 1
             bucket["status"] = "needs_review"
+        elif item.status == "missing_value":
+            bucket["missing"] = int(bucket["missing"]) + 1
+            bucket["status"] = "incomplete"
         elif item.status == "not_found":
             bucket["status"] = "not_found"
         if item.note:
@@ -213,6 +250,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
                 bucket["status"],
                 bucket["filled"],
                 bucket["suggested"],
+                bucket["missing"],
                 "; ".join(notes),
             ]
         )
@@ -293,6 +331,18 @@ def fill_csv_template(db_path: Path, template_path: Path, output_dir: Path) -> F
                         "Заполнено по близкому совпадению; желательно проверить",
                     )
                 )
+            elif status in {"blank", "filled"} and is_reportable_header(header):
+                report.append(
+                    FillReportRow(
+                        row_number,
+                        article,
+                        header,
+                        "missing_value",
+                        "",
+                        source,
+                        missing_note(header),
+                    )
+                )
 
     output_path, report_path = make_output_paths(template_path, output_dir)
     with output_path.open("w", newline="", encoding="utf-8-sig") as fh:
@@ -360,6 +410,18 @@ def fill_xlsx_template(db_path: Path, template_path: Path, output_dir: Path) -> 
                         value,
                         source,
                         "Заполнено по близкому совпадению; желательно проверить",
+                    )
+                )
+            elif status in {"blank", "filled"} and is_reportable_header(header):
+                report.append(
+                    FillReportRow(
+                        row_number,
+                        article,
+                        header,
+                        "missing_value",
+                        "",
+                        source,
+                        missing_note(header),
                     )
                 )
 
