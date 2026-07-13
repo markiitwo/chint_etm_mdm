@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import csv
 import datetime as dt
 import re
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from .db import ProductRecord, fetch_products
 
@@ -143,26 +143,87 @@ def make_output_paths(template_path: Path, output_dir: Path) -> tuple[Path, Path
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_path = output_dir / f"{template_path.stem}_filled_{stamp}{template_path.suffix}"
-    report_path = output_dir / f"{template_path.stem}_report_{stamp}.csv"
+    report_path = output_dir / f"{template_path.stem}_report_{stamp}.xlsx"
     return output_path, report_path
 
 
 def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
-    with path.open("w", newline="", encoding="utf-8-sig") as fh:
-        writer = csv.writer(fh, delimiter=";")
-        writer.writerow(["row", "article", "column", "status", "value", "source", "note"])
-        for row in rows:
-            writer.writerow(
-                [
-                    row.row_number,
-                    row.article,
-                    row.column,
-                    row.status,
-                    row.value,
-                    row.source,
-                    row.note,
-                ]
-            )
+    rows = list(rows)
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Итог"
+    details = workbook.create_sheet("Детали")
+
+    summary.append(
+        [
+            "Строка",
+            "Артикул",
+            "Статус",
+            "Заполнено точно",
+            "Заполнено по предложению",
+            "Комментарий",
+        ]
+    )
+    details.append(["Строка", "Артикул", "Колонка", "Статус", "Значение", "Источник", "Комментарий"])
+
+    by_row: dict[tuple[int, str], dict[str, object]] = {}
+    for item in rows:
+        key = (item.row_number, item.article)
+        bucket = by_row.setdefault(
+            key,
+            {
+                "filled": 0,
+                "suggested": 0,
+                "status": "ok",
+                "notes": [],
+            },
+        )
+        if item.status == "filled":
+            bucket["filled"] = int(bucket["filled"]) + 1
+        elif item.status == "filled_suggested":
+            bucket["suggested"] = int(bucket["suggested"]) + 1
+            bucket["status"] = "needs_review"
+        elif item.status == "not_found":
+            bucket["status"] = "not_found"
+        if item.note:
+            notes = bucket["notes"]
+            assert isinstance(notes, list)
+            if item.note not in notes:
+                notes.append(item.note)
+
+        details.append(
+            [
+                item.row_number,
+                item.article,
+                item.column,
+                item.status,
+                item.value,
+                item.source,
+                item.note,
+            ]
+        )
+
+    for (row_number, article), bucket in sorted(by_row.items()):
+        notes = bucket["notes"]
+        assert isinstance(notes, list)
+        summary.append(
+            [
+                row_number,
+                article,
+                bucket["status"],
+                bucket["filled"],
+                bucket["suggested"],
+                "; ".join(notes),
+            ]
+        )
+
+    for sheet in (summary, details):
+        sheet.freeze_panes = "A2"
+        for column_cells in sheet.columns:
+            max_len = max(len(str(cell.value or "")) for cell in column_cells)
+            sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 10), 70)
+
+    workbook.save(path)
 
 
 def fill_template(db_path: Path, template_path: Path, output_dir: Path) -> FillResult:
@@ -218,16 +279,18 @@ def fill_csv_template(db_path: Path, template_path: Path, output_dir: Path) -> F
                 filled_cells += 1
                 report.append(FillReportRow(row_number, article, header, status, value, source))
             elif status == "suggested" and value:
+                row[col_idx] = value
+                filled_cells += 1
                 suggested_cells += 1
                 report.append(
                     FillReportRow(
                         row_number,
                         article,
                         header,
-                        status,
+                        "filled_suggested",
                         value,
                         source,
-                        "Предложение не записано в шаблон автоматически",
+                        "Заполнено по близкому совпадению; желательно проверить",
                     )
                 )
 
@@ -285,16 +348,18 @@ def fill_xlsx_template(db_path: Path, template_path: Path, output_dir: Path) -> 
                 filled_cells += 1
                 report.append(FillReportRow(row_number, article, header, status, value, source))
             elif status == "suggested" and value:
+                row[col_idx].value = value
+                filled_cells += 1
                 suggested_cells += 1
                 report.append(
                     FillReportRow(
                         row_number,
                         article,
                         header,
-                        status,
+                        "filled_suggested",
                         value,
                         source,
-                        "Предложение не записано в шаблон автоматически",
+                        "Заполнено по близкому совпадению; желательно проверить",
                     )
                 )
 
