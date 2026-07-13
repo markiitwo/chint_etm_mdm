@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -289,7 +290,52 @@ def write_mapping_report(
     for row in examples:
         examples_sheet.append(row)
 
-    for sheet in (coverage_sheet, examples_sheet):
+    rules_sheet = workbook.create_sheet("Правила")
+    rules_sheet.append(
+        [
+            "81 класс",
+            "Поле шаблона",
+            "Кандидат источника",
+            "Покрытие кандидата",
+            "Действие",
+            "JSON для rules",
+        ]
+    )
+    for item in coverages:
+        if not item.field.startswith("Конфиг:"):
+            continue
+        if item.approved_sources:
+            rules_sheet.append(
+                [
+                    item.class81_code,
+                    item.field,
+                    "; ".join(item.approved_sources),
+                    item.approved_rule_count,
+                    "уже утверждено",
+                    "",
+                ]
+            )
+            continue
+        for candidate in item.candidate_sources:
+            snippet = {
+                "class81_code": item.class81_code,
+                "template_field": item.field,
+                "source_attributes": [candidate],
+                "confidence": "approved_class_rule",
+                "note": "Confirm manually before use.",
+            }
+            rules_sheet.append(
+                [
+                    item.class81_code,
+                    item.field,
+                    candidate,
+                    item.candidate_count,
+                    "проверить и при подтверждении добавить в rules",
+                    json.dumps(snippet, ensure_ascii=False),
+                ]
+            )
+
+    for sheet in (coverage_sheet, examples_sheet, rules_sheet):
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for column_cells in sheet.columns:
