@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .analyzer import analyze_template_mapping
 from .db import get_stats
 from .filler import fill_template
 
@@ -13,6 +14,11 @@ def main() -> None:
     parser.add_argument("--template", required=True, help="Path to upload_goods CSV/XLSX template")
     parser.add_argument("--output-dir", required=True, help="Directory for filled file and report")
     parser.add_argument("--stats", action="store_true", help="Print database status before filling")
+    parser.add_argument(
+        "--analyze-mapping",
+        action="store_true",
+        help="Create XLSX mapping coverage report without filling the template",
+    )
     args = parser.parse_args()
 
     db_path = Path(args.db)
@@ -25,6 +31,11 @@ def main() -> None:
         print(f"dimensions={stats.dimensions_count}")
         print(f"attributes={stats.attributes_count}")
         print(f"latest_price={stats.latest_price_snapshot}")
+
+    if args.analyze_mapping:
+        report_path = analyze_template_mapping(db_path, template_path, output_dir)
+        print(f"mapping_report={report_path}")
+        return
 
     result = fill_template(db_path, template_path, output_dir)
     print(f"output={result.output_path}")
