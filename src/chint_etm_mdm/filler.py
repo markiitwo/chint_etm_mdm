@@ -113,7 +113,7 @@ def product_value(product: ProductRecord, header: str) -> tuple[str, str, str]:
     if header == "Расширенный артикул":
         return product.article, "filled", "products.article"
     if header == "81 класс":
-        return product.class81_code, "filled", "ipro_goods.class81_code"
+        return product.class81_code, "filled", "ipro_goods/product_etm_class_suggestions.class81_code"
     if header == "Название":
         return product.name or product.full_name, "filled", "products/ipro_goods.name"
     if header == "Полное название":
@@ -121,7 +121,7 @@ def product_value(product: ProductRecord, header: str) -> tuple[str, str, str]:
     if header == "Краткое имя WMS":
         return short_wms_name(product.name or product.full_name), "filled", "generated"
     if header == "Вес, кг":
-        return format_decimal(product.weight_kg, 6), "filled", "product_dimensions_resolved.weight_kg"
+        return format_decimal(product.weight_kg, 6), "filled", "product_dimensions_resolved/price_snapshot_items.weight_kg"
     if header == "Длина, м":
         return mm_to_m(product.length_mm), "filled", "product_dimensions_resolved.length_mm"
     if header == "Ширина, м":
@@ -129,7 +129,7 @@ def product_value(product: ProductRecord, header: str) -> tuple[str, str, str]:
     if header == "Высота, м":
         return mm_to_m(product.height_mm), "filled", "product_dimensions_resolved.height_mm"
     if header == "Объем, м3":
-        return format_decimal(product.volume_m3, 9), "filled", "product_dimensions_resolved.volume_m3"
+        return format_decimal(product.volume_m3, 9), "filled", "product_dimensions_resolved/price_snapshot_items.volume_m3"
     if header == "Код ТН ВЭД":
         return product.tnved_code, "filled", "product_tnved_codes.tnved_code"
     if header == "Код ОКПД2":
@@ -154,7 +154,7 @@ def missing_note(header: str) -> str:
     if header in {"Вес, кг", "Длина, м", "Ширина, м", "Высота, м", "Объем, м3"}:
         return "Нет значения в product_dimensions_resolved"
     if header == "81 класс":
-        return "Нет значения class81_code в ipro_goods"
+        return "Нет значения class81_code в ipro_goods или product_etm_class_suggestions"
     if header == "Код ТН ВЭД":
         return "Нет значения в product_tnved_codes"
     if header == "Код ОКПД2":
