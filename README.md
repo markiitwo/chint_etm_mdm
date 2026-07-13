@@ -52,8 +52,15 @@ are yellow in the template. Non-yellow columns are treated as optional/manual
 fields for now. CSV templates do not contain color metadata, so they are filled
 by known column names.
 
-Some ETM characteristic names are mapped to source attribute aliases. For
-example, `Конфиг:Напряжение, В` can be filled from `Напряжение лампы, В`.
+ETM characteristics are not mapped globally across the whole catalog. A mapping
+rule is scoped to an ETM 81 class, for example:
+
+- `class81=50301005`, `Конфиг:Напряжение, В` -> `Напряжение лампы, В`;
+- `class81=50301005`, `Конфиг:Цвет свечения` -> `Цвет`.
+
+Only `approved_class_rule` mappings are written into templates. Candidate
+matches are kept in the mapping analysis report until a human confirms the
+meaning for that class.
 
 ## CLI Check
 
@@ -71,6 +78,19 @@ The command creates:
 
 - a filled copy of the template;
 - an Excel report with summary and detailed action sheets.
+
+To inspect characteristic coverage without changing a template, run:
+
+```bash
+PYTHONPATH=src python -m chint_etm_mdm.cli \
+  --db /path/to/chint_mdm.sqlite \
+  --template /path/to/upload_goods_category_template.xlsx \
+  --output-dir ./output \
+  --analyze-mapping
+```
+
+This creates `*_mapping_review_*.xlsx` with class-scoped coverage and candidate
+attributes. Use it to decide which mappings can be safely approved for a class.
 
 Report statuses:
 
