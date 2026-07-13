@@ -52,6 +52,9 @@ are yellow in the template. Non-yellow columns are treated as optional/manual
 fields for now. CSV templates do not contain color metadata, so they are filled
 by known column names.
 
+Some ETM characteristic names are mapped to source attribute aliases. For
+example, `Конфиг:Напряжение, В` can be filled from `Напряжение лампы, В`.
+
 ## CLI Check
 
 The same filler can be run without the GUI:
