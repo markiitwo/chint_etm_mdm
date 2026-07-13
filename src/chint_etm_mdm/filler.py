@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import Cell
 
 from .db import ProductRecord, fetch_products
 
@@ -76,6 +77,14 @@ class FillResult:
 
 def normalize_header(value: object) -> str:
     return str(value or "").replace("\ufeff", "").strip()
+
+
+def is_yellow_header_cell(cell: Cell) -> bool:
+    fill = cell.fill
+    if fill.fill_type != "solid":
+        return False
+    rgb = str(fill.fgColor.rgb or "").upper()
+    return rgb in {"FFFFFF00", "FFFF00"} or rgb.endswith("FFFF00")
 
 
 def normalize_article(value: object) -> str:
@@ -431,7 +440,13 @@ def fill_csv_template(db_path: Path, template_path: Path, output_dir: Path) -> F
 def fill_xlsx_template(db_path: Path, template_path: Path, output_dir: Path) -> FillResult:
     workbook = load_workbook(template_path)
     sheet = workbook.active
-    headers = [normalize_header(cell.value) for cell in sheet[1]]
+    header_cells = list(sheet[1])
+    headers = [normalize_header(cell.value) for cell in header_cells]
+    fillable_columns = {
+        idx
+        for idx, cell in enumerate(header_cells)
+        if is_yellow_header_cell(cell)
+    }
     article_idx = find_article_index(headers)
     if article_idx is None:
         raise ValueError("Не найдена колонка Артикул или Расширенный артикул.")
@@ -456,6 +471,8 @@ def fill_xlsx_template(db_path: Path, template_path: Path, output_dir: Path) -> 
             continue
         for col_idx, header in enumerate(headers):
             if header == "Артикул" or col_idx >= len(row):
+                continue
+            if col_idx not in fillable_columns:
                 continue
             value, status, source = product_value(product, header)
             if status == "filled" and value:
