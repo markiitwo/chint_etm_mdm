@@ -11,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
 
 from .db import ProductRecord, fetch_products
+from .mapping_rules import source_attributes_for
 
 
 ARTICLE_HEADERS = ("Артикул", "Расширенный артикул")
@@ -18,10 +19,6 @@ CONFIDENT_STATIC_VALUES = {
     "Код производителя": "CHINT",
     "Страна": "CHN",
     "Название упаковки": "шт",
-}
-CONFIG_ATTRIBUTE_ALIASES = {
-    "Напряжение, В": ["Напряжение лампы, В", "Напряжение лампы"],
-    "Цвет свечения": ["Цвет"],
 }
 DIRECT_DB_HEADERS = {
     "Расширенный артикул",
@@ -131,23 +128,11 @@ def format_count(value: float | int | None) -> str:
 
 def suggested_attribute(product: ProductRecord, attr_name: str) -> tuple[str, str]:
     attrs = product.attributes or {}
-    for alias in CONFIG_ATTRIBUTE_ALIASES.get(attr_name, []):
+    template_field = f"Конфиг:{attr_name}"
+    for alias in source_attributes_for(product.class81_code, template_field):
         value = attrs.get(alias, "")
         if value:
             return value, alias
-
-    wanted = comparable_text(attr_name)
-    if not wanted:
-        return "", ""
-
-    for source_name, value in attrs.items():
-        if comparable_text(source_name) == wanted:
-            return value, source_name
-
-    for source_name, value in attrs.items():
-        source_key = comparable_text(source_name)
-        if wanted in source_key or source_key in wanted:
-            return value, source_name
 
     return "", ""
 
@@ -231,7 +216,7 @@ def is_reportable_header(header: str) -> bool:
 
 def missing_note(header: str) -> str:
     if header in {"Вес, кг", "Длина, м", "Ширина, м", "Высота, м", "Объем, м3"}:
-        return "Нет значения в product_dimensions_resolved"
+        return "Нет значения единицы товара в product_dimensions_resolved или price_snapshot_items"
     if header == "81 класс":
         return "Нет значения class81_code в ipro_goods или product_etm_class_suggestions"
     if header == "Код ТН ВЭД":
@@ -239,7 +224,7 @@ def missing_note(header: str) -> str:
     if header == "Код ОКПД2":
         return "Нет значения в product_okpd2_codes"
     if header.startswith("Конфиг:"):
-        return "Нет точного или близкого ETIM-атрибута в product_attribute_values"
+        return "Нет точного ETIM-атрибута или утвержденного правила для этого 81 класса"
     if header.startswith("Упак3") or header in {"Штрих-код3", "Штрих-код3уп", "Отгрузка кратно УпЗавод"}:
         return "Нет данных заводской упаковки в price_snapshot_items или material_data_items"
     if header.startswith("Упак5") or header in {"Штрих-код5", "Штрих-код5уп"}:
