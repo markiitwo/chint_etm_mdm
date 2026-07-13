@@ -148,7 +148,11 @@ def product_value(product: ProductRecord, header: str) -> tuple[str, str, str]:
     if header == "Краткое имя WMS":
         return short_wms_name(product.name or product.full_name), "filled", "generated"
     if header == "Вес, кг":
-        return format_decimal(product.weight_kg, 6), "filled", "product_dimensions_resolved/price_snapshot_items.weight_kg"
+        return (
+            format_decimal(product.weight_kg, 6),
+            "filled",
+            "product_dimensions_resolved.weight_kg/price_snapshot_items.gross_weight_unit",
+        )
     if header == "Длина, м":
         return mm_to_m(product.length_mm), "filled", "product_dimensions_resolved.length_mm"
     if header == "Ширина, м":
