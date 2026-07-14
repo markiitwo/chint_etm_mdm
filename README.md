@@ -161,6 +161,39 @@ The v1 app does not write manual corrections back into the SQLite database.
 That is planned as a separate v2 flow so the source database remains easy to
 restore and audit.
 
+## v2 Price Update
+
+The GUI tab `Обновление базы` can update the selected SQLite database from a
+fresh CHINT price-list workbook:
+
+1. Choose a local `Price-list-CHINT_*.xlsx` file, or paste a direct URL and let
+   the app download it into `<work-dir>/downloads/price`.
+2. Click `Импортировать выбранный XLSX` or `Скачать и импортировать`.
+3. The app creates a timestamped `.bak_*` copy of the SQLite database before
+   writing.
+4. The import updates `products`, writes a new `price_snapshots` row, appends
+   `price_snapshot_items`, and imports the workbook sheets for new products,
+   outgoing assortment, and price-change history.
+5. The result window shows imported rows, new articles compared with the
+   previous snapshot, changed price rows, total products, and backup path.
+
+CLI import is also available:
+
+```bash
+PYTHONPATH=src python -m chint_etm_mdm.cli \
+  --db /path/to/chint_mdm.sqlite \
+  --import-price /path/to/Price-list-CHINT_01-01-2026.xlsx
+```
+
+Or download first:
+
+```bash
+PYTHONPATH=src python -m chint_etm_mdm.cli \
+  --db /path/to/chint_mdm.sqlite \
+  --price-url https://example.com/Price-list-CHINT.xlsx \
+  --downloads-dir /path/to/work-dir/downloads/price
+```
+
 ## Build EXE
 
 Planned packaging command:

@@ -41,6 +41,12 @@ from .mapping_rules import (
     ensure_default_rules,
     workdir_rules_path,
 )
+from .price_importer import (
+    PriceImportResult,
+    download_price_file,
+    import_price_workbook,
+    result_lines,
+)
 
 
 CATEGORY_FROM_FILENAME_RE = re.compile(r"(?:category_template|template)_(\d{4,})", re.IGNORECASE)
@@ -92,13 +98,49 @@ class AnalyzeWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class PriceImportWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        db_path: Path,
+        price_path: Path | None,
+        price_url: str,
+        downloads_dir: Path,
+    ) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.price_path = price_path
+        self.price_url = price_url
+        self.downloads_dir = downloads_dir
+
+    def run(self) -> None:
+        try:
+            price_path = self.price_path
+            if self.price_url:
+                price_path = download_price_file(self.price_url, self.downloads_dir)
+            if price_path is None:
+                raise ValueError("Выберите XLSX прайс или укажите ссылку для скачивания.")
+            self.done.emit(
+                import_price_workbook(
+                    price_path,
+                    self.db_path,
+                    source_url=self.price_url,
+                    make_backup=True,
+                )
+            )
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("CHINT ETM MDM")
         self.resize(980, 680)
         self.config = load_config()
-        self.worker: FillWorker | AnalyzeWorker | None = None
+        self.worker: FillWorker | AnalyzeWorker | PriceImportWorker | None = None
         self.tabs: QTabWidget | None = None
 
         self.work_dir_edit = QLineEdit(self.config.work_dir)
@@ -106,6 +148,8 @@ class MainWindow(QMainWindow):
         self.template_path_edit = QLineEdit()
         self.output_dir_edit = QLineEdit(self.default_output_dir())
         self.mapping_review_path_edit = QLineEdit()
+        self.price_file_edit = QLineEdit()
+        self.price_url_edit = QLineEdit()
         self.coverage_table = QTableWidget(0, 8)
         self.rules_table = QTableWidget(0, 8)
         self.last_output_path: Path | None = None
@@ -114,10 +158,13 @@ class MainWindow(QMainWindow):
         self.open_output_button = QPushButton("Открыть заполненный файл")
         self.open_report_button = QPushButton("Открыть отчет")
         self.open_output_dir_button = QPushButton("Открыть папку результата")
+        self.open_price_file_button = QPushButton("Открыть прайс")
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.fill_log = QTextEdit()
         self.fill_log.setReadOnly(True)
+        self.price_log = QTextEdit()
+        self.price_log.setReadOnly(True)
         self.rules_log = QTextEdit()
         self.rules_log.setReadOnly(True)
 
@@ -128,6 +175,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_database_tab(), "База")
         self.tabs.addTab(self.build_fill_tab(), "Заполнение upload_goods")
+        self.tabs.addTab(self.build_price_tab(), "Обновление базы")
         self.tabs.addTab(self.build_rules_tab(), "Правила маппинга")
 
         root = QWidget()
@@ -216,6 +264,40 @@ class MainWindow(QMainWindow):
         layout.addLayout(result_actions)
         layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.fill_log, stretch=1)
+        return root
+
+    def build_price_tab(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+
+        box = QGroupBox("Свежий прайс-лист")
+        form = QFormLayout(box)
+
+        price_row = QHBoxLayout()
+        price_row.addWidget(self.price_file_edit)
+        choose_price = QPushButton("Выбрать...")
+        choose_price.clicked.connect(self.choose_price_file)
+        price_row.addWidget(choose_price)
+        form.addRow("XLSX прайс", price_row)
+
+        form.addRow("Ссылка на прайс", self.price_url_edit)
+
+        actions = QHBoxLayout()
+        import_file = QPushButton("Импортировать выбранный XLSX")
+        import_file.clicked.connect(self.run_price_import_from_file)
+        download_import = QPushButton("Скачать и импортировать")
+        download_import.clicked.connect(self.run_price_import_from_url)
+        self.open_price_file_button.clicked.connect(self.open_price_file)
+        self.open_price_file_button.setEnabled(False)
+        actions.addWidget(import_file)
+        actions.addWidget(download_import)
+        actions.addWidget(self.open_price_file_button)
+        actions.addStretch(1)
+
+        layout.addWidget(box)
+        layout.addLayout(actions)
+        layout.addWidget(QLabel("Журнал обновления базы"))
+        layout.addWidget(self.price_log, stretch=1)
         return root
 
     def build_rules_tab(self) -> QWidget:
@@ -338,6 +420,17 @@ class MainWindow(QMainWindow):
         if path:
             self.output_dir_edit.setText(path)
 
+    def choose_price_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите Price-list-CHINT XLSX",
+            "",
+            "CHINT price-list (*.xlsx *.xlsm);;All files (*)",
+        )
+        if path:
+            self.price_file_edit.setText(path)
+            self.open_price_file_button.setEnabled(True)
+
     def open_path(self, path: Path) -> None:
         if not path.exists():
             QMessageBox.warning(self, "Файл не найден", f"Не удалось открыть:\n{path}")
@@ -365,6 +458,13 @@ class MainWindow(QMainWindow):
         output_dir = Path(output_text)
         output_dir.mkdir(parents=True, exist_ok=True)
         self.open_path(output_dir)
+
+    def open_price_file(self) -> None:
+        price_text = self.price_file_edit.text().strip()
+        if not price_text:
+            QMessageBox.information(self, "Прайс не выбран", "Сначала выберите или скачайте прайс.")
+            return
+        self.open_path(Path(price_text))
 
     def choose_mapping_review(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -470,6 +570,62 @@ class MainWindow(QMainWindow):
         except Exception:
             self.on_action_failed(traceback.format_exc())
 
+    def price_download_dir(self) -> Path:
+        work_text = self.work_dir_edit.text().strip()
+        if work_text:
+            return Path(work_text) / "downloads" / "price"
+        output_text = self.output_dir_edit.text().strip()
+        if output_text:
+            return Path(output_text) / "downloads" / "price"
+        return Path.cwd() / "downloads" / "price"
+
+    def validated_db_path(self) -> Path | None:
+        self.save_current_config()
+        db_path = Path(self.db_path_edit.text().strip())
+        if not db_path.exists():
+            QMessageBox.warning(self, "База не найдена", "Выберите существующую SQLite базу.")
+            return None
+        return db_path
+
+    def run_price_import_from_file(self) -> None:
+        try:
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            price_text = self.price_file_edit.text().strip()
+            if not price_text:
+                QMessageBox.warning(self, "Прайс не выбран", "Выберите XLSX прайс-лист.")
+                return
+            price_path = Path(price_text)
+            if not price_path.exists():
+                QMessageBox.warning(self, "Прайс не найден", "Выберите существующий XLSX прайс-лист.")
+                return
+            self.price_log.append("Импортирую выбранный прайс...")
+            self.worker = PriceImportWorker(db_path, price_path, "", self.price_download_dir())
+            self.worker.done.connect(self.on_price_import_done)
+            self.worker.failed.connect(self.on_price_import_failed)
+            self.worker.start()
+        except Exception:
+            self.on_price_import_failed(traceback.format_exc())
+
+    def run_price_import_from_url(self) -> None:
+        try:
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            price_url = self.price_url_edit.text().strip()
+            if not price_url:
+                QMessageBox.warning(self, "Ссылка не указана", "Вставьте ссылку на XLSX прайс-лист.")
+                return
+            downloads_dir = self.price_download_dir()
+            self.price_log.append(f"Скачиваю прайс в {downloads_dir}...")
+            self.worker = PriceImportWorker(db_path, None, price_url, downloads_dir)
+            self.worker.done.connect(self.on_price_import_done)
+            self.worker.failed.connect(self.on_price_import_failed)
+            self.worker.start()
+        except Exception:
+            self.on_price_import_failed(traceback.format_exc())
+
     def validated_paths(self) -> tuple[Path, Path, Path, Path | None] | None:
         db_path = Path(self.db_path_edit.text().strip())
         template_path = Path(self.template_path_edit.text().strip())
@@ -525,8 +681,22 @@ class MainWindow(QMainWindow):
         self.mapping_review_path_edit.setText(str(report_path))
         self.load_mapping_review()
         if self.tabs is not None:
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentIndex(3)
         QMessageBox.information(self, "Анализ готов", f"Отчет:\n{report_path}")
+
+    def on_price_import_done(self, result: PriceImportResult) -> None:
+        self.price_file_edit.setText(str(result.price_file))
+        self.open_price_file_button.setEnabled(True)
+        self.price_log.append("Импорт прайса готов.")
+        for line in result_lines(result):
+            self.price_log.append(line)
+        self.refresh_database_status()
+        QMessageBox.information(self, "Прайс импортирован", "\n".join(result_lines(result)))
+
+    def on_price_import_failed(self, details: str) -> None:
+        self.price_log.append("Ошибка обновления базы.")
+        self.price_log.append(details)
+        QMessageBox.critical(self, "Ошибка обновления базы", details)
 
     def on_fill_failed(self, details: str) -> None:
         self.fill_log.append("Ошибка заполнения.")

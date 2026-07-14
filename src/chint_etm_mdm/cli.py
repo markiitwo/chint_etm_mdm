@@ -6,15 +6,19 @@ from pathlib import Path
 from .analyzer import analyze_template_mapping
 from .db import get_stats
 from .filler import fill_template
+from .price_importer import download_price_file, import_price_workbook, result_lines
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fill ETM upload_goods templates from CHINT MDM SQLite.")
     parser.add_argument("--db", required=True, help="Path to chint_mdm.sqlite")
-    parser.add_argument("--template", required=True, help="Path to upload_goods CSV/XLSX template")
-    parser.add_argument("--output-dir", required=True, help="Directory for filled file and report")
+    parser.add_argument("--template", help="Path to upload_goods CSV/XLSX template")
+    parser.add_argument("--output-dir", help="Directory for filled file and report")
     parser.add_argument("--rules", help="Optional path to attribute_mappings.json")
     parser.add_argument("--stats", action="store_true", help="Print database status before filling")
+    parser.add_argument("--import-price", help="Import a local CHINT price-list XLSX into the database")
+    parser.add_argument("--price-url", help="Download and import a CHINT price-list XLSX URL")
+    parser.add_argument("--downloads-dir", help="Directory for downloaded price-list files")
     parser.add_argument(
         "--analyze-mapping",
         action="store_true",
@@ -23,9 +27,24 @@ def main() -> None:
     args = parser.parse_args()
 
     db_path = Path(args.db)
-    template_path = Path(args.template)
-    output_dir = Path(args.output_dir)
+    template_path = Path(args.template) if args.template else None
+    output_dir = Path(args.output_dir) if args.output_dir else None
     rules_path = Path(args.rules) if args.rules else None
+
+    if args.import_price or args.price_url:
+        price_path = Path(args.import_price) if args.import_price else None
+        if args.price_url:
+            downloads_dir = (
+                Path(args.downloads_dir)
+                if args.downloads_dir
+                else (output_dir or Path.cwd()) / "downloads" / "price"
+            )
+            price_path = download_price_file(args.price_url, downloads_dir)
+        assert price_path is not None
+        result = import_price_workbook(price_path, db_path, source_url=args.price_url or "")
+        for line in result_lines(result):
+            print(line)
+        return
 
     if args.stats:
         stats = get_stats(db_path)
@@ -35,10 +54,14 @@ def main() -> None:
         print(f"latest_price={stats.latest_price_snapshot}")
 
     if args.analyze_mapping:
+        if template_path is None or output_dir is None:
+            parser.error("--template and --output-dir are required for --analyze-mapping")
         report_path = analyze_template_mapping(db_path, template_path, output_dir, rules_path)
         print(f"mapping_report={report_path}")
         return
 
+    if template_path is None or output_dir is None:
+        parser.error("--template and --output-dir are required for filling")
     result = fill_template(db_path, template_path, output_dir, rules_path)
     print(f"output={result.output_path}")
     print(f"report={result.report_path}")
