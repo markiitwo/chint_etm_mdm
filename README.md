@@ -55,6 +55,11 @@ by known column names.
 The filled XLSX keeps the original dropdown lists/data validations and marks
 unfilled required cells in red.
 
+After filling from the GUI, the result window shows a short human-readable
+summary: filled cells, red cells, missing articles, the filled file, and the
+report. The fill tab also has quick buttons to open the filled workbook, the
+latest report, and the output folder.
+
 ETM characteristics are not mapped globally across the whole catalog. A mapping
 rule is scoped to an ETM 81 class, for example:
 
@@ -138,6 +143,23 @@ Report statuses:
 - `filled` means the value was written into the template;
 - `candidate` means a close ETIM attribute was found for review, but it is not written until approved;
 - `not_found` means the article was not found in the database.
+
+## v1 Workflow For Colleagues
+
+1. Choose the SQLite database and an `upload_goods` XLSX template.
+2. Click `Проанализировать маппинг` when the template has unknown
+   `Конфиг:` fields. Accept only sources that clearly match the field meaning;
+   reject noisy sources so they stop appearing later.
+3. Click `Заполнить из базы`.
+4. Open the generated `_filled.xlsx`. Values filled by the app stay in the
+   template, original dropdown lists remain available, and required fields that
+   still need manual/product-manager input are red.
+5. Send the report sheet `К продактам` or the red cells in `_filled.xlsx` for
+   enrichment.
+
+The v1 app does not write manual corrections back into the SQLite database.
+That is planned as a separate v2 flow so the source database remains easy to
+restore and audit.
 
 ## Build EXE
 
