@@ -60,6 +60,9 @@ MISSING_CELL_FILL = PatternFill(fill_type="solid", fgColor="FFFFC7CE")
 MISSING_CELL_FONT = Font(color="FF9C0006")
 DATA_VALIDATIONS_RE = re.compile(br"<dataValidations\b.*?</dataValidations>", re.DOTALL)
 EXT_LST_RE = re.compile(br"<extLst\b.*?</extLst>", re.DOTALL)
+WORKSHEET_ROOT_RE = re.compile(br"<worksheet\b[^>]*>")
+XMLNS_ATTR_RE = re.compile(br'\s+xmlns(?::[A-Za-z_][\w.-]*)?="[^"]*"')
+MC_IGNORABLE_RE = re.compile(br'\s+mc:Ignorable="([^"]*)"')
 
 
 @dataclass(frozen=True)
@@ -330,6 +333,8 @@ def preserve_worksheet_dropdowns(template_path: Path, output_path: Path) -> None
                     b"</worksheet>", source_extensions.group(0) + b"</worksheet>", 1
                 )
 
+            updated_xml = copy_worksheet_root_namespaces(source_xml, updated_xml)
+
             if updated_xml != output_xml:
                 replacements[name] = updated_xml
 
@@ -358,6 +363,53 @@ def insert_after_xml_tag(xml: bytes, tag: bytes, payload: bytes) -> bytes:
         return xml.replace(b"</worksheet>", payload + b"</worksheet>", 1)
     insert_at = index + len(tag)
     return xml[:insert_at] + payload + xml[insert_at:]
+
+
+def copy_worksheet_root_namespaces(source_xml: bytes, output_xml: bytes) -> bytes:
+    source_root = WORKSHEET_ROOT_RE.search(source_xml)
+    output_root = WORKSHEET_ROOT_RE.search(output_xml)
+    if not source_root or not output_root:
+        return output_xml
+
+    source_tag = source_root.group(0)
+    output_tag = output_root.group(0)
+    updated_tag = output_tag
+
+    existing_namespace_names = {
+        declaration.split(b"=", 1)[0].strip()
+        for declaration in XMLNS_ATTR_RE.findall(output_tag)
+    }
+    for declaration in XMLNS_ATTR_RE.findall(source_tag):
+        namespace_name = declaration.split(b"=", 1)[0].strip()
+        if namespace_name not in existing_namespace_names:
+            updated_tag = insert_before_tag_end(updated_tag, declaration)
+            existing_namespace_names.add(namespace_name)
+
+    source_ignorable = MC_IGNORABLE_RE.search(source_tag)
+    output_ignorable = MC_IGNORABLE_RE.search(updated_tag)
+    if source_ignorable and not output_ignorable:
+        updated_tag = insert_before_tag_end(updated_tag, source_ignorable.group(0))
+    elif source_ignorable and output_ignorable:
+        values = dict.fromkeys(
+            output_ignorable.group(1).split() + source_ignorable.group(1).split()
+        )
+        merged = b' mc:Ignorable="' + b" ".join(values) + b'"'
+        updated_tag = (
+            updated_tag[: output_ignorable.start()]
+            + merged
+            + updated_tag[output_ignorable.end() :]
+        )
+
+    if updated_tag == output_tag:
+        return output_xml
+    return output_xml[: output_root.start()] + updated_tag + output_xml[output_root.end() :]
+
+
+def insert_before_tag_end(tag: bytes, attribute: bytes) -> bytes:
+    end = tag.rfind(b">")
+    if end == -1:
+        return tag
+    return tag[:end] + attribute + tag[end:]
 
 
 def find_article_index(headers: list[str]) -> int | None:
