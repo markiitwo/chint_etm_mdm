@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html.parser
 import re
 import shutil
 import sqlite3
@@ -23,6 +24,8 @@ PRICE_SHEETS = (
     "Выведено из ассортимента",
     "История изменений",
 )
+DEFAULT_PRICE_SOURCE_URL = "https://ensmas.ru/"
+LOW_VOLTAGE_PRICE_LABEL = "низковольтное оборудование"
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,59 @@ class PriceImportResult:
     products_total: int
     new_articles: int
     changed_price_rows: int
+
+
+class PriceLinkParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[tuple[str, str]] = []
+        self._current_href: str | None = None
+        self._current_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        attrs_dict = {name.lower(): value or "" for name, value in attrs}
+        self._current_href = attrs_dict.get("href")
+        self._current_text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current_href is not None:
+            self._current_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or self._current_href is None:
+            return
+        text = " ".join("".join(self._current_text).split())
+        self.links.append((self._current_href, text))
+        self._current_href = None
+        self._current_text = []
+
+
+def find_latest_price_url(source_url: str = DEFAULT_PRICE_SOURCE_URL) -> str:
+    source_url = source_url.strip() or DEFAULT_PRICE_SOURCE_URL
+    request = urllib.request.Request(source_url, headers={"User-Agent": "CHINT ETM MDM"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw_html = response.read()
+        encoding = response.headers.get_content_charset() or "utf-8"
+    page_html = raw_html.decode(encoding, errors="replace")
+
+    parser = PriceLinkParser()
+    parser.feed(page_html)
+
+    price_links: list[str] = []
+    for href, text in parser.links:
+        normalized_text = text.casefold()
+        if LOW_VOLTAGE_PRICE_LABEL in normalized_text and "Price-list-CHINT" in href:
+            return urllib.parse.urljoin(source_url, href)
+        if "Price-list-CHINT" in href and href.lower().endswith((".xlsx", ".xlsm")):
+            price_links.append(href)
+        elif "Price-list-CHINT" in href and ".xlsx" in href.lower():
+            price_links.append(href)
+
+    if price_links:
+        return urllib.parse.urljoin(source_url, price_links[0])
+    raise ValueError("Не удалось найти ссылку на прайс-лист CHINT на сайте.")
 
 
 def download_price_file(url: str, downloads_dir: Path) -> Path:

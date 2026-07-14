@@ -42,8 +42,10 @@ from .mapping_rules import (
     workdir_rules_path,
 )
 from .price_importer import (
+    DEFAULT_PRICE_SOURCE_URL,
     PriceImportResult,
     download_price_file,
+    find_latest_price_url,
     import_price_workbook,
     result_lines,
 )
@@ -134,13 +136,28 @@ class PriceImportWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class PriceFindWorker(QThread):
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, source_url: str) -> None:
+        super().__init__()
+        self.source_url = source_url
+
+    def run(self) -> None:
+        try:
+            self.done.emit(find_latest_price_url(self.source_url))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("CHINT ETM MDM")
         self.resize(980, 680)
         self.config = load_config()
-        self.worker: FillWorker | AnalyzeWorker | PriceImportWorker | None = None
+        self.worker: FillWorker | AnalyzeWorker | PriceImportWorker | PriceFindWorker | None = None
         self.tabs: QTabWidget | None = None
 
         self.work_dir_edit = QLineEdit(self.config.work_dir)
@@ -285,11 +302,14 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout()
         import_file = QPushButton("Импортировать выбранный XLSX")
         import_file.clicked.connect(self.run_price_import_from_file)
+        find_price = QPushButton("Найти свежий прайс")
+        find_price.clicked.connect(self.find_latest_price)
         download_import = QPushButton("Скачать и импортировать")
         download_import.clicked.connect(self.run_price_import_from_url)
         self.open_price_file_button.clicked.connect(self.open_price_file)
         self.open_price_file_button.setEnabled(False)
         actions.addWidget(import_file)
+        actions.addWidget(find_price)
         actions.addWidget(download_import)
         actions.addWidget(self.open_price_file_button)
         actions.addStretch(1)
@@ -608,6 +628,16 @@ class MainWindow(QMainWindow):
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
+    def find_latest_price(self) -> None:
+        try:
+            self.price_log.append(f"Ищу свежий прайс на {DEFAULT_PRICE_SOURCE_URL}...")
+            self.worker = PriceFindWorker(DEFAULT_PRICE_SOURCE_URL)
+            self.worker.done.connect(self.on_price_found)
+            self.worker.failed.connect(self.on_price_import_failed)
+            self.worker.start()
+        except Exception:
+            self.on_price_import_failed(traceback.format_exc())
+
     def run_price_import_from_url(self) -> None:
         try:
             db_path = self.validated_db_path()
@@ -692,6 +722,15 @@ class MainWindow(QMainWindow):
             self.price_log.append(line)
         self.refresh_database_status()
         QMessageBox.information(self, "Прайс импортирован", "\n".join(result_lines(result)))
+
+    def on_price_found(self, price_url: str) -> None:
+        self.price_url_edit.setText(price_url)
+        self.price_log.append(f"Найден свежий прайс: {price_url}")
+        QMessageBox.information(
+            self,
+            "Прайс найден",
+            "Ссылка подставлена в поле.\nТеперь можно нажать «Скачать и импортировать».",
+        )
 
     def on_price_import_failed(self, details: str) -> None:
         self.price_log.append("Ошибка обновления базы.")

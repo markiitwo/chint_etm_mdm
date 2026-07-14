@@ -6,7 +6,7 @@ from pathlib import Path
 from .analyzer import analyze_template_mapping
 from .db import get_stats
 from .filler import fill_template
-from .price_importer import download_price_file, import_price_workbook, result_lines
+from .price_importer import download_price_file, find_latest_price_url, import_price_workbook, result_lines
 
 
 def main() -> None:
@@ -18,6 +18,11 @@ def main() -> None:
     parser.add_argument("--stats", action="store_true", help="Print database status before filling")
     parser.add_argument("--import-price", help="Import a local CHINT price-list XLSX into the database")
     parser.add_argument("--price-url", help="Download and import a CHINT price-list XLSX URL")
+    parser.add_argument(
+        "--find-latest-price",
+        action="store_true",
+        help="Find the latest low-voltage CHINT price-list URL on ensmas.ru before importing",
+    )
     parser.add_argument("--downloads-dir", help="Directory for downloaded price-list files")
     parser.add_argument(
         "--analyze-mapping",
@@ -31,17 +36,21 @@ def main() -> None:
     output_dir = Path(args.output_dir) if args.output_dir else None
     rules_path = Path(args.rules) if args.rules else None
 
-    if args.import_price or args.price_url:
+    if args.import_price or args.price_url or args.find_latest_price:
         price_path = Path(args.import_price) if args.import_price else None
-        if args.price_url:
+        price_url = args.price_url or ""
+        if args.find_latest_price:
+            price_url = find_latest_price_url()
+            print(f"price_url={price_url}")
+        if price_url:
             downloads_dir = (
                 Path(args.downloads_dir)
                 if args.downloads_dir
                 else (output_dir or Path.cwd()) / "downloads" / "price"
             )
-            price_path = download_price_file(args.price_url, downloads_dir)
+            price_path = download_price_file(price_url, downloads_dir)
         assert price_path is not None
-        result = import_price_workbook(price_path, db_path, source_url=args.price_url or "")
+        result = import_price_workbook(price_path, db_path, source_url=price_url)
         for line in result_lines(result):
             print(line)
         return

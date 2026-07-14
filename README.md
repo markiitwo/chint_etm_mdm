@@ -166,8 +166,9 @@ restore and audit.
 The GUI tab `Обновление базы` can update the selected SQLite database from a
 fresh CHINT price-list workbook:
 
-1. Choose a local `Price-list-CHINT_*.xlsx` file, or paste a direct URL and let
-   the app download it into `<work-dir>/downloads/price`.
+1. Click `Найти свежий прайс` to find the current low-voltage CHINT price-list
+   on `ensmas.ru`, choose a local `Price-list-CHINT_*.xlsx` file, or paste a
+   direct URL manually.
 2. Click `Импортировать выбранный XLSX` or `Скачать и импортировать`.
 3. The app creates a timestamped `.bak_*` copy of the SQLite database before
    writing.
@@ -191,6 +192,15 @@ Or download first:
 PYTHONPATH=src python -m chint_etm_mdm.cli \
   --db /path/to/chint_mdm.sqlite \
   --price-url https://example.com/Price-list-CHINT.xlsx \
+  --downloads-dir /path/to/work-dir/downloads/price
+```
+
+Or let the CLI find the current low-voltage price-list on `ensmas.ru`:
+
+```bash
+PYTHONPATH=src python -m chint_etm_mdm.cli \
+  --db /path/to/chint_mdm.sqlite \
+  --find-latest-price \
   --downloads-dir /path/to/work-dir/downloads/price
 ```
 
