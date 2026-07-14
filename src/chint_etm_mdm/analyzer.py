@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -77,11 +77,18 @@ def analyze_template_mapping(
     article_idx = find_article_index(headers)
     if article_idx is None:
         raise ValueError("Не найдена колонка Артикул или Расширенный артикул.")
+    class81_idx = headers.index("81 класс") if "81 класс" in headers else None
 
     articles: list[str] = []
+    template_classes: dict[str, str] = {}
     for row in sheet.iter_rows(min_row=2):
         if article_idx < len(row):
-            articles.append(normalize_article(row[article_idx].value))
+            article = normalize_article(row[article_idx].value)
+            articles.append(article)
+            if article and class81_idx is not None and class81_idx < len(row):
+                template_class = normalize_header(row[class81_idx].value)
+                if template_class:
+                    template_classes.setdefault(article, template_class)
 
     products = fetch_products(db_path, articles)
     by_class: dict[str, list[ProductRecord]] = defaultdict(list)
@@ -90,6 +97,9 @@ def analyze_template_mapping(
             continue
         product = products.get(article)
         if product:
+            template_class = template_classes.get(article, "")
+            if template_class and not product.class81_code:
+                product = replace(product, class81_code=template_class)
             by_class[product.class81_code or ""].append(product)
 
     coverages: list[FieldCoverage] = []

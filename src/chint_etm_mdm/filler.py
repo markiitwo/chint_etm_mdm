@@ -6,7 +6,7 @@ import csv
 import shutil
 import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -419,6 +419,16 @@ def find_article_index(headers: list[str]) -> int | None:
     return None
 
 
+def class81_index(headers: list[str]) -> int | None:
+    return headers.index("81 класс") if "81 класс" in headers else None
+
+
+def product_with_template_class(product: ProductRecord, template_class: str) -> ProductRecord:
+    if template_class and not product.class81_code:
+        return replace(product, class81_code=template_class)
+    return product
+
+
 def make_output_paths(template_path: Path, output_dir: Path) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -549,6 +559,7 @@ def fill_csv_template(
     article_idx = find_article_index(headers)
     if article_idx is None:
         raise ValueError("Не найдена колонка Артикул или Расширенный артикул.")
+    class_idx = class81_index(headers)
 
     articles = [normalize_article(row[article_idx]) for row in reader[1:] if len(row) > article_idx]
     products = fetch_products(db_path, articles)
@@ -566,6 +577,8 @@ def fill_csv_template(
         if not product:
             report.append(FillReportRow(row_number, article, "", "not_found", "", "", "Артикул не найден в базе"))
             continue
+        if class_idx is not None and class_idx < len(row):
+            product = product_with_template_class(product, normalize_header(row[class_idx]))
         for col_idx, header in enumerate(headers):
             if header == "Артикул":
                 continue
@@ -636,6 +649,7 @@ def fill_xlsx_template(
     article_idx = find_article_index(headers)
     if article_idx is None:
         raise ValueError("Не найдена колонка Артикул или Расширенный артикул.")
+    class_idx = class81_index(headers)
 
     articles: list[str] = []
     for row in sheet.iter_rows(min_row=2):
@@ -658,6 +672,10 @@ def fill_xlsx_template(
                 if col_idx != article_idx and col_idx < len(row):
                     mark_missing_cell(row[col_idx])
             continue
+        if class_idx is not None and class_idx < len(row):
+            product = product_with_template_class(
+                product, normalize_header(row[class_idx].value)
+            )
         for col_idx, header in enumerate(headers):
             if header == "Артикул" or col_idx >= len(row):
                 continue
