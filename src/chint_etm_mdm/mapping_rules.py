@@ -17,12 +17,34 @@ class AttributeRule:
 
 
 DEFAULT_RULES_RESOURCE = "attribute_mappings.json"
+DEFAULT_RULES_FALLBACK = {
+    "version": 1,
+    "class_rules": [
+        {
+            "class81_code": "50301005",
+            "template_field": "Конфиг:Напряжение, В",
+            "source_attributes": ["Напряжение лампы, В", "Напряжение лампы"],
+            "confidence": "approved_class_rule",
+            "note": "For signal lamps this field means lamp voltage.",
+        },
+        {
+            "class81_code": "50301005",
+            "template_field": "Конфиг:Цвет свечения",
+            "source_attributes": ["Цвет"],
+            "confidence": "approved_class_rule",
+            "note": "For signal lamps the source attribute is generic color.",
+        },
+    ],
+}
 
 
 def default_rules_text() -> str:
-    return resources.files("chint_etm_mdm.rules").joinpath(DEFAULT_RULES_RESOURCE).read_text(
-        encoding="utf-8"
-    )
+    try:
+        return resources.files("chint_etm_mdm.rules").joinpath(DEFAULT_RULES_RESOURCE).read_text(
+            encoding="utf-8"
+        )
+    except (FileNotFoundError, ModuleNotFoundError):
+        return json.dumps(DEFAULT_RULES_FALLBACK, ensure_ascii=False, indent=2)
 
 
 def workdir_rules_path(work_dir: Path) -> Path:

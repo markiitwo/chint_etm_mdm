@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         self.resize(980, 680)
         self.config = load_config()
         self.worker: FillWorker | AnalyzeWorker | None = None
+        self.tabs: QTabWidget | None = None
 
         self.work_dir_edit = QLineEdit(self.config.work_dir)
         self.db_path_edit = QLineEdit(self.config.db_path)
@@ -105,14 +106,14 @@ class MainWindow(QMainWindow):
         self.refresh_database_status()
 
     def build_ui(self) -> QWidget:
-        tabs = QTabWidget()
-        tabs.addTab(self.build_database_tab(), "База")
-        tabs.addTab(self.build_fill_tab(), "Заполнение upload_goods")
-        tabs.addTab(self.build_rules_tab(), "Правила маппинга")
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.build_database_tab(), "База")
+        self.tabs.addTab(self.build_fill_tab(), "Заполнение upload_goods")
+        self.tabs.addTab(self.build_rules_tab(), "Правила маппинга")
 
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.addWidget(tabs)
+        layout.addWidget(self.tabs)
         return root
 
     def build_database_tab(self) -> QWidget:
@@ -340,30 +341,36 @@ class MainWindow(QMainWindow):
         )
 
     def run_fill(self) -> None:
-        self.save_current_config()
-        paths = self.validated_paths()
-        if paths is None:
-            return
-        db_path, template_path, output_dir, rules_path = paths
+        try:
+            self.save_current_config()
+            paths = self.validated_paths()
+            if paths is None:
+                return
+            db_path, template_path, output_dir, rules_path = paths
 
-        self.fill_log.append("Запуск заполнения...")
-        self.worker = FillWorker(db_path, template_path, output_dir, rules_path)
-        self.worker.done.connect(self.on_fill_done)
-        self.worker.failed.connect(self.on_fill_failed)
-        self.worker.start()
+            self.fill_log.append("Запуск заполнения...")
+            self.worker = FillWorker(db_path, template_path, output_dir, rules_path)
+            self.worker.done.connect(self.on_fill_done)
+            self.worker.failed.connect(self.on_fill_failed)
+            self.worker.start()
+        except Exception:
+            self.on_action_failed(traceback.format_exc())
 
     def run_mapping_analysis(self) -> None:
-        self.save_current_config()
-        paths = self.validated_paths()
-        if paths is None:
-            return
-        db_path, template_path, output_dir, rules_path = paths
+        try:
+            self.save_current_config()
+            paths = self.validated_paths()
+            if paths is None:
+                return
+            db_path, template_path, output_dir, rules_path = paths
 
-        self.fill_log.append("Анализирую желтые поля и кандидаты маппинга...")
-        self.worker = AnalyzeWorker(db_path, template_path, output_dir, rules_path)
-        self.worker.done.connect(self.on_mapping_analysis_done)
-        self.worker.failed.connect(self.on_fill_failed)
-        self.worker.start()
+            self.fill_log.append("Анализирую желтые поля и кандидаты маппинга...")
+            self.worker = AnalyzeWorker(db_path, template_path, output_dir, rules_path)
+            self.worker.done.connect(self.on_mapping_analysis_done)
+            self.worker.failed.connect(self.on_action_failed)
+            self.worker.start()
+        except Exception:
+            self.on_action_failed(traceback.format_exc())
 
     def validated_paths(self) -> tuple[Path, Path, Path, Path | None] | None:
         db_path = Path(self.db_path_edit.text().strip())
@@ -404,10 +411,19 @@ class MainWindow(QMainWindow):
     def on_mapping_analysis_done(self, report_path: Path) -> None:
         self.fill_log.append("Анализ маппинга готов.")
         self.fill_log.append(f"Отчет: {report_path}")
+        self.mapping_review_path_edit.setText(str(report_path))
+        self.load_mapping_review()
+        if self.tabs is not None:
+            self.tabs.setCurrentIndex(2)
         QMessageBox.information(self, "Анализ готов", f"Отчет:\n{report_path}")
 
     def on_fill_failed(self, details: str) -> None:
         self.fill_log.append("Ошибка заполнения.")
+        self.fill_log.append(details)
+        QMessageBox.critical(self, "Ошибка", details)
+
+    def on_action_failed(self, details: str) -> None:
+        self.fill_log.append("Ошибка.")
         self.fill_log.append(details)
         QMessageBox.critical(self, "Ошибка", details)
 
