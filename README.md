@@ -102,6 +102,17 @@ PYTHONPATH=src python -m chint_etm_mdm.cli \
 This creates `*_mapping_review_*.xlsx` with class-scoped coverage and candidate
 attributes. Use it to decide which mappings can be safely approved for a class.
 
+In the GUI, open the `Правила маппинга` tab, choose the generated
+`mapping_review.xlsx`, load candidates, tick the mappings you verified, and save
+them. The app writes approved rules to:
+
+```text
+<work-dir>/rules/attribute_mappings.json
+```
+
+The next fill run uses those approved class rules immediately; rebuilding the
+EXE is not required.
+
 Report statuses:
 
 - `filled` means the value was written into the template;

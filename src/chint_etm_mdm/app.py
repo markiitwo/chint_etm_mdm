@@ -19,16 +19,19 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+from openpyxl import load_workbook
 
 from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, load_config, save_config
 from .db import get_stats
 from .filler import FillResult, fill_template
-from .mapping_rules import ensure_default_rules, workdir_rules_path
+from .mapping_rules import add_approved_class_rule, ensure_default_rules, workdir_rules_path
 
 
 class FillWorker(QThread):
@@ -89,10 +92,14 @@ class MainWindow(QMainWindow):
         self.db_path_edit = QLineEdit(self.config.db_path)
         self.template_path_edit = QLineEdit()
         self.output_dir_edit = QLineEdit(self.default_output_dir())
+        self.mapping_review_path_edit = QLineEdit()
+        self.rules_table = QTableWidget(0, 6)
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.fill_log = QTextEdit()
         self.fill_log.setReadOnly(True)
+        self.rules_log = QTextEdit()
+        self.rules_log.setReadOnly(True)
 
         self.setCentralWidget(self.build_ui())
         self.refresh_database_status()
@@ -101,6 +108,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self.build_database_tab(), "База")
         tabs.addTab(self.build_fill_tab(), "Заполнение upload_goods")
+        tabs.addTab(self.build_rules_tab(), "Правила маппинга")
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -178,6 +186,45 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.fill_log, stretch=1)
         return root
 
+    def build_rules_tab(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+
+        box = QGroupBox("Отчет mapping_review")
+        form = QFormLayout(box)
+        review_row = QHBoxLayout()
+        review_row.addWidget(self.mapping_review_path_edit)
+        choose_review = QPushButton("Выбрать...")
+        choose_review.clicked.connect(self.choose_mapping_review)
+        review_row.addWidget(choose_review)
+        load_review = QPushButton("Загрузить кандидаты")
+        load_review.clicked.connect(self.load_mapping_review)
+        review_row.addWidget(load_review)
+        form.addRow("Файл отчета", review_row)
+
+        self.rules_table.setHorizontalHeaderLabels(
+            ["Добавить", "81 класс", "Поле шаблона", "Источник", "Покрытие", "Действие"]
+        )
+        self.rules_table.setColumnWidth(0, 80)
+        self.rules_table.setColumnWidth(1, 100)
+        self.rules_table.setColumnWidth(2, 260)
+        self.rules_table.setColumnWidth(3, 260)
+        self.rules_table.setColumnWidth(4, 90)
+        self.rules_table.setColumnWidth(5, 260)
+
+        actions = QHBoxLayout()
+        save_rules = QPushButton("Сохранить выбранные правила")
+        save_rules.clicked.connect(self.save_selected_rules)
+        actions.addWidget(save_rules)
+        actions.addStretch(1)
+
+        layout.addWidget(box)
+        layout.addWidget(self.rules_table, stretch=2)
+        layout.addLayout(actions)
+        layout.addWidget(QLabel("Журнал правил"))
+        layout.addWidget(self.rules_log, stretch=1)
+        return root
+
     def default_output_dir(self) -> str:
         if self.config.work_dir:
             return str(Path(self.config.work_dir) / "output")
@@ -219,6 +266,17 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Выберите папку результата")
         if path:
             self.output_dir_edit.setText(path)
+
+    def choose_mapping_review(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите mapping_review.xlsx",
+            "",
+            "Mapping review (*.xlsx *.xlsm);;All files (*)",
+        )
+        if path:
+            self.mapping_review_path_edit.setText(path)
+            self.load_mapping_review()
 
     def save_current_config(self) -> None:
         self.config = AppConfig(
@@ -352,6 +410,129 @@ class MainWindow(QMainWindow):
         self.fill_log.append("Ошибка заполнения.")
         self.fill_log.append(details)
         QMessageBox.critical(self, "Ошибка", details)
+
+    def load_mapping_review(self) -> None:
+        path_text = self.mapping_review_path_edit.text().strip()
+        if not path_text:
+            QMessageBox.warning(self, "Отчет не выбран", "Выберите файл mapping_review.xlsx.")
+            return
+        review_path = Path(path_text)
+        if not review_path.exists():
+            QMessageBox.warning(self, "Отчет не найден", "Выберите существующий файл mapping_review.xlsx.")
+            return
+
+        try:
+            rows = self.read_mapping_review_candidates(review_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка чтения отчета", str(exc))
+            return
+
+        self.rules_table.setRowCount(0)
+        for row_data in rows:
+            row_idx = self.rules_table.rowCount()
+            self.rules_table.insertRow(row_idx)
+
+            check_item = QTableWidgetItem()
+            check_item.setFlags(
+                Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            check_item.setCheckState(Qt.CheckState.Unchecked)
+            check_item.setData(Qt.ItemDataRole.UserRole, row_data)
+            self.rules_table.setItem(row_idx, 0, check_item)
+
+            values = [
+                row_data["class81_code"],
+                row_data["template_field"],
+                row_data["source_attribute"],
+                row_data["coverage"],
+                row_data["action"],
+            ]
+            for col_idx, value in enumerate(values, start=1):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.rules_table.setItem(row_idx, col_idx, item)
+
+        self.rules_log.append(f"Загружено кандидатов: {len(rows)}")
+
+    def read_mapping_review_candidates(self, review_path: Path) -> list[dict[str, str]]:
+        workbook = load_workbook(review_path, data_only=True, read_only=True)
+        if "Правила" not in workbook.sheetnames:
+            raise ValueError("В отчете нет листа 'Правила'. Сначала сделайте анализ маппинга.")
+        sheet = workbook["Правила"]
+        header_row = next(sheet.iter_rows(values_only=True), None)
+        if not header_row:
+            raise ValueError("Лист 'Правила' пустой.")
+        headers = [str(value or "").strip() for value in header_row]
+        index = {name: idx for idx, name in enumerate(headers)}
+        required = ["81 класс", "Поле шаблона", "Кандидат источника", "Покрытие кандидата", "Действие"]
+        missing = [name for name in required if name not in index]
+        if missing:
+            raise ValueError(f"В листе 'Правила' нет колонок: {', '.join(missing)}")
+
+        rows: list[dict[str, str]] = []
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            action = str(values[index["Действие"]] or "").strip()
+            if "уже утверждено" in action.lower():
+                continue
+            class81_code = str(values[index["81 класс"]] or "").strip()
+            template_field = str(values[index["Поле шаблона"]] or "").strip()
+            source_attribute = str(values[index["Кандидат источника"]] or "").strip()
+            coverage = str(values[index["Покрытие кандидата"]] or "").strip()
+            if not class81_code or not template_field or not source_attribute:
+                continue
+            rows.append(
+                {
+                    "class81_code": class81_code,
+                    "template_field": template_field,
+                    "source_attribute": source_attribute,
+                    "coverage": coverage,
+                    "action": action,
+                }
+            )
+        return rows
+
+    def save_selected_rules(self) -> None:
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            QMessageBox.warning(self, "Нет рабочей папки", "Сначала выберите рабочую папку на вкладке База.")
+            return
+        rules_path = ensure_default_rules(Path(work_text))
+
+        added = 0
+        skipped = 0
+        selected = 0
+        for row_idx in range(self.rules_table.rowCount()):
+            check_item = self.rules_table.item(row_idx, 0)
+            if not check_item or check_item.checkState() != Qt.CheckState.Checked:
+                continue
+            selected += 1
+            row_data = check_item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(row_data, dict):
+                continue
+            changed = add_approved_class_rule(
+                rules_path,
+                row_data["class81_code"],
+                row_data["template_field"],
+                row_data["source_attribute"],
+            )
+            if changed:
+                added += 1
+            else:
+                skipped += 1
+
+        if selected == 0:
+            QMessageBox.information(self, "Ничего не выбрано", "Отметьте кандидаты, которые нужно утвердить.")
+            return
+
+        self.rules_log.append(f"Файл правил: {rules_path}")
+        self.rules_log.append(f"Добавлено правил/источников: {added}; уже было: {skipped}")
+        QMessageBox.information(
+            self,
+            "Правила сохранены",
+            f"Файл правил:\n{rules_path}\n\nДобавлено: {added}\nУже было: {skipped}",
+        )
 
 
 def main() -> None:

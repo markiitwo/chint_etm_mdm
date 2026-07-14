@@ -209,7 +209,7 @@ def product_value(
             return value, "filled", "product_attribute_values.attribute_name"
         suggestion, source_name = suggested_attribute(product, attr_name, rules_path)
         if suggestion:
-            return suggestion, "suggested", f"product_attribute_values.attribute_name:{source_name}"
+            return suggestion, "filled", f"approved_class_rule:{source_name}"
         return "", "blank", ""
     return "", "blank", ""
 
