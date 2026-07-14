@@ -7,7 +7,8 @@ import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -107,6 +108,12 @@ class MainWindow(QMainWindow):
         self.mapping_review_path_edit = QLineEdit()
         self.coverage_table = QTableWidget(0, 8)
         self.rules_table = QTableWidget(0, 8)
+        self.last_output_path: Path | None = None
+        self.last_report_path: Path | None = None
+        self.last_mapping_report_path: Path | None = None
+        self.open_output_button = QPushButton("Открыть заполненный файл")
+        self.open_report_button = QPushButton("Открыть отчет")
+        self.open_output_dir_button = QPushButton("Открыть папку результата")
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.fill_log = QTextEdit()
@@ -193,8 +200,20 @@ class MainWindow(QMainWindow):
         actions.addWidget(analyze_button)
         actions.addStretch(1)
 
+        result_actions = QHBoxLayout()
+        self.open_output_button.clicked.connect(self.open_last_output)
+        self.open_report_button.clicked.connect(self.open_last_report)
+        self.open_output_dir_button.clicked.connect(self.open_output_dir)
+        self.open_output_button.setEnabled(False)
+        self.open_report_button.setEnabled(False)
+        result_actions.addWidget(self.open_output_button)
+        result_actions.addWidget(self.open_report_button)
+        result_actions.addWidget(self.open_output_dir_button)
+        result_actions.addStretch(1)
+
         layout.addWidget(box)
         layout.addLayout(actions)
+        layout.addLayout(result_actions)
         layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.fill_log, stretch=1)
         return root
@@ -318,6 +337,34 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Выберите папку результата")
         if path:
             self.output_dir_edit.setText(path)
+
+    def open_path(self, path: Path) -> None:
+        if not path.exists():
+            QMessageBox.warning(self, "Файл не найден", f"Не удалось открыть:\n{path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def open_last_output(self) -> None:
+        if self.last_output_path is None:
+            QMessageBox.information(self, "Файл еще не создан", "Сначала выполните заполнение.")
+            return
+        self.open_path(self.last_output_path)
+
+    def open_last_report(self) -> None:
+        report_path = self.last_report_path or self.last_mapping_report_path
+        if report_path is None:
+            QMessageBox.information(self, "Отчет еще не создан", "Сначала выполните заполнение или анализ.")
+            return
+        self.open_path(report_path)
+
+    def open_output_dir(self) -> None:
+        output_text = self.output_dir_edit.text().strip()
+        if not output_text:
+            QMessageBox.information(self, "Папка не выбрана", "Сначала выберите папку результата.")
+            return
+        output_dir = Path(output_text)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self.open_path(output_dir)
 
     def choose_mapping_review(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -445,21 +492,34 @@ class MainWindow(QMainWindow):
         return db_path, template_path, output_dir, rules_path
 
     def on_fill_done(self, result: FillResult) -> None:
+        self.last_output_path = result.output_path
+        self.last_report_path = result.report_path
+        self.open_output_button.setEnabled(True)
+        self.open_report_button.setEnabled(True)
+
+        summary = "\n".join(
+            [
+                f"Заполнено ячеек: {result.filled_cells}",
+                f"Красных ячеек: {result.missing_cells}",
+                f"Артикулов не найдено: {result.missing_articles}",
+                f"Файл: {result.output_path}",
+                f"Отчет: {result.report_path}",
+            ]
+        )
         self.fill_log.append("Готово.")
         self.fill_log.append(f"Строк в шаблоне: {result.total_rows}")
         self.fill_log.append(f"Найдено артикулов: {result.found_articles}")
         self.fill_log.append(f"Не найдено артикулов: {result.missing_articles}")
         self.fill_log.append(f"Заполнено ячеек: {result.filled_cells}")
-        self.fill_log.append(f"Предложений в отчете: {result.suggested_cells}")
+        self.fill_log.append(f"Красных ячеек: {result.missing_cells}")
         self.fill_log.append(f"Файл: {result.output_path}")
         self.fill_log.append(f"Отчет: {result.report_path}")
-        QMessageBox.information(
-            self,
-            "Заполнение завершено",
-            f"Файл:\n{result.output_path}\n\nОтчет:\n{result.report_path}",
-        )
+        QMessageBox.information(self, "Заполнение завершено", summary)
 
     def on_mapping_analysis_done(self, report_path: Path) -> None:
+        self.last_mapping_report_path = report_path
+        self.last_report_path = report_path
+        self.open_report_button.setEnabled(True)
         self.fill_log.append("Анализ маппинга готов.")
         self.fill_log.append(f"Отчет: {report_path}")
         self.mapping_review_path_edit.setText(str(report_path))
