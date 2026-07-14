@@ -35,6 +35,7 @@ DEFAULT_RULES_FALLBACK = {
             "note": "For signal lamps the source attribute is generic color.",
         },
     ],
+    "rejected_class_rules": [],
 }
 
 
@@ -69,8 +70,11 @@ def read_rules_document(rules_path: Path) -> dict:
         raise ValueError("Rules file must contain a JSON object.")
     data.setdefault("version", 1)
     data.setdefault("class_rules", [])
+    data.setdefault("rejected_class_rules", [])
     if not isinstance(data["class_rules"], list):
         raise ValueError("Rules file field class_rules must be a list.")
+    if not isinstance(data["rejected_class_rules"], list):
+        raise ValueError("Rules file field rejected_class_rules must be a list.")
     return data
 
 
@@ -101,6 +105,18 @@ def add_approved_class_rule(
         "confidence": "approved_class_rule",
         "note": note,
     }
+    previous_rejected_count = len(data["rejected_class_rules"])
+    data["rejected_class_rules"] = [
+        item
+        for item in data["rejected_class_rules"]
+        if not (
+            isinstance(item, dict)
+            and str(item.get("class81_code") or "").strip() == class81_code
+            and str(item.get("template_field") or "").strip() == template_field
+            and str(item.get("source_attribute") or "").strip() == source_attribute
+        )
+    ]
+    removed_rejection = len(data["rejected_class_rules"]) != previous_rejected_count
 
     for item in data["class_rules"]:
         if not isinstance(item, dict):
@@ -113,6 +129,8 @@ def add_approved_class_rule(
             continue
         sources = [str(value) for value in item.get("source_attributes", []) if str(value).strip()]
         if source_attribute in sources:
+            if removed_rejection:
+                write_rules_document(rules_path, data)
             return False
         sources.append(source_attribute)
         item["source_attributes"] = list(dict.fromkeys(sources))
@@ -124,6 +142,61 @@ def add_approved_class_rule(
     data["class_rules"].append(new_rule)
     write_rules_document(rules_path, data)
     return True
+
+
+def add_rejected_class_rule(
+    rules_path: Path,
+    class81_code: str,
+    template_field: str,
+    source_attribute: str,
+    note: str = "Rejected in GUI mapping review.",
+) -> bool:
+    class81_code = str(class81_code or "").strip()
+    template_field = str(template_field or "").strip()
+    source_attribute = str(source_attribute or "").strip()
+    if not class81_code or not template_field or not source_attribute:
+        raise ValueError("81 class, template field and source attribute are required.")
+
+    data = read_rules_document(rules_path)
+    rejected_rules = data["rejected_class_rules"]
+    for item in rejected_rules:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("class81_code") or "").strip() != class81_code:
+            continue
+        if str(item.get("template_field") or "").strip() != template_field:
+            continue
+        if str(item.get("source_attribute") or "").strip() == source_attribute:
+            return False
+
+    rejected_rules.append(
+        {
+            "class81_code": class81_code,
+            "template_field": template_field,
+            "source_attribute": source_attribute,
+            "note": note,
+        }
+    )
+    write_rules_document(rules_path, data)
+    return True
+
+
+def rejected_sources_for(
+    class81_code: str, template_field: str, rules_path: Path | None = None
+) -> tuple[str, ...]:
+    data = read_rules_document(rules_path) if rules_path else json.loads(default_rules_text())
+    matches: list[str] = []
+    for item in data.get("rejected_class_rules", []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("class81_code") or "").strip() != class81_code:
+            continue
+        if str(item.get("template_field") or "").strip() != template_field:
+            continue
+        source = str(item.get("source_attribute") or "").strip()
+        if source:
+            matches.append(source)
+    return tuple(dict.fromkeys(matches))
 
 
 @lru_cache(maxsize=32)

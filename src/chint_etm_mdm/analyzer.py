@@ -18,7 +18,15 @@ from .filler import (
     normalize_header,
     product_value,
 )
-from .mapping_rules import rules_for, source_attributes_for
+from .mapping_rules import rejected_sources_for, rules_for, source_attributes_for
+
+
+@dataclass(frozen=True)
+class CandidateDetail:
+    source: str
+    count: int
+    examples: tuple[str, ...]
+    articles: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -33,6 +41,7 @@ class FieldCoverage:
     missing_count: int
     approved_sources: tuple[str, ...]
     candidate_sources: tuple[str, ...]
+    candidate_details: tuple[CandidateDetail, ...]
     note: str
 
 
@@ -101,6 +110,7 @@ def analyze_template_mapping(
                     missing_count=len(class_products),
                     approved_sources=(),
                     candidate_sources=(),
+                    candidate_details=(),
                     note="Поле пока не поддерживается логикой заполнения",
                 )
                 field_examples = []
@@ -127,9 +137,12 @@ def analyze_config_field(
     candidate_count = 0
     missing_count = 0
     candidate_counter: Counter[str] = Counter()
+    candidate_values: dict[str, list[str]] = defaultdict(list)
+    candidate_articles: dict[str, list[str]] = defaultdict(list)
     example_rows: list[list[str | int]] = []
 
     wanted = comparable_text(attr_name)
+    rejected_sources = set(rejected_sources_for(class81_code, field, rules_path))
     for product in products:
         attrs = product.attributes or {}
         if attrs.get(attr_name):
@@ -151,11 +164,19 @@ def analyze_config_field(
             )
             continue
 
-        candidates = find_attribute_candidates(attr_name, attrs)
+        candidates = [
+            candidate
+            for candidate in find_attribute_candidates(attr_name, attrs)
+            if candidate[0] not in rejected_sources
+        ]
         if candidates:
             candidate_count += 1
             source_name, value = candidates[0]
             candidate_counter[source_name] += 1
+            if value not in candidate_values[source_name]:
+                candidate_values[source_name].append(value)
+            if product.article not in candidate_articles[source_name]:
+                candidate_articles[source_name].append(product.article)
             example_rows.append([class81_code, field, source_name, product.article, value, "candidate"])
             continue
 
@@ -165,6 +186,16 @@ def analyze_config_field(
     note = "Есть утвержденное правило для класса" if known_rules else "Требуется подтверждение правила для класса"
     if not wanted:
         note = "Пустое имя Конфиг-поля"
+
+    candidate_details = tuple(
+        CandidateDetail(
+            source=name,
+            count=count,
+            examples=tuple(candidate_values[name][:5]),
+            articles=tuple(candidate_articles[name][:5]),
+        )
+        for name, count in candidate_counter.most_common(8)
+    )
 
     return (
         FieldCoverage(
@@ -177,7 +208,8 @@ def analyze_config_field(
             filled_direct_count=0,
             missing_count=missing_count,
             approved_sources=approved_sources,
-            candidate_sources=tuple(name for name, _ in candidate_counter.most_common(8)),
+            candidate_sources=tuple(item.source for item in candidate_details),
+            candidate_details=candidate_details,
             note=note,
         ),
         example_rows[:50],
@@ -216,6 +248,7 @@ def analyze_direct_field(
             missing_count=missing_count,
             approved_sources=tuple(name for name, _ in sources.most_common(5)),
             candidate_sources=(),
+            candidate_details=(),
             note="Прямое поле базы, не ETIM-маппинг",
         ),
         example_rows[:50],
@@ -297,6 +330,8 @@ def write_mapping_report(
             "Поле шаблона",
             "Кандидат источника",
             "Покрытие кандидата",
+            "Примеры значений",
+            "Примеры артикулов",
             "Действие",
             "JSON для rules",
         ]
@@ -311,16 +346,18 @@ def write_mapping_report(
                     item.field,
                     "; ".join(item.approved_sources),
                     item.approved_rule_count,
+                    "",
+                    "",
                     "уже утверждено",
                     "",
                 ]
             )
             continue
-        for candidate in item.candidate_sources:
+        for candidate in item.candidate_details:
             snippet = {
                 "class81_code": item.class81_code,
                 "template_field": item.field,
-                "source_attributes": [candidate],
+                "source_attributes": [candidate.source],
                 "confidence": "approved_class_rule",
                 "note": "Confirm manually before use.",
             }
@@ -328,8 +365,10 @@ def write_mapping_report(
                 [
                     item.class81_code,
                     item.field,
-                    candidate,
-                    item.candidate_count,
+                    candidate.source,
+                    candidate.count,
+                    "; ".join(candidate.examples),
+                    "; ".join(candidate.articles),
                     "проверить и при подтверждении добавить в rules",
                     json.dumps(snippet, ensure_ascii=False),
                 ]

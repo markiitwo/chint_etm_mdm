@@ -103,20 +103,26 @@ This creates `*_mapping_review_*.xlsx` with class-scoped coverage and candidate
 attributes. Use it to decide which mappings can be safely approved for a class.
 
 In the GUI, open the `Правила маппинга` tab, choose the generated
-`mapping_review.xlsx`, load candidates, tick the mappings you verified, and save
-them. The app writes approved rules to:
+`mapping_review.xlsx`, and load candidates. The table shows the template field,
+the candidate source attribute, sample source values, and how many products this
+candidate can cover. Use `Принять` only when the meaning is correct for that 81
+class. Use `Отклонить` for noisy candidates so they stop appearing in future
+mapping reports. Batch mode is also available through the checkbox column and
+the `Сохранить выбранные правила` / `Отклонить выбранные` buttons.
+
+The app writes approved and rejected class-scoped decisions to:
 
 ```text
 <work-dir>/rules/attribute_mappings.json
 ```
 
-The next fill run uses those approved class rules immediately; rebuilding the
-EXE is not required.
+The next fill run uses approved class rules immediately. Rejected candidates are
+ignored by the next mapping analysis. Rebuilding the EXE is not required.
 
 Report statuses:
 
 - `filled` means the value was written into the template;
-- `filled_suggested` means a close ETIM attribute was found, written into the template, and marked for review;
+- `candidate` means a close ETIM attribute was found for review, but it is not written until approved;
 - `not_found` means the article was not found in the database.
 
 ## Build EXE

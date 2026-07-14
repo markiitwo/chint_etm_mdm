@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -31,7 +32,12 @@ from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, load_config, save_config
 from .db import get_stats
 from .filler import FillResult, fill_template
-from .mapping_rules import add_approved_class_rule, ensure_default_rules, workdir_rules_path
+from .mapping_rules import (
+    add_approved_class_rule,
+    add_rejected_class_rule,
+    ensure_default_rules,
+    workdir_rules_path,
+)
 
 
 class FillWorker(QThread):
@@ -94,7 +100,7 @@ class MainWindow(QMainWindow):
         self.template_path_edit = QLineEdit()
         self.output_dir_edit = QLineEdit(self.default_output_dir())
         self.mapping_review_path_edit = QLineEdit()
-        self.rules_table = QTableWidget(0, 6)
+        self.rules_table = QTableWidget(0, 8)
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.fill_log = QTextEdit()
@@ -204,19 +210,34 @@ class MainWindow(QMainWindow):
         form.addRow("Файл отчета", review_row)
 
         self.rules_table.setHorizontalHeaderLabels(
-            ["Добавить", "81 класс", "Поле шаблона", "Источник", "Покрытие", "Действие"]
+            [
+                "Добавить",
+                "81 класс",
+                "Поле шаблона",
+                "Источник",
+                "Примеры значений",
+                "Товаров",
+                "Принять",
+                "Отклонить",
+            ]
         )
         self.rules_table.setColumnWidth(0, 80)
         self.rules_table.setColumnWidth(1, 100)
-        self.rules_table.setColumnWidth(2, 260)
-        self.rules_table.setColumnWidth(3, 260)
-        self.rules_table.setColumnWidth(4, 90)
-        self.rules_table.setColumnWidth(5, 260)
+        self.rules_table.setColumnWidth(2, 240)
+        self.rules_table.setColumnWidth(3, 220)
+        self.rules_table.setColumnWidth(4, 300)
+        self.rules_table.setColumnWidth(5, 80)
+        self.rules_table.setColumnWidth(6, 100)
+        self.rules_table.setColumnWidth(7, 110)
+        self.rules_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
 
         actions = QHBoxLayout()
         save_rules = QPushButton("Сохранить выбранные правила")
         save_rules.clicked.connect(self.save_selected_rules)
+        reject_rules = QPushButton("Отклонить выбранные")
+        reject_rules.clicked.connect(self.reject_selected_rules)
         actions.addWidget(save_rules)
+        actions.addWidget(reject_rules)
         actions.addStretch(1)
 
         layout.addWidget(box)
@@ -462,13 +483,25 @@ class MainWindow(QMainWindow):
                 row_data["class81_code"],
                 row_data["template_field"],
                 row_data["source_attribute"],
+                row_data["examples"],
                 row_data["coverage"],
-                row_data["action"],
             ]
             for col_idx, value in enumerate(values, start=1):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 self.rules_table.setItem(row_idx, col_idx, item)
+
+            accept_button = QPushButton("Принять")
+            accept_button.clicked.connect(
+                lambda _checked=False, data=dict(row_data): self.save_rule_data(data)
+            )
+            self.rules_table.setCellWidget(row_idx, 6, accept_button)
+
+            reject_button = QPushButton("Отклонить")
+            reject_button.clicked.connect(
+                lambda _checked=False, data=dict(row_data): self.reject_rule_data(data)
+            )
+            self.rules_table.setCellWidget(row_idx, 7, reject_button)
 
         self.rules_log.append(f"Загружено кандидатов: {len(rows)}")
 
@@ -496,6 +529,9 @@ class MainWindow(QMainWindow):
             template_field = str(values[index["Поле шаблона"]] or "").strip()
             source_attribute = str(values[index["Кандидат источника"]] or "").strip()
             coverage = str(values[index["Покрытие кандидата"]] or "").strip()
+            examples = ""
+            if "Примеры значений" in index:
+                examples = str(values[index["Примеры значений"]] or "").strip()
             if not class81_code or not template_field or not source_attribute:
                 continue
             rows.append(
@@ -504,26 +540,92 @@ class MainWindow(QMainWindow):
                     "template_field": template_field,
                     "source_attribute": source_attribute,
                     "coverage": coverage,
+                    "examples": examples,
                     "action": action,
                 }
             )
         return rows
 
-    def save_selected_rules(self) -> None:
+    def rules_path_from_work_dir(self) -> Path | None:
         work_text = self.work_dir_edit.text().strip()
         if not work_text:
             QMessageBox.warning(self, "Нет рабочей папки", "Сначала выберите рабочую папку на вкладке База.")
+            return None
+        return ensure_default_rules(Path(work_text))
+
+    def row_data(self, row_idx: int) -> dict[str, str] | None:
+        check_item = self.rules_table.item(row_idx, 0)
+        if not check_item:
+            return None
+        row_data = check_item.data(Qt.ItemDataRole.UserRole)
+        return row_data if isinstance(row_data, dict) else None
+
+    def remove_matching_rule_row(self, target: dict[str, str]) -> None:
+        for row_idx in range(self.rules_table.rowCount()):
+            row_data = self.row_data(row_idx)
+            if row_data is target or row_data == target:
+                self.rules_table.removeRow(row_idx)
+                return
+
+    def save_rule_data(self, row_data: dict[str, str]) -> bool:
+        rules_path = self.rules_path_from_work_dir()
+        if rules_path is None:
+            return False
+        changed = add_approved_class_rule(
+            rules_path,
+            row_data["class81_code"],
+            row_data["template_field"],
+            row_data["source_attribute"],
+        )
+        status = "добавлено" if changed else "уже было"
+        self.rules_log.append(
+            f"Принято: {row_data['class81_code']} | {row_data['template_field']} <- "
+            f"{row_data['source_attribute']} ({status})"
+        )
+        self.remove_matching_rule_row(row_data)
+        return changed
+
+    def save_rule_from_row(self, row_idx: int) -> bool:
+        row_data = self.row_data(row_idx)
+        return self.save_rule_data(row_data) if row_data is not None else False
+
+    def reject_rule_data(self, row_data: dict[str, str]) -> bool:
+        rules_path = self.rules_path_from_work_dir()
+        if rules_path is None:
+            return False
+        changed = add_rejected_class_rule(
+            rules_path,
+            row_data["class81_code"],
+            row_data["template_field"],
+            row_data["source_attribute"],
+        )
+        status = "добавлено в игнор" if changed else "уже было в игноре"
+        self.rules_log.append(
+            f"Отклонено: {row_data['class81_code']} | {row_data['template_field']} <- "
+            f"{row_data['source_attribute']} ({status})"
+        )
+        self.remove_matching_rule_row(row_data)
+        return changed
+
+    def reject_rule_from_row(self, row_idx: int) -> bool:
+        row_data = self.row_data(row_idx)
+        return self.reject_rule_data(row_data) if row_data is not None else False
+
+    def save_selected_rules(self) -> None:
+        rules_path = self.rules_path_from_work_dir()
+        if rules_path is None:
             return
-        rules_path = ensure_default_rules(Path(work_text))
 
         added = 0
         skipped = 0
         selected = 0
+        selected_rows: list[int] = []
         for row_idx in range(self.rules_table.rowCount()):
             check_item = self.rules_table.item(row_idx, 0)
             if not check_item or check_item.checkState() != Qt.CheckState.Checked:
                 continue
             selected += 1
+            selected_rows.append(row_idx)
             row_data = check_item.data(Qt.ItemDataRole.UserRole)
             if not isinstance(row_data, dict):
                 continue
@@ -544,10 +646,52 @@ class MainWindow(QMainWindow):
 
         self.rules_log.append(f"Файл правил: {rules_path}")
         self.rules_log.append(f"Добавлено правил/источников: {added}; уже было: {skipped}")
+        for row_idx in reversed(selected_rows):
+            self.rules_table.removeRow(row_idx)
         QMessageBox.information(
             self,
             "Правила сохранены",
             f"Файл правил:\n{rules_path}\n\nДобавлено: {added}\nУже было: {skipped}",
+        )
+
+    def reject_selected_rules(self) -> None:
+        rules_path = self.rules_path_from_work_dir()
+        if rules_path is None:
+            return
+
+        rejected = 0
+        skipped = 0
+        selected_rows: list[int] = []
+        for row_idx in range(self.rules_table.rowCount()):
+            check_item = self.rules_table.item(row_idx, 0)
+            if check_item and check_item.checkState() == Qt.CheckState.Checked:
+                selected_rows.append(row_idx)
+
+        if not selected_rows:
+            QMessageBox.information(self, "Ничего не выбрано", "Отметьте кандидаты, которые нужно отклонить.")
+            return
+
+        for row_idx in reversed(selected_rows):
+            row_data = self.row_data(row_idx)
+            if not row_data:
+                continue
+            changed = add_rejected_class_rule(
+                rules_path,
+                row_data["class81_code"],
+                row_data["template_field"],
+                row_data["source_attribute"],
+            )
+            if changed:
+                rejected += 1
+            else:
+                skipped += 1
+            self.rules_table.removeRow(row_idx)
+
+        self.rules_log.append(f"Отклонено кандидатов: {rejected}; уже было в игноре: {skipped}")
+        QMessageBox.information(
+            self,
+            "Кандидаты отклонены",
+            f"Файл правил:\n{rules_path}\n\nОтклонено: {rejected}\nУже было: {skipped}",
         )
 
 
