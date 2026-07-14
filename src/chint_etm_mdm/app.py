@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         self.template_path_edit = QLineEdit()
         self.output_dir_edit = QLineEdit(self.default_output_dir())
         self.mapping_review_path_edit = QLineEdit()
+        self.coverage_table = QTableWidget(0, 8)
         self.rules_table = QTableWidget(0, 8)
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
@@ -209,6 +210,27 @@ class MainWindow(QMainWindow):
         review_row.addWidget(load_review)
         form.addRow("Файл отчета", review_row)
 
+        self.coverage_table.setHorizontalHeaderLabels(
+            [
+                "Статус",
+                "81 класс",
+                "Поле шаблона",
+                "Товаров",
+                "Заполнится",
+                "Нужен маппинг",
+                "К продактам",
+                "Комментарий",
+            ]
+        )
+        self.coverage_table.setColumnWidth(0, 150)
+        self.coverage_table.setColumnWidth(1, 90)
+        self.coverage_table.setColumnWidth(2, 230)
+        self.coverage_table.setColumnWidth(3, 70)
+        self.coverage_table.setColumnWidth(4, 80)
+        self.coverage_table.setColumnWidth(5, 105)
+        self.coverage_table.setColumnWidth(6, 90)
+        self.coverage_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+
         self.rules_table.setHorizontalHeaderLabels(
             [
                 "Добавить",
@@ -241,7 +263,10 @@ class MainWindow(QMainWindow):
         actions.addStretch(1)
 
         layout.addWidget(box)
-        layout.addWidget(self.rules_table, stretch=2)
+        layout.addWidget(QLabel("Покрытие желтых полей"))
+        layout.addWidget(self.coverage_table, stretch=1)
+        layout.addWidget(QLabel("Кандидаты на правила"))
+        layout.addWidget(self.rules_table, stretch=1)
         layout.addLayout(actions)
         layout.addWidget(QLabel("Журнал правил"))
         layout.addWidget(self.rules_log, stretch=1)
@@ -459,10 +484,30 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            coverage_rows = self.read_mapping_review_coverage(review_path)
             rows = self.read_mapping_review_candidates(review_path)
         except Exception as exc:
             QMessageBox.critical(self, "Ошибка чтения отчета", str(exc))
             return
+
+        self.coverage_table.setRowCount(0)
+        for row_data in coverage_rows:
+            row_idx = self.coverage_table.rowCount()
+            self.coverage_table.insertRow(row_idx)
+            values = [
+                row_data["status"],
+                row_data["class81_code"],
+                row_data["template_field"],
+                row_data["products_count"],
+                row_data["will_fill"],
+                row_data["needs_mapping"],
+                row_data["needs_pm"],
+                row_data["note"],
+            ]
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.coverage_table.setItem(row_idx, col_idx, item)
 
         self.rules_table.setRowCount(0)
         for row_data in rows:
@@ -503,7 +548,60 @@ class MainWindow(QMainWindow):
             )
             self.rules_table.setCellWidget(row_idx, 7, reject_button)
 
-        self.rules_log.append(f"Загружено кандидатов: {len(rows)}")
+        pm_count = sum(int(row["needs_pm"] or "0") for row in coverage_rows if str(row["needs_pm"]).isdigit())
+        mapping_count = sum(
+            int(row["needs_mapping"] or "0")
+            for row in coverage_rows
+            if str(row["needs_mapping"]).isdigit()
+        )
+        self.rules_log.append(
+            f"Загружено полей: {len(coverage_rows)}; кандидатов: {len(rows)}; "
+            f"к продактам строк: {pm_count}; нужен маппинг: {mapping_count}"
+        )
+
+    def read_mapping_review_coverage(self, review_path: Path) -> list[dict[str, str]]:
+        workbook = load_workbook(review_path, data_only=True, read_only=True)
+        if "Покрытие" not in workbook.sheetnames:
+            raise ValueError("В отчете нет листа 'Покрытие'. Сначала сделайте анализ маппинга.")
+        sheet = workbook["Покрытие"]
+        header_row = next(sheet.iter_rows(values_only=True), None)
+        if not header_row:
+            raise ValueError("Лист 'Покрытие' пустой.")
+        headers = [str(value or "").strip() for value in header_row]
+        index = {name: idx for idx, name in enumerate(headers)}
+        required = [
+            "81 класс",
+            "Поле шаблона",
+            "Статус",
+            "Товаров",
+            "Заполнится",
+            "Нужен маппинг",
+            "К продактам",
+            "Комментарий",
+        ]
+        missing = [name for name in required if name not in index]
+        if missing:
+            raise ValueError(f"В листе 'Покрытие' нет колонок: {', '.join(missing)}")
+
+        rows: list[dict[str, str]] = []
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            class81_code = str(values[index["81 класс"]] or "").strip()
+            template_field = str(values[index["Поле шаблона"]] or "").strip()
+            if not class81_code and not template_field:
+                continue
+            rows.append(
+                {
+                    "class81_code": class81_code,
+                    "template_field": template_field,
+                    "status": str(values[index["Статус"]] or "").strip(),
+                    "products_count": str(values[index["Товаров"]] or "").strip(),
+                    "will_fill": str(values[index["Заполнится"]] or "").strip(),
+                    "needs_mapping": str(values[index["Нужен маппинг"]] or "").strip(),
+                    "needs_pm": str(values[index["К продактам"]] or "").strip(),
+                    "note": str(values[index["Комментарий"]] or "").strip(),
+                }
+            )
+        return rows
 
     def read_mapping_review_candidates(self, review_path: Path) -> list[dict[str, str]]:
         workbook = load_workbook(review_path, data_only=True, read_only=True)

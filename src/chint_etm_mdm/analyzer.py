@@ -14,6 +14,7 @@ from .filler import (
     find_article_index,
     is_reportable_header,
     is_yellow_header_cell,
+    missing_note,
     normalize_article,
     normalize_header,
     product_value,
@@ -43,6 +44,18 @@ class FieldCoverage:
     candidate_sources: tuple[str, ...]
     candidate_details: tuple[CandidateDetail, ...]
     note: str
+
+
+@dataclass(frozen=True)
+class ArticleIssue:
+    issue_type: str
+    class81_code: str
+    article: str
+    field: str
+    needed: str
+    reason: str
+    source: str = ""
+    value: str = ""
 
 
 def analyze_template_mapping(
@@ -81,6 +94,7 @@ def analyze_template_mapping(
 
     coverages: list[FieldCoverage] = []
     examples: list[list[str | int]] = []
+    article_issues: list[ArticleIssue] = []
 
     yellow_headers = [
         header
@@ -91,11 +105,11 @@ def analyze_template_mapping(
     for class81_code, class_products in sorted(by_class.items()):
         for header in yellow_headers:
             if header.startswith("Конфиг:"):
-                coverage, field_examples = analyze_config_field(
+                coverage, field_examples, field_issues = analyze_config_field(
                     class81_code, header, class_products, rules_path
                 )
             elif is_reportable_header(header):
-                coverage, field_examples = analyze_direct_field(
+                coverage, field_examples, field_issues = analyze_direct_field(
                     class81_code, header, class_products, rules_path
                 )
             else:
@@ -114,13 +128,25 @@ def analyze_template_mapping(
                     note="Поле пока не поддерживается логикой заполнения",
                 )
                 field_examples = []
+                field_issues = [
+                    ArticleIssue(
+                        issue_type="pm",
+                        class81_code=class81_code,
+                        article=product.article,
+                        field=header,
+                        needed=f"Заполнить поле шаблона: {header}",
+                        reason="Поле пока не поддерживается логикой автозаполнения",
+                    )
+                    for product in class_products
+                ]
             coverages.append(coverage)
             examples.extend(field_examples)
+            article_issues.extend(field_issues)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     report_path = output_dir / f"{template_path.stem}_mapping_review_{stamp}.xlsx"
-    write_mapping_report(report_path, coverages, examples)
+    write_mapping_report(report_path, coverages, examples, article_issues)
     return report_path
 
 
@@ -129,7 +155,7 @@ def analyze_config_field(
     field: str,
     products: list[ProductRecord],
     rules_path: Path | None = None,
-) -> tuple[FieldCoverage, list[list[str | int]]]:
+) -> tuple[FieldCoverage, list[list[str | int]], list[ArticleIssue]]:
     attr_name = field.removeprefix("Конфиг:").strip()
     approved_sources = source_attributes_for(class81_code, field, rules_path)
     approved_count = 0
@@ -140,6 +166,7 @@ def analyze_config_field(
     candidate_values: dict[str, list[str]] = defaultdict(list)
     candidate_articles: dict[str, list[str]] = defaultdict(list)
     example_rows: list[list[str | int]] = []
+    article_issues: list[ArticleIssue] = []
 
     wanted = comparable_text(attr_name)
     rejected_sources = set(rejected_sources_for(class81_code, field, rules_path))
@@ -178,9 +205,31 @@ def analyze_config_field(
             if product.article not in candidate_articles[source_name]:
                 candidate_articles[source_name].append(product.article)
             example_rows.append([class81_code, field, source_name, product.article, value, "candidate"])
+            article_issues.append(
+                ArticleIssue(
+                    issue_type="mapping",
+                    class81_code=class81_code,
+                    article=product.article,
+                    field=field,
+                    needed=f"Проверить маппинг для {field}",
+                    reason="Есть похожий атрибут, но он не утвержден для этого 81 класса",
+                    source=source_name,
+                    value=value,
+                )
+            )
             continue
 
         missing_count += 1
+        article_issues.append(
+            ArticleIssue(
+                issue_type="pm",
+                class81_code=class81_code,
+                article=product.article,
+                field=field,
+                needed=f"Заполнить характеристику: {attr_name}",
+                reason="В базе нет точного ETIM-атрибута и нет утвержденного правила для этого класса",
+            )
+        )
 
     known_rules = rules_for(class81_code, field, rules_path)
     note = "Есть утвержденное правило для класса" if known_rules else "Требуется подтверждение правила для класса"
@@ -213,6 +262,7 @@ def analyze_config_field(
             note=note,
         ),
         example_rows[:50],
+        article_issues,
     )
 
 
@@ -221,11 +271,12 @@ def analyze_direct_field(
     field: str,
     products: list[ProductRecord],
     rules_path: Path | None = None,
-) -> tuple[FieldCoverage, list[list[str | int]]]:
+) -> tuple[FieldCoverage, list[list[str | int]], list[ArticleIssue]]:
     filled_count = 0
     missing_count = 0
     sources: Counter[str] = Counter()
     example_rows: list[list[str | int]] = []
+    article_issues: list[ArticleIssue] = []
 
     for product in products:
         value, status, source = product_value(product, field, rules_path)
@@ -235,6 +286,16 @@ def analyze_direct_field(
             example_rows.append([class81_code, field, source, product.article, value, "filled"])
         else:
             missing_count += 1
+            article_issues.append(
+                ArticleIssue(
+                    issue_type="pm",
+                    class81_code=class81_code,
+                    article=product.article,
+                    field=field,
+                    needed=f"Заполнить поле: {field}",
+                    reason=missing_note(field),
+                )
+            )
 
     return (
         FieldCoverage(
@@ -252,6 +313,7 @@ def analyze_direct_field(
             note="Прямое поле базы, не ETIM-маппинг",
         ),
         example_rows[:50],
+        article_issues,
     )
 
 
@@ -280,8 +342,32 @@ def find_attribute_candidates(attr_name: str, attrs: dict[str, str]) -> list[tup
     return [(source_name, value) for _, source_name, value in candidates[:5]]
 
 
+def coverage_status(item: FieldCoverage) -> tuple[str, int, int, int]:
+    will_fill = item.filled_direct_count + item.exact_count + item.approved_rule_count
+    needs_mapping = item.candidate_count
+    needs_pm = item.missing_count
+    if item.products_count == 0:
+        status = "Нет товаров"
+    elif will_fill == item.products_count:
+        status = "Заполнится"
+    elif will_fill == 0 and needs_mapping and not needs_pm:
+        status = "Нужен маппинг"
+    elif will_fill == 0 and needs_pm == item.products_count:
+        status = "Нет данных в базе"
+    elif will_fill > 0 and needs_pm == 0 and needs_mapping:
+        status = "Частично: нужен маппинг"
+    elif will_fill > 0 and needs_pm > 0:
+        status = "Частично заполнится"
+    else:
+        status = "Смешанный статус"
+    return status, will_fill, needs_mapping, needs_pm
+
+
 def write_mapping_report(
-    path: Path, coverages: list[FieldCoverage], examples: list[list[str | int]]
+    path: Path,
+    coverages: list[FieldCoverage],
+    examples: list[list[str | int]],
+    article_issues: list[ArticleIssue],
 ) -> None:
     workbook = Workbook()
     coverage_sheet = workbook.active
@@ -290,7 +376,11 @@ def write_mapping_report(
         [
             "81 класс",
             "Поле шаблона",
+            "Статус",
             "Товаров",
+            "Заполнится",
+            "Нужен маппинг",
+            "К продактам",
             "Прямо заполнится",
             "Точное имя атрибута",
             "Утвержденное правило",
@@ -302,11 +392,16 @@ def write_mapping_report(
         ]
     )
     for item in coverages:
+        status, will_fill, needs_mapping, needs_pm = coverage_status(item)
         coverage_sheet.append(
             [
                 item.class81_code,
                 item.field,
+                status,
                 item.products_count,
+                will_fill,
+                needs_mapping,
+                needs_pm,
                 item.filled_direct_count,
                 item.exact_count,
                 item.approved_rule_count,
@@ -322,6 +417,31 @@ def write_mapping_report(
     examples_sheet.append(["81 класс", "Поле шаблона", "Источник/кандидат", "Артикул", "Значение", "Статус"])
     for row in examples:
         examples_sheet.append(row)
+
+    pm_sheet = workbook.create_sheet("К продактам")
+    pm_sheet.append(["81 класс", "Артикул", "Поле шаблона", "Что нужно заполнить", "Причина"])
+    for item in article_issues:
+        if item.issue_type != "pm":
+            continue
+        pm_sheet.append([item.class81_code, item.article, item.field, item.needed, item.reason])
+
+    mapping_sheet = workbook.create_sheet("Нужен маппинг")
+    mapping_sheet.append(
+        [
+            "81 класс",
+            "Артикул",
+            "Поле шаблона",
+            "Кандидат источника",
+            "Значение",
+            "Причина",
+        ]
+    )
+    for item in article_issues:
+        if item.issue_type != "mapping":
+            continue
+        mapping_sheet.append(
+            [item.class81_code, item.article, item.field, item.source, item.value, item.reason]
+        )
 
     rules_sheet = workbook.create_sheet("Правила")
     rules_sheet.append(
@@ -374,7 +494,7 @@ def write_mapping_report(
                 ]
             )
 
-    for sheet in (coverage_sheet, examples_sheet, rules_sheet):
+    for sheet in (coverage_sheet, examples_sheet, pm_sheet, mapping_sheet, rules_sheet):
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for column_cells in sheet.columns:

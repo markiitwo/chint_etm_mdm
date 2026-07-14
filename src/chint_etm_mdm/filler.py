@@ -257,6 +257,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
     summary = workbook.active
     summary.title = "Итог"
     details = workbook.create_sheet("Детали")
+    product_manager = workbook.create_sheet("К продактам")
 
     summary.append(
         [
@@ -270,6 +271,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
         ]
     )
     details.append(["Строка", "Артикул", "Колонка", "Статус", "Значение", "Источник", "Комментарий"])
+    product_manager.append(["Строка", "Артикул", "Колонка", "Что нужно заполнить", "Причина"])
 
     by_row: dict[tuple[int, str], dict[str, object]] = {}
     for item in rows:
@@ -311,6 +313,9 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
                 item.note,
             ]
         )
+        if item.status in {"missing_value", "not_found"}:
+            needed = f"Заполнить поле: {item.column}" if item.column else "Проверить артикул"
+            product_manager.append([item.row_number, item.article, item.column, needed, item.note])
 
     for (row_number, article), bucket in sorted(by_row.items()):
         notes = bucket["notes"]
@@ -327,7 +332,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
             ]
         )
 
-    for sheet in (summary, details):
+    for sheet in (summary, details, product_manager):
         sheet.freeze_panes = "A2"
         for column_cells in sheet.columns:
             max_len = max(len(str(cell.value or "")) for cell in column_cells)

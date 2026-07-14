@@ -86,7 +86,8 @@ PYTHONPATH=src python -m chint_etm_mdm.cli \
 The command creates:
 
 - a filled copy of the template;
-- an Excel report with summary and detailed action sheets.
+- an Excel report with summary, detailed actions, and a `К продактам`
+  sheet containing unfilled fields by article.
 
 To inspect characteristic coverage without changing a template, run:
 
@@ -103,12 +104,22 @@ This creates `*_mapping_review_*.xlsx` with class-scoped coverage and candidate
 attributes. Use it to decide which mappings can be safely approved for a class.
 
 In the GUI, open the `Правила маппинга` tab, choose the generated
-`mapping_review.xlsx`, and load candidates. The table shows the template field,
-the candidate source attribute, sample source values, and how many products this
-candidate can cover. Use `Принять` only when the meaning is correct for that 81
-class. Use `Отклонить` for noisy candidates so they stop appearing in future
-mapping reports. Batch mode is also available through the checkbox column and
-the `Сохранить выбранные правила` / `Отклонить выбранные` buttons.
+`mapping_review.xlsx`, and load candidates. The upper table shows coverage for
+each yellow field: what will be filled, what needs a mapping decision, and what
+should be sent to product managers. The lower table shows candidate source
+attributes, sample source values, and how many products each candidate can
+cover. Use `Принять` only when the meaning is correct for that 81 class. Use
+`Отклонить` for noisy candidates so they stop appearing in future mapping
+reports. Batch mode is also available through the checkbox column and the
+`Сохранить выбранные правила` / `Отклонить выбранные` buttons.
+
+The mapping review workbook also includes:
+
+- `Покрытие` — field-level status for all yellow columns;
+- `К продактам` — unfilled fields by article, ready to send for enrichment;
+- `Нужен маппинг` — fields that have source candidates but require a human
+  class-scoped mapping decision first;
+- `Правила` — candidates that can be accepted or rejected in the GUI.
 
 The app writes approved and rejected class-scoped decisions to:
 
