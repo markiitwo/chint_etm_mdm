@@ -6,6 +6,8 @@ from pathlib import Path
 from .analyzer import analyze_template_mapping
 from .db import get_stats
 from .etim_importer import (
+    apply_etim_conflict_decisions,
+    decision_result_lines,
     import_etim_workbook,
     restore_database_backup,
     result_lines as etim_result_lines,
@@ -24,6 +26,7 @@ def main() -> None:
     parser.add_argument("--import-price", help="Import a local CHINT price-list XLSX into the database")
     parser.add_argument("--price-url", help="Download and import a CHINT price-list XLSX URL")
     parser.add_argument("--import-etim", help="Import dimensions and attributes from an ETIM XLSX into the database")
+    parser.add_argument("--apply-etim-decisions", help="Apply accepted ETIM conflict decisions from report XLSX")
     parser.add_argument("--restore-backup", help="Restore selected SQLite .bak file over --db")
     parser.add_argument(
         "--find-latest-price",
@@ -52,6 +55,12 @@ def main() -> None:
     if args.import_etim:
         result = import_etim_workbook(Path(args.import_etim), db_path, report_dir=output_dir)
         for line in etim_result_lines(result):
+            print(line)
+        return
+
+    if args.apply_etim_decisions:
+        result = apply_etim_conflict_decisions(Path(args.apply_etim_decisions), db_path)
+        for line in decision_result_lines(result):
             print(line)
         return
 

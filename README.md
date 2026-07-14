@@ -200,6 +200,10 @@ The ETIM flow imports dimensions and source attributes from an ETIM XLSX:
    `Конфликты` sheet shows the article, field, current database value, ETIM
    value, source sheet, and source column so a human can decide whether the
    database should be changed later.
+7. To resolve conflicts, edit the `Решение` dropdown on the `Конфликты` sheet:
+   keep the default `Оставить базу` or choose `Принять ETIM`. Save the report,
+   then click `Применить решения ETIM`. Only rows marked `Принять ETIM` are
+   written to SQLite, and the app creates a fresh `.bak_*` first.
 
 ### Restore from backup
 
@@ -240,6 +244,10 @@ CLI ETIM import and restore are also available:
 PYTHONPATH=src python -m chint_etm_mdm.cli \
   --db /path/to/chint_mdm.sqlite \
   --import-etim /path/to/etim.xlsx
+
+PYTHONPATH=src python -m chint_etm_mdm.cli \
+  --db /path/to/chint_mdm.sqlite \
+  --apply-etim-decisions /path/to/etim_import_report.xlsx
 
 PYTHONPATH=src python -m chint_etm_mdm.cli \
   --db /path/to/chint_mdm.sqlite \

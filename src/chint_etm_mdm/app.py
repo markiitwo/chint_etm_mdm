@@ -35,7 +35,10 @@ from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, load_config, save_config
 from .db import get_stats
 from .etim_importer import (
+    EtimDecisionApplyResult,
     EtimImportResult,
+    apply_etim_conflict_decisions,
+    decision_result_lines,
     import_etim_workbook,
     restore_database_backup,
     result_lines as etim_result_lines,
@@ -181,13 +184,37 @@ class EtimImportWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class EtimDecisionWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, report_path: Path) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.report_path = report_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(apply_etim_conflict_decisions(self.report_path, self.db_path))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("CHINT ETM MDM")
         self.resize(980, 680)
         self.config = load_config()
-        self.worker: FillWorker | AnalyzeWorker | PriceImportWorker | PriceFindWorker | EtimImportWorker | None = None
+        self.worker: (
+            FillWorker
+            | AnalyzeWorker
+            | PriceImportWorker
+            | PriceFindWorker
+            | EtimImportWorker
+            | EtimDecisionWorker
+            | None
+        ) = None
         self.tabs: QTabWidget | None = None
 
         self.work_dir_edit = QLineEdit(self.config.work_dir)
@@ -211,6 +238,7 @@ class MainWindow(QMainWindow):
         self.open_price_file_button = QPushButton("Открыть прайс")
         self.open_etim_file_button = QPushButton("Открыть ETIM")
         self.open_etim_report_button = QPushButton("Открыть отчет ETIM")
+        self.apply_etim_report_button = QPushButton("Применить решения ETIM")
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.fill_log = QTextEdit()
@@ -383,9 +411,11 @@ class MainWindow(QMainWindow):
         self.open_etim_file_button.setEnabled(False)
         self.open_etim_report_button.clicked.connect(self.open_etim_report)
         self.open_etim_report_button.setEnabled(False)
+        self.apply_etim_report_button.clicked.connect(self.apply_etim_decisions)
         actions.addWidget(import_etim)
         actions.addWidget(self.open_etim_file_button)
         actions.addWidget(self.open_etim_report_button)
+        actions.addWidget(self.apply_etim_report_button)
         actions.addStretch(1)
         form.addRow("Действия", actions)
         return box
@@ -589,6 +619,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Отчет еще не создан", "Сначала импортируйте ETIM-файл.")
             return
         self.open_path(self.last_etim_report_path)
+
+    def choose_etim_report_file(self) -> Path | None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите etim_import_report.xlsx",
+            "",
+            "ETIM import report (*.xlsx *.xlsm);;All files (*)",
+        )
+        return Path(path) if path else None
 
     def choose_mapping_review(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -825,6 +864,34 @@ class MainWindow(QMainWindow):
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
+    def apply_etim_decisions(self) -> None:
+        try:
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            report_path = self.last_etim_report_path
+            if report_path is None or not report_path.exists():
+                report_path = self.choose_etim_report_file()
+            if report_path is None:
+                return
+            answer = QMessageBox.question(
+                self,
+                "Применить решения ETIM?",
+                "Программа перезапишет в базе только те строки листа `Конфликты`, "
+                "где в колонке `Решение` выбрано `Принять ETIM`.\n"
+                "Перед записью будет создан бэкап базы.\n\n"
+                f"Отчет:\n{report_path}",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.price_log.append(f"Применяю решения из ETIM-отчета: {report_path}")
+            self.worker = EtimDecisionWorker(db_path, report_path)
+            self.worker.done.connect(self.on_etim_decisions_done)
+            self.worker.failed.connect(self.on_price_import_failed)
+            self.worker.start()
+        except Exception:
+            self.on_price_import_failed(traceback.format_exc())
+
     def validated_paths(self) -> tuple[Path, Path, Path, Path | None] | None:
         db_path = Path(self.db_path_edit.text().strip())
         template_path = Path(self.template_path_edit.text().strip())
@@ -897,11 +964,22 @@ class MainWindow(QMainWindow):
         self.last_etim_report_path = result.report_path
         self.open_etim_file_button.setEnabled(True)
         self.open_etim_report_button.setEnabled(True)
+        self.apply_etim_report_button.setEnabled(True)
         self.price_log.append("Импорт ETIM готов.")
         for line in etim_result_lines(result):
             self.price_log.append(line)
         self.refresh_database_status()
         QMessageBox.information(self, "ETIM импортирован", "\n".join(etim_result_lines(result)))
+
+    def on_etim_decisions_done(self, result: EtimDecisionApplyResult) -> None:
+        self.last_etim_report_path = result.report_path
+        self.open_etim_report_button.setEnabled(True)
+        self.apply_etim_report_button.setEnabled(True)
+        self.price_log.append("Решения ETIM применены.")
+        for line in decision_result_lines(result):
+            self.price_log.append(line)
+        self.refresh_database_status()
+        QMessageBox.information(self, "Решения ETIM применены", "\n".join(decision_result_lines(result)))
 
     def on_price_found(self, price_url: str) -> None:
         self.price_url_edit.setText(price_url)

@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.styles import Font, PatternFill
 
 from .price_importer import backup_database
 
@@ -27,6 +29,13 @@ DIMENSION_EXCLUDE_HINTS = {
 OVERALL_DIMENSION_HINT = "габарит"
 OVERALL_DIMENSION_SECONDARY_HINT = "размер"
 SOURCE_KIND = "etim_manual"
+KEEP_DB_DECISION = "Оставить базу"
+ACCEPT_ETIM_DECISION = "Принять ETIM"
+FIELD_TO_COLUMN = {
+    "Длина, мм": "length_mm",
+    "Ширина, мм": "width_mm",
+    "Высота, мм": "height_mm",
+}
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,15 @@ class EtimImportResult:
     dimension_values_written: int
     dimension_conflicts: int
     attributes_written: int
+
+
+@dataclass(frozen=True)
+class EtimDecisionApplyResult:
+    report_path: Path
+    db_path: Path
+    backup_path: Path
+    accepted_rows: int
+    skipped_rows: int
 
 
 @dataclass(frozen=True)
@@ -420,6 +438,15 @@ def write_etim_report(
     summary.append(["Характеристик записано", result.attributes_written])
     summary.append(["Бэкап базы", str(result.backup_path or "")])
 
+    instruction = workbook.create_sheet("Как разобрать")
+    instruction.append(["Что делать с конфликтами"])
+    instruction.append(["1. Откройте лист 'Конфликты'."])
+    instruction.append(["2. Сравните 'Сейчас в базе' и 'Пришло из ETIM'."])
+    instruction.append(["3. В колонке 'Решение' выберите один вариант из списка."])
+    instruction.append([f"4. '{KEEP_DB_DECISION}' означает: ничего не менять."])
+    instruction.append([f"5. '{ACCEPT_ETIM_DECISION}' означает: перезаписать это поле в базе значением из ETIM."])
+    instruction.append(["6. Сохраните отчет и примените решения в программе."])
+
     new_sheet = workbook.create_sheet("Новые габариты")
     new_sheet.append(["Артикул", "Поле", "Записано из ETIM", "Лист ETIM", "Колонка ETIM", "Действие"])
     for row in new_rows:
@@ -428,6 +455,7 @@ def write_etim_report(
     conflicts = workbook.create_sheet("Конфликты")
     conflicts.append(
         [
+            "Решение",
             "Артикул",
             "Поле",
             "Сейчас в базе",
@@ -440,6 +468,7 @@ def write_etim_report(
     for row in conflict_rows:
         conflicts.append(
             [
+                KEEP_DB_DECISION,
                 row.article,
                 row.field,
                 row.current_value,
@@ -450,7 +479,26 @@ def write_etim_report(
             ]
         )
 
-    for sheet in (summary, new_sheet, conflicts):
+    decision_validation = DataValidation(
+        type="list",
+        formula1=f'"{KEEP_DB_DECISION},{ACCEPT_ETIM_DECISION}"',
+        allow_blank=False,
+    )
+    conflicts.add_data_validation(decision_validation)
+    if conflict_rows:
+        decision_validation.add(f"A2:A{len(conflict_rows) + 1}")
+
+    header_fill = PatternFill(fill_type="solid", fgColor="FFD9EAF7")
+    keep_fill = PatternFill(fill_type="solid", fgColor="FFFFF2CC")
+    accept_fill = PatternFill(fill_type="solid", fgColor="FFD9EAD3")
+    for cell in conflicts[1]:
+        cell.fill = header_fill
+        cell.font = Font(bold=True)
+    for row_index in range(2, len(conflict_rows) + 2):
+        conflicts.cell(row_index, 1).fill = keep_fill
+        conflicts.cell(row_index, 5).fill = accept_fill
+
+    for sheet in (summary, instruction, new_sheet, conflicts):
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for column_cells in sheet.columns:
@@ -621,6 +669,82 @@ def check_sqlite_integrity(db_path: Path) -> None:
         raise ValueError(f"SQLite integrity_check failed for {db_path}: {result}")
 
 
+def parse_float(value: object) -> float | None:
+    text = normalize_text(value).replace(",", ".")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecisionApplyResult:
+    if not report_path.exists():
+        raise FileNotFoundError(f"Отчет ETIM не найден: {report_path}")
+    if not db_path.exists():
+        raise FileNotFoundError(f"База не найдена: {db_path}")
+
+    workbook = load_workbook(report_path, read_only=True, data_only=True)
+    try:
+        if "Конфликты" not in workbook.sheetnames:
+            raise ValueError("В отчете нет листа 'Конфликты'.")
+        sheet = workbook["Конфликты"]
+        rows = list(sheet.iter_rows(values_only=True))
+    finally:
+        workbook.close()
+
+    if not rows:
+        raise ValueError("Лист 'Конфликты' пустой.")
+    headers = [normalize_text(value) for value in rows[0]]
+    required = ["Решение", "Артикул", "Поле", "Пришло из ETIM"]
+    missing = [name for name in required if name not in headers]
+    if missing:
+        raise ValueError(f"В листе 'Конфликты' нет колонок: {', '.join(missing)}")
+    index = {name: headers.index(name) for name in required}
+
+    accepted: list[tuple[str, str, float]] = []
+    skipped_rows = 0
+    for row in rows[1:]:
+        decision = normalize_text(row[index["Решение"]] if index["Решение"] < len(row) else "")
+        if decision != ACCEPT_ETIM_DECISION:
+            skipped_rows += 1
+            continue
+        article = normalize_text(row[index["Артикул"]] if index["Артикул"] < len(row) else "")
+        field = normalize_text(row[index["Поле"]] if index["Поле"] < len(row) else "")
+        value = parse_float(row[index["Пришло из ETIM"]] if index["Пришло из ETIM"] < len(row) else "")
+        column = FIELD_TO_COLUMN.get(field)
+        if not article or not column or value is None:
+            skipped_rows += 1
+            continue
+        accepted.append((article, column, value))
+
+    backup_path = backup_database(db_path)
+    with sqlite3.connect(db_path) as conn:
+        ensure_etim_import_tables(conn)
+        for article, column, value in accepted:
+            conn.execute(
+                f"""
+                INSERT INTO product_dimensions_resolved (article, {column}, dimensions_source, last_resolved_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(article) DO UPDATE SET
+                    {column}=excluded.{column},
+                    dimensions_source=?,
+                    last_resolved_at=CURRENT_TIMESTAMP
+                """,
+                (article, value, SOURCE_KIND, SOURCE_KIND),
+            )
+        conn.commit()
+
+    return EtimDecisionApplyResult(
+        report_path=report_path,
+        db_path=db_path,
+        backup_path=backup_path,
+        accepted_rows=len(accepted),
+        skipped_rows=skipped_rows,
+    )
+
+
 def restore_database_backup(db_path: Path, backup_path: Path) -> Path:
     if not db_path.exists():
         raise FileNotFoundError(f"Текущая база не найдена: {db_path}")
@@ -653,3 +777,13 @@ def result_lines(result: EtimImportResult) -> list[str]:
     if result.backup_path:
         lines.append(f"Бэкап базы: {result.backup_path}")
     return lines
+
+
+def decision_result_lines(result: EtimDecisionApplyResult) -> list[str]:
+    return [
+        f"Отчет ETIM: {result.report_path}",
+        f"База: {result.db_path}",
+        f"Принято ETIM-значений: {result.accepted_rows}",
+        f"Оставлено без изменений: {result.skipped_rows}",
+        f"Бэкап базы: {result.backup_path}",
+    ]
