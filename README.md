@@ -163,20 +163,46 @@ restore and audit.
 
 ## v2 Price Update
 
-The GUI tab `Обновление базы` can update the selected SQLite database from a
-fresh CHINT price-list workbook:
+The GUI tab `Обновление базы` can update the selected SQLite database from
+external workbooks. Every database-changing import creates a timestamped
+`.bak_*` backup first.
+
+### Price-list
+
+The price-list flow updates the selected SQLite database from a fresh CHINT
+price-list workbook:
 
 1. Click `Найти свежий прайс` to find the current low-voltage CHINT price-list
    on `ensmas.ru`, choose a local `Price-list-CHINT_*.xlsx` file, or paste a
    direct URL manually.
 2. Click `Импортировать выбранный XLSX` or `Скачать и импортировать`.
-3. The app creates a timestamped `.bak_*` copy of the SQLite database before
-   writing.
-4. The import updates `products`, writes a new `price_snapshots` row, appends
+3. The import updates `products`, writes a new `price_snapshots` row, appends
    `price_snapshot_items`, and imports the workbook sheets for new products,
    outgoing assortment, and price-change history.
-5. The result window shows imported rows, new articles compared with the
+4. The result window shows imported rows, new articles compared with the
    previous snapshot, changed price rows, total products, and backup path.
+
+### ETIM workbook
+
+The ETIM flow imports dimensions and source attributes from an ETIM XLSX:
+
+1. Choose an ETIM workbook in the `ETIM-файл` block.
+2. Click `Импортировать ETIM`.
+3. The app searches known database articles through all ETIM sheets, similar to
+   the old aggregator's Ctrl+F workflow.
+4. It reads a nearby header row, imports source attributes into
+   `product_attribute_values`, and extracts dimensions from columns such as
+   `Длина`, `Ширина`, `Высота`, or combined values like `22x22x50`.
+5. Empty dimensions in `product_dimensions_resolved` are filled. Existing
+   non-empty dimensions are not overwritten; mismatches are reported as
+   conflicts.
+
+### Restore from backup
+
+On the `База` tab, choose a `.bak_*` file in `Бэкап для отката` and click
+`Откатить базу из бэкапа`. The app checks the selected backup with SQLite
+`integrity_check`, saves a copy of the current database as
+`.before_restore_*`, and then restores the selected backup.
 
 CLI import is also available:
 
@@ -202,6 +228,18 @@ PYTHONPATH=src python -m chint_etm_mdm.cli \
   --db /path/to/chint_mdm.sqlite \
   --find-latest-price \
   --downloads-dir /path/to/work-dir/downloads/price
+```
+
+CLI ETIM import and restore are also available:
+
+```bash
+PYTHONPATH=src python -m chint_etm_mdm.cli \
+  --db /path/to/chint_mdm.sqlite \
+  --import-etim /path/to/etim.xlsx
+
+PYTHONPATH=src python -m chint_etm_mdm.cli \
+  --db /path/to/chint_mdm.sqlite \
+  --restore-backup /path/to/chint_mdm.sqlite.bak_2026-07-14_12-00-00
 ```
 
 ## Build EXE

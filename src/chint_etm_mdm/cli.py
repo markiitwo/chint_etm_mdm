@@ -5,6 +5,11 @@ from pathlib import Path
 
 from .analyzer import analyze_template_mapping
 from .db import get_stats
+from .etim_importer import (
+    import_etim_workbook,
+    restore_database_backup,
+    result_lines as etim_result_lines,
+)
 from .filler import fill_template
 from .price_importer import download_price_file, find_latest_price_url, import_price_workbook, result_lines
 
@@ -18,6 +23,8 @@ def main() -> None:
     parser.add_argument("--stats", action="store_true", help="Print database status before filling")
     parser.add_argument("--import-price", help="Import a local CHINT price-list XLSX into the database")
     parser.add_argument("--price-url", help="Download and import a CHINT price-list XLSX URL")
+    parser.add_argument("--import-etim", help="Import dimensions and attributes from an ETIM XLSX into the database")
+    parser.add_argument("--restore-backup", help="Restore selected SQLite .bak file over --db")
     parser.add_argument(
         "--find-latest-price",
         action="store_true",
@@ -35,6 +42,18 @@ def main() -> None:
     template_path = Path(args.template) if args.template else None
     output_dir = Path(args.output_dir) if args.output_dir else None
     rules_path = Path(args.rules) if args.rules else None
+
+    if args.restore_backup:
+        safety_backup = restore_database_backup(db_path, Path(args.restore_backup))
+        print(f"restored_from={args.restore_backup}")
+        print(f"previous_db_backup={safety_backup}")
+        return
+
+    if args.import_etim:
+        result = import_etim_workbook(Path(args.import_etim), db_path)
+        for line in etim_result_lines(result):
+            print(line)
+        return
 
     if args.import_price or args.price_url or args.find_latest_price:
         price_path = Path(args.import_price) if args.import_price else None

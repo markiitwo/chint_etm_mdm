@@ -34,6 +34,12 @@ from openpyxl import load_workbook
 from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, load_config, save_config
 from .db import get_stats
+from .etim_importer import (
+    EtimImportResult,
+    import_etim_workbook,
+    restore_database_backup,
+    result_lines as etim_result_lines,
+)
 from .filler import FillResult, fill_template
 from .mapping_rules import (
     add_approved_class_rule,
@@ -151,13 +157,29 @@ class PriceFindWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class EtimImportWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, etim_path: Path) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.etim_path = etim_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(import_etim_workbook(self.etim_path, self.db_path, make_backup=True))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("CHINT ETM MDM")
         self.resize(980, 680)
         self.config = load_config()
-        self.worker: FillWorker | AnalyzeWorker | PriceImportWorker | PriceFindWorker | None = None
+        self.worker: FillWorker | AnalyzeWorker | PriceImportWorker | PriceFindWorker | EtimImportWorker | None = None
         self.tabs: QTabWidget | None = None
 
         self.work_dir_edit = QLineEdit(self.config.work_dir)
@@ -167,6 +189,8 @@ class MainWindow(QMainWindow):
         self.mapping_review_path_edit = QLineEdit()
         self.price_file_edit = QLineEdit()
         self.price_url_edit = QLineEdit()
+        self.etim_file_edit = QLineEdit()
+        self.backup_file_edit = QLineEdit()
         self.coverage_table = QTableWidget(0, 8)
         self.rules_table = QTableWidget(0, 8)
         self.last_output_path: Path | None = None
@@ -176,6 +200,7 @@ class MainWindow(QMainWindow):
         self.open_report_button = QPushButton("Открыть отчет")
         self.open_output_dir_button = QPushButton("Открыть папку результата")
         self.open_price_file_button = QPushButton("Открыть прайс")
+        self.open_etim_file_button = QPushButton("Открыть ETIM")
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.fill_log = QTextEdit()
@@ -218,15 +243,24 @@ class MainWindow(QMainWindow):
         choose_db.clicked.connect(self.choose_db)
         form.addWidget(choose_db, 1, 2)
 
+        form.addWidget(QLabel("Бэкап для отката"), 2, 0)
+        form.addWidget(self.backup_file_edit, 2, 1)
+        choose_backup = QPushButton("Выбрать...")
+        choose_backup.clicked.connect(self.choose_backup_file)
+        form.addWidget(choose_backup, 2, 2)
+
         buttons = QHBoxLayout()
         save_button = QPushButton("Сохранить настройки")
         save_button.clicked.connect(self.save_current_config)
         backup_button = QPushButton("Копировать базу в рабочую папку")
         backup_button.clicked.connect(self.copy_db_to_workspace)
+        restore_button = QPushButton("Откатить базу из бэкапа")
+        restore_button.clicked.connect(self.restore_db_from_backup)
         refresh_button = QPushButton("Обновить статус")
         refresh_button.clicked.connect(self.refresh_database_status)
         buttons.addWidget(save_button)
         buttons.addWidget(backup_button)
+        buttons.addWidget(restore_button)
         buttons.addWidget(refresh_button)
 
         layout.addWidget(setup_box)
@@ -316,9 +350,32 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(box)
         layout.addLayout(actions)
+        layout.addWidget(self.build_etim_box())
         layout.addWidget(QLabel("Журнал обновления базы"))
         layout.addWidget(self.price_log, stretch=1)
         return root
+
+    def build_etim_box(self) -> QGroupBox:
+        box = QGroupBox("ETIM-файл")
+        form = QFormLayout(box)
+
+        etim_row = QHBoxLayout()
+        etim_row.addWidget(self.etim_file_edit)
+        choose_etim = QPushButton("Выбрать...")
+        choose_etim.clicked.connect(self.choose_etim_file)
+        etim_row.addWidget(choose_etim)
+        form.addRow("XLSX ETIM", etim_row)
+
+        actions = QHBoxLayout()
+        import_etim = QPushButton("Импортировать ETIM")
+        import_etim.clicked.connect(self.run_etim_import)
+        self.open_etim_file_button.clicked.connect(self.open_etim_file)
+        self.open_etim_file_button.setEnabled(False)
+        actions.addWidget(import_etim)
+        actions.addWidget(self.open_etim_file_button)
+        actions.addStretch(1)
+        form.addRow("Действия", actions)
+        return box
 
     def build_rules_tab(self) -> QWidget:
         root = QWidget()
@@ -451,6 +508,27 @@ class MainWindow(QMainWindow):
             self.price_file_edit.setText(path)
             self.open_price_file_button.setEnabled(True)
 
+    def choose_etim_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите ETIM XLSX",
+            "",
+            "ETIM workbook (*.xlsx *.xlsm);;All files (*)",
+        )
+        if path:
+            self.etim_file_edit.setText(path)
+            self.open_etim_file_button.setEnabled(True)
+
+    def choose_backup_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите бэкап SQLite",
+            "",
+            "SQLite backup (*.bak_* *.sqlite *.sqlite3 *.db);;All files (*)",
+        )
+        if path:
+            self.backup_file_edit.setText(path)
+
     def open_path(self, path: Path) -> None:
         if not path.exists():
             QMessageBox.warning(self, "Файл не найден", f"Не удалось открыть:\n{path}")
@@ -485,6 +563,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Прайс не выбран", "Сначала выберите или скачайте прайс.")
             return
         self.open_path(Path(price_text))
+
+    def open_etim_file(self) -> None:
+        etim_text = self.etim_file_edit.text().strip()
+        if not etim_text:
+            QMessageBox.information(self, "ETIM не выбран", "Сначала выберите ETIM-файл.")
+            return
+        self.open_path(Path(etim_text))
 
     def choose_mapping_review(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -524,6 +609,41 @@ class MainWindow(QMainWindow):
         self.save_current_config()
         self.refresh_database_status()
         QMessageBox.information(self, "Готово", f"База скопирована:\n{target}")
+
+    def restore_db_from_backup(self) -> None:
+        db_path = self.validated_db_path()
+        if db_path is None:
+            return
+        backup_text = self.backup_file_edit.text().strip()
+        if not backup_text:
+            QMessageBox.warning(self, "Бэкап не выбран", "Выберите файл бэкапа `.bak_*`.")
+            return
+        backup_path = Path(backup_text)
+        if not backup_path.exists():
+            QMessageBox.warning(self, "Бэкап не найден", "Выберите существующий файл бэкапа.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Откатить базу?",
+            "Текущая SQLite-база будет заменена выбранным бэкапом.\n"
+            "Перед заменой программа сохранит копию текущей базы рядом с ней.\n\n"
+            f"База:\n{db_path}\n\nБэкап:\n{backup_path}",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            safety_backup = restore_database_backup(db_path, backup_path)
+        except Exception:
+            self.on_price_import_failed(traceback.format_exc())
+            return
+        self.price_log.append(f"База восстановлена из бэкапа: {backup_path}")
+        self.price_log.append(f"Копия базы до отката: {safety_backup}")
+        self.refresh_database_status()
+        QMessageBox.information(
+            self,
+            "База восстановлена",
+            f"Восстановлено из:\n{backup_path}\n\nКопия базы до отката:\n{safety_backup}",
+        )
 
     def refresh_database_status(self) -> None:
         db_text = self.db_path_edit.text().strip()
@@ -656,6 +776,27 @@ class MainWindow(QMainWindow):
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
+    def run_etim_import(self) -> None:
+        try:
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            etim_text = self.etim_file_edit.text().strip()
+            if not etim_text:
+                QMessageBox.warning(self, "ETIM не выбран", "Выберите XLSX ETIM-файл.")
+                return
+            etim_path = Path(etim_text)
+            if not etim_path.exists():
+                QMessageBox.warning(self, "ETIM не найден", "Выберите существующий XLSX ETIM-файл.")
+                return
+            self.price_log.append("Импортирую ETIM-файл...")
+            self.worker = EtimImportWorker(db_path, etim_path)
+            self.worker.done.connect(self.on_etim_import_done)
+            self.worker.failed.connect(self.on_price_import_failed)
+            self.worker.start()
+        except Exception:
+            self.on_price_import_failed(traceback.format_exc())
+
     def validated_paths(self) -> tuple[Path, Path, Path, Path | None] | None:
         db_path = Path(self.db_path_edit.text().strip())
         template_path = Path(self.template_path_edit.text().strip())
@@ -722,6 +863,15 @@ class MainWindow(QMainWindow):
             self.price_log.append(line)
         self.refresh_database_status()
         QMessageBox.information(self, "Прайс импортирован", "\n".join(result_lines(result)))
+
+    def on_etim_import_done(self, result: EtimImportResult) -> None:
+        self.etim_file_edit.setText(str(result.etim_file))
+        self.open_etim_file_button.setEnabled(True)
+        self.price_log.append("Импорт ETIM готов.")
+        for line in etim_result_lines(result):
+            self.price_log.append(line)
+        self.refresh_database_status()
+        QMessageBox.information(self, "ETIM импортирован", "\n".join(etim_result_lines(result)))
 
     def on_price_found(self, price_url: str) -> None:
         self.price_url_edit.setText(price_url)
