@@ -84,6 +84,7 @@ class FillResult:
     found_articles: int
     filled_cells: int
     suggested_cells: int
+    missing_cells: int
     missing_articles: int
 
 
@@ -566,6 +567,7 @@ def fill_csv_template(
     report: list[FillReportRow] = []
     filled_cells = 0
     suggested_cells = 0
+    missing_cells = 0
 
     for row_number, row in enumerate(reader[1:], start=2):
         while len(row) < len(headers):
@@ -603,6 +605,7 @@ def fill_csv_template(
                     )
                 )
             elif status in {"blank", "filled"} and is_reportable_header(header):
+                missing_cells += 1
                 report.append(
                     FillReportRow(
                         row_number,
@@ -630,6 +633,7 @@ def fill_csv_template(
         found,
         filled_cells,
         suggested_cells,
+        missing_cells,
         len(unique_articles) - found,
     )
 
@@ -660,6 +664,7 @@ def fill_xlsx_template(
     report: list[FillReportRow] = []
     filled_cells = 0
     suggested_cells = 0
+    missing_cells = 0
 
     for row_number, row in enumerate(sheet.iter_rows(min_row=2), start=2):
         article = normalize_article(row[article_idx].value if article_idx < len(row) else "")
@@ -671,6 +676,8 @@ def fill_xlsx_template(
             for col_idx in fillable_columns:
                 if col_idx != article_idx and col_idx < len(row):
                     mark_missing_cell(row[col_idx])
+                    if is_reportable_header(headers[col_idx]):
+                        missing_cells += 1
             continue
         if class_idx is not None and class_idx < len(row):
             product = product_with_template_class(
@@ -702,6 +709,7 @@ def fill_xlsx_template(
                     )
                 )
             elif status in {"blank", "filled"} and is_reportable_header(header):
+                missing_cells += 1
                 mark_missing_cell(row[col_idx])
                 report.append(
                     FillReportRow(
@@ -729,5 +737,6 @@ def fill_xlsx_template(
         found_articles=found,
         filled_cells=filled_cells,
         suggested_cells=suggested_cells,
+        missing_cells=missing_cells,
         missing_articles=len(unique_articles) - found,
     )
