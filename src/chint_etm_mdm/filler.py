@@ -278,6 +278,8 @@ def source_label(source: str) -> str:
         return "Сформировано программой"
     if source.startswith("approved_class_rule:"):
         return f"Выбранный источник: {source.split(':', 1)[1]}"
+    if source == "manual_completion":
+        return "Ручное дозаполнение"
     if "attribute" in source:
         return "Характеристика товара в базе"
     if "article" in source:
@@ -530,19 +532,29 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
 
 
 def fill_template(
-    db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None = None
+    db_path: Path,
+    template_path: Path,
+    output_dir: Path,
+    rules_path: Path | None = None,
+    manual_values_path: Path | None = None,
 ) -> FillResult:
     suffix = template_path.suffix.lower()
     if suffix == ".csv":
-        return fill_csv_template(db_path, template_path, output_dir, rules_path)
+        return fill_csv_template(db_path, template_path, output_dir, rules_path, manual_values_path)
     if suffix in {".xlsx", ".xlsm"}:
-        return fill_xlsx_template(db_path, template_path, output_dir, rules_path)
+        return fill_xlsx_template(db_path, template_path, output_dir, rules_path, manual_values_path)
     raise ValueError("Поддерживаются только CSV, XLSX и XLSM шаблоны.")
 
 
 def fill_csv_template(
-    db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None = None
+    db_path: Path,
+    template_path: Path,
+    output_dir: Path,
+    rules_path: Path | None = None,
+    manual_values_path: Path | None = None,
 ) -> FillResult:
+    from .manual_values import load_manual_values
+
     with template_path.open("r", newline="", encoding="utf-8-sig") as fh:
         sample = fh.read(4096)
         fh.seek(0)
@@ -564,6 +576,7 @@ def fill_csv_template(
 
     articles = [normalize_article(row[article_idx]) for row in reader[1:] if len(row) > article_idx]
     products = fetch_products(db_path, articles)
+    manual_values = load_manual_values(manual_values_path)
     report: list[FillReportRow] = []
     filled_cells = 0
     suggested_cells = 0
@@ -584,7 +597,11 @@ def fill_csv_template(
         for col_idx, header in enumerate(headers):
             if header == "Артикул":
                 continue
-            value, status, source = product_value(product, header, rules_path)
+            manual_value = manual_values.get((article, header), "")
+            if manual_value:
+                value, status, source = manual_value, "filled", "manual_completion"
+            else:
+                value, status, source = product_value(product, header, rules_path)
             if status == "filled" and value:
                 row[col_idx] = value
                 filled_cells += 1
@@ -639,8 +656,14 @@ def fill_csv_template(
 
 
 def fill_xlsx_template(
-    db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None = None
+    db_path: Path,
+    template_path: Path,
+    output_dir: Path,
+    rules_path: Path | None = None,
+    manual_values_path: Path | None = None,
 ) -> FillResult:
+    from .manual_values import load_manual_values
+
     workbook = load_workbook(template_path)
     sheet = workbook.active
     header_cells = list(sheet[1])
@@ -661,6 +684,7 @@ def fill_xlsx_template(
             articles.append(normalize_article(row[article_idx].value))
 
     products = fetch_products(db_path, articles)
+    manual_values = load_manual_values(manual_values_path)
     report: list[FillReportRow] = []
     filled_cells = 0
     suggested_cells = 0
@@ -688,7 +712,11 @@ def fill_xlsx_template(
                 continue
             if col_idx not in fillable_columns:
                 continue
-            value, status, source = product_value(product, header, rules_path)
+            manual_value = manual_values.get((article, header), "")
+            if manual_value:
+                value, status, source = manual_value, "filled", "manual_completion"
+            else:
+                value, status, source = product_value(product, header, rules_path)
             if status == "filled" and value:
                 row[col_idx].value = value
                 filled_cells += 1

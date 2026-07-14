@@ -13,6 +13,10 @@ from .etim_importer import (
     result_lines as etim_result_lines,
 )
 from .filler import fill_template
+from .manual_values import (
+    import_manual_completions,
+    result_lines as manual_result_lines,
+)
 from .price_importer import download_price_file, find_latest_price_url, import_price_workbook, result_lines
 
 
@@ -22,11 +26,13 @@ def main() -> None:
     parser.add_argument("--template", help="Path to upload_goods CSV/XLSX template")
     parser.add_argument("--output-dir", help="Directory for filled file and report")
     parser.add_argument("--rules", help="Optional path to attribute_mappings.json")
+    parser.add_argument("--manual-values", help="Optional path to manual_values.json")
     parser.add_argument("--stats", action="store_true", help="Print database status before filling")
     parser.add_argument("--import-price", help="Import a local CHINT price-list XLSX into the database")
     parser.add_argument("--price-url", help="Download and import a CHINT price-list XLSX URL")
     parser.add_argument("--import-etim", help="Import dimensions and attributes from an ETIM XLSX into the database")
     parser.add_argument("--apply-etim-decisions", help="Apply accepted ETIM conflict decisions from report XLSX")
+    parser.add_argument("--import-manual-filled", help="Import manual completions from a filled upload_goods XLSX")
     parser.add_argument("--restore-backup", help="Restore selected SQLite .bak file over --db")
     parser.add_argument(
         "--find-latest-price",
@@ -45,6 +51,7 @@ def main() -> None:
     template_path = Path(args.template) if args.template else None
     output_dir = Path(args.output_dir) if args.output_dir else None
     rules_path = Path(args.rules) if args.rules else None
+    manual_values_file = Path(args.manual_values) if args.manual_values else None
 
     if args.restore_backup:
         safety_backup = restore_database_backup(db_path, Path(args.restore_backup))
@@ -55,6 +62,22 @@ def main() -> None:
     if args.import_etim:
         result = import_etim_workbook(Path(args.import_etim), db_path, report_dir=output_dir)
         for line in etim_result_lines(result):
+            print(line)
+        return
+
+    if args.import_manual_filled:
+        if output_dir is None:
+            parser.error("--output-dir is required for --import-manual-filled")
+        if manual_values_file is None:
+            parser.error("--manual-values is required for --import-manual-filled")
+        result = import_manual_completions(
+            db_path,
+            Path(args.import_manual_filled),
+            manual_values_file,
+            output_dir,
+            rules_path,
+        )
+        for line in manual_result_lines(result):
             print(line)
         return
 
@@ -99,7 +122,7 @@ def main() -> None:
 
     if template_path is None or output_dir is None:
         parser.error("--template and --output-dir are required for filling")
-    result = fill_template(db_path, template_path, output_dir, rules_path)
+    result = fill_template(db_path, template_path, output_dir, rules_path, manual_values_file)
     print(f"output={result.output_path}")
     print(f"report={result.report_path}")
     print(f"rows={result.total_rows}")

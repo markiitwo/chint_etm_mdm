@@ -50,6 +50,12 @@ from .mapping_rules import (
     ensure_default_rules,
     workdir_rules_path,
 )
+from .manual_values import (
+    ManualImportResult,
+    import_manual_completions,
+    manual_values_path,
+    result_lines as manual_result_lines,
+)
 from .price_importer import (
     DEFAULT_PRICE_SOURCE_URL,
     PriceImportResult,
@@ -68,18 +74,30 @@ class FillWorker(QThread):
     failed = Signal(str)
 
     def __init__(
-        self, db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None
+        self,
+        db_path: Path,
+        template_path: Path,
+        output_dir: Path,
+        rules_path: Path | None,
+        manual_values_file: Path | None,
     ) -> None:
         super().__init__()
         self.db_path = db_path
         self.template_path = template_path
         self.output_dir = output_dir
         self.rules_path = rules_path
+        self.manual_values_file = manual_values_file
 
     def run(self) -> None:
         try:
             self.done.emit(
-                fill_template(self.db_path, self.template_path, self.output_dir, self.rules_path)
+                fill_template(
+                    self.db_path,
+                    self.template_path,
+                    self.output_dir,
+                    self.rules_path,
+                    self.manual_values_file,
+                )
             )
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -103,6 +121,40 @@ class AnalyzeWorker(QThread):
             self.done.emit(
                 analyze_template_mapping(
                     self.db_path, self.template_path, self.output_dir, self.rules_path
+                )
+            )
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class ManualImportWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        db_path: Path,
+        filled_path: Path,
+        values_path: Path,
+        output_dir: Path,
+        rules_path: Path | None,
+    ) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.filled_path = filled_path
+        self.values_path = values_path
+        self.output_dir = output_dir
+        self.rules_path = rules_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(
+                import_manual_completions(
+                    self.db_path,
+                    self.filled_path,
+                    self.values_path,
+                    self.output_dir,
+                    self.rules_path,
                 )
             )
         except Exception:
@@ -209,6 +261,7 @@ class MainWindow(QMainWindow):
         self.worker: (
             FillWorker
             | AnalyzeWorker
+            | ManualImportWorker
             | PriceImportWorker
             | PriceFindWorker
             | EtimImportWorker
@@ -222,6 +275,7 @@ class MainWindow(QMainWindow):
         self.template_path_edit = QLineEdit()
         self.output_dir_edit = QLineEdit(self.default_output_dir())
         self.mapping_review_path_edit = QLineEdit()
+        self.manual_filled_path_edit = QLineEdit()
         self.price_file_edit = QLineEdit()
         self.price_url_edit = QLineEdit()
         self.etim_file_edit = QLineEdit()
@@ -232,8 +286,10 @@ class MainWindow(QMainWindow):
         self.last_report_path: Path | None = None
         self.last_mapping_report_path: Path | None = None
         self.last_etim_report_path: Path | None = None
+        self.last_manual_report_path: Path | None = None
         self.open_output_button = QPushButton("Открыть заполненный файл")
         self.open_report_button = QPushButton("Открыть отчет")
+        self.open_manual_report_button = QPushButton("Открыть отчет ручных правок")
         self.open_output_dir_button = QPushButton("Открыть папку результата")
         self.open_price_file_button = QPushButton("Открыть прайс")
         self.open_etim_file_button = QPushButton("Открыть ETIM")
@@ -351,9 +407,32 @@ class MainWindow(QMainWindow):
         layout.addWidget(box)
         layout.addLayout(actions)
         layout.addLayout(result_actions)
+        layout.addWidget(self.build_manual_import_box())
         layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.fill_log, stretch=1)
         return root
+
+    def build_manual_import_box(self) -> QGroupBox:
+        box = QGroupBox("Ручные дозаполнения")
+        form = QFormLayout(box)
+
+        filled_row = QHBoxLayout()
+        filled_row.addWidget(self.manual_filled_path_edit)
+        choose_filled = QPushButton("Выбрать...")
+        choose_filled.clicked.connect(self.choose_manual_filled_file)
+        filled_row.addWidget(choose_filled)
+        form.addRow("Дозаполненный _filled.xlsx", filled_row)
+
+        actions = QHBoxLayout()
+        import_button = QPushButton("Импортировать ручные значения")
+        import_button.clicked.connect(self.run_manual_import)
+        self.open_manual_report_button.clicked.connect(self.open_manual_report)
+        self.open_manual_report_button.setEnabled(False)
+        actions.addWidget(import_button)
+        actions.addWidget(self.open_manual_report_button)
+        actions.addStretch(1)
+        form.addRow("Действия", actions)
+        return box
 
     def build_price_tab(self) -> QWidget:
         root = QWidget()
@@ -540,6 +619,16 @@ class MainWindow(QMainWindow):
         if path:
             self.output_dir_edit.setText(path)
 
+    def choose_manual_filled_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите дозаполненный _filled.xlsx",
+            "",
+            "Filled upload_goods (*.xlsx *.xlsm);;All files (*)",
+        )
+        if path:
+            self.manual_filled_path_edit.setText(path)
+
     def choose_price_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -590,6 +679,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Отчет еще не создан", "Сначала выполните заполнение или анализ.")
             return
         self.open_path(report_path)
+
+    def open_manual_report(self) -> None:
+        if self.last_manual_report_path is None:
+            QMessageBox.information(self, "Отчет еще не создан", "Сначала импортируйте ручные дозаполнения.")
+            return
+        self.open_path(self.last_manual_report_path)
 
     def open_output_dir(self) -> None:
         output_text = self.output_dir_edit.text().strip()
@@ -745,12 +840,56 @@ class MainWindow(QMainWindow):
             db_path, template_path, output_dir, rules_path = paths
 
             self.fill_log.append("Запуск заполнения...")
-            self.worker = FillWorker(db_path, template_path, output_dir, rules_path)
+            self.worker = FillWorker(
+                db_path,
+                template_path,
+                output_dir,
+                rules_path,
+                self.current_manual_values_path(),
+            )
             self.worker.done.connect(self.on_fill_done)
             self.worker.failed.connect(self.on_fill_failed)
             self.worker.start()
         except Exception:
             self.on_action_failed(traceback.format_exc())
+
+    def run_manual_import(self) -> None:
+        try:
+            self.save_current_config()
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            output_text = self.output_dir_edit.text().strip()
+            if not output_text:
+                QMessageBox.warning(self, "Нет папки результата", "Выберите папку результата.")
+                return
+            manual_path = self.current_manual_values_path()
+            if manual_path is None:
+                QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку.")
+                return
+            filled_text = self.manual_filled_path_edit.text().strip()
+            if not filled_text:
+                QMessageBox.warning(self, "Файл не выбран", "Выберите вручную дозаполненный _filled.xlsx.")
+                return
+            filled_path = Path(filled_text)
+            if not filled_path.exists():
+                QMessageBox.warning(self, "Файл не найден", "Выберите существующий _filled.xlsx.")
+                return
+            work_text = self.work_dir_edit.text().strip()
+            rules_path = ensure_default_rules(Path(work_text)) if work_text else None
+            self.fill_log.append("Импортирую ручные дозаполнения...")
+            self.worker = ManualImportWorker(
+                db_path,
+                filled_path,
+                manual_path,
+                Path(output_text),
+                rules_path,
+            )
+            self.worker.done.connect(self.on_manual_import_done)
+            self.worker.failed.connect(self.on_fill_failed)
+            self.worker.start()
+        except Exception:
+            self.on_fill_failed(traceback.format_exc())
 
     def run_mapping_analysis(self) -> None:
         try:
@@ -785,6 +924,14 @@ class MainWindow(QMainWindow):
         if output_text:
             return Path(output_text)
         return Path.cwd() / "reports"
+
+    def current_manual_values_path(self) -> Path | None:
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            return None
+        path = manual_values_path(Path(work_text))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
     def validated_db_path(self) -> Path | None:
         self.save_current_config()
@@ -937,6 +1084,17 @@ class MainWindow(QMainWindow):
         self.fill_log.append(f"Файл: {result.output_path}")
         self.fill_log.append(f"Отчет: {result.report_path}")
         QMessageBox.information(self, "Заполнение завершено", summary)
+
+    def on_manual_import_done(self, result: ManualImportResult) -> None:
+        self.last_manual_report_path = result.report_path
+        self.open_manual_report_button.setEnabled(True)
+        for line in manual_result_lines(result):
+            self.fill_log.append(line)
+        QMessageBox.information(
+            self,
+            "Ручные значения сохранены",
+            "\n".join(manual_result_lines(result)),
+        )
 
     def on_mapping_analysis_done(self, report_path: Path) -> None:
         self.last_mapping_report_path = report_path
