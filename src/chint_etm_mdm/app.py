@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 import traceback
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -38,6 +40,9 @@ from .mapping_rules import (
     ensure_default_rules,
     workdir_rules_path,
 )
+
+
+CATEGORY_FROM_FILENAME_RE = re.compile(r"(?:category_template|template)_(\d{4,})", re.IGNORECASE)
 
 
 class FillWorker(QThread):
@@ -558,6 +563,16 @@ class MainWindow(QMainWindow):
             f"Загружено полей: {len(coverage_rows)}; кандидатов: {len(rows)}; "
             f"к продактам строк: {pm_count}; нужен выбор источника: {mapping_count}"
         )
+        if mapping_count and not rows:
+            self.rules_log.append(
+                "Есть строки, где нужен выбор источника, но кандидаты не найдены. "
+                "Скорее всего, в отчете не указана категория товара. "
+                "Пересоздайте анализ маппинга на новой версии программы."
+            )
+
+    def infer_category_from_review_path(self, review_path: Path) -> str:
+        match = CATEGORY_FROM_FILENAME_RE.search(review_path.name)
+        return match.group(1) if match else ""
 
     def read_mapping_review_coverage(self, review_path: Path) -> list[dict[str, str]]:
         workbook = load_workbook(review_path, data_only=True, read_only=True)
@@ -587,6 +602,8 @@ class MainWindow(QMainWindow):
         rows: list[dict[str, str]] = []
         for values in sheet.iter_rows(min_row=2, values_only=True):
             class81_code = str(values[index[category_column]] or "").strip()
+            if not class81_code:
+                class81_code = self.infer_category_from_review_path(review_path)
             template_field = str(values[index["Поле шаблона"]] or "").strip()
             if not class81_code and not template_field:
                 continue
@@ -627,6 +644,8 @@ class MainWindow(QMainWindow):
             if "уже утверждено" in action.lower():
                 continue
             class81_code = str(values[index["81 класс"]] or "").strip()
+            if not class81_code:
+                class81_code = self.infer_category_from_review_path(review_path)
             template_field = str(values[index["Поле шаблона"]] or "").strip()
             source_attribute = str(values[index["Кандидат источника"]] or "").strip()
             coverage = str(values[index["Покрытие кандидата"]] or "").strip()
@@ -643,6 +662,58 @@ class MainWindow(QMainWindow):
                     "coverage": coverage,
                     "examples": examples,
                     "action": action,
+                }
+            )
+        if rows:
+            return rows
+        return self.read_mapping_review_candidates_from_source_choice(workbook, review_path)
+
+    def read_mapping_review_candidates_from_source_choice(
+        self, workbook, review_path: Path
+    ) -> list[dict[str, str]]:
+        if "Выбор источника" not in workbook.sheetnames:
+            return []
+        sheet = workbook["Выбор источника"]
+        header_row = next(sheet.iter_rows(values_only=True), None)
+        if not header_row:
+            return []
+        headers = [str(value or "").strip() for value in header_row]
+        index = {name: idx for idx, name in enumerate(headers)}
+        category_column = "Категория" if "Категория" in index else "81 класс"
+        required = [category_column, "Поле шаблона", "Возможный источник", "Значение", "Артикул"]
+        if any(name not in index for name in required):
+            return []
+
+        counts: Counter[tuple[str, str, str]] = Counter()
+        examples: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+        articles: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            class81_code = str(values[index[category_column]] or "").strip()
+            if not class81_code:
+                class81_code = self.infer_category_from_review_path(review_path)
+            template_field = str(values[index["Поле шаблона"]] or "").strip()
+            source_attribute = str(values[index["Возможный источник"]] or "").strip()
+            value = str(values[index["Значение"]] or "").strip()
+            article = str(values[index["Артикул"]] or "").strip()
+            if not class81_code or not template_field or not source_attribute:
+                continue
+            key = (class81_code, template_field, source_attribute)
+            counts[key] += 1
+            if value and value not in examples[key]:
+                examples[key].append(value)
+            if article and article not in articles[key]:
+                articles[key].append(article)
+
+        rows: list[dict[str, str]] = []
+        for (class81_code, template_field, source_attribute), count in counts.most_common():
+            rows.append(
+                {
+                    "class81_code": class81_code,
+                    "template_field": template_field,
+                    "source_attribute": source_attribute,
+                    "coverage": str(count),
+                    "examples": "; ".join(examples[(class81_code, template_field, source_attribute)][:5]),
+                    "action": "собрано из листа Выбор источника",
                 }
             )
         return rows
