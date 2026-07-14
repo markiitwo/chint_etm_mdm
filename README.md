@@ -196,6 +196,10 @@ The ETIM flow imports dimensions and source attributes from an ETIM XLSX:
 5. Empty dimensions in `product_dimensions_resolved` are filled. Existing
    non-empty dimensions are not overwritten; mismatches are reported as
    conflicts.
+6. The app writes `etim_import_report_*.xlsx` to the reports folder. The
+   `Конфликты` sheet shows the article, field, current database value, ETIM
+   value, source sheet, and source column so a human can decide whether the
+   database should be changed later.
 
 ### Restore from backup
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from .price_importer import backup_database
 
@@ -43,6 +43,7 @@ class EtimArticleData:
 class EtimImportResult:
     etim_file: Path
     db_path: Path
+    report_path: Path
     backup_path: Path | None
     import_id: int
     scanned_articles: int
@@ -51,6 +52,18 @@ class EtimImportResult:
     dimension_values_written: int
     dimension_conflicts: int
     attributes_written: int
+
+
+@dataclass(frozen=True)
+class DimensionReportRow:
+    row_type: str
+    article: str
+    field: str
+    current_value: str
+    etim_value: str
+    source_sheet: str
+    source_field: str
+    action: str
 
 
 def normalize_text(value: object) -> str:
@@ -314,11 +327,31 @@ def fetch_all_articles(conn: sqlite3.Connection) -> list[str]:
     ]
 
 
-def count_written_and_conflicts(
+def dimension_label(key: str) -> str:
+    labels = {
+        "length_mm": "Длина, мм",
+        "width_mm": "Ширина, мм",
+        "height_mm": "Высота, мм",
+    }
+    return labels.get(key, key)
+
+
+def format_mm(value: object) -> str:
+    if value is None or value == "":
+        return ""
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.3f}".rstrip("0").rstrip(".")
+
+
+def build_dimension_report_rows(
     conn: sqlite3.Connection, article_data: dict[str, EtimArticleData]
-) -> tuple[int, int]:
+) -> tuple[int, int, list[DimensionReportRow], list[DimensionReportRow]]:
     written = 0
     conflicts = 0
+    new_rows: list[DimensionReportRow] = []
+    conflict_rows: list[DimensionReportRow] = []
     for data in article_data.values():
         if not data.dimensions:
             continue
@@ -333,11 +366,98 @@ def count_written_and_conflicts(
         existing = dict(row) if row else {}
         for key, value in data.dimensions.items():
             current = existing.get(key)
+            source_field = data.dimension_sources.get(key, "")
             if current is None:
                 written += 1
+                new_rows.append(
+                    DimensionReportRow(
+                        row_type="new",
+                        article=data.article,
+                        field=dimension_label(key),
+                        current_value="",
+                        etim_value=format_mm(value),
+                        source_sheet=data.sheet_name,
+                        source_field=source_field,
+                        action="Будет записано в базу",
+                    )
+                )
             elif abs(float(current) - float(value)) > 0.001:
                 conflicts += 1
-    return written, conflicts
+                conflict_rows.append(
+                    DimensionReportRow(
+                        row_type="conflict",
+                        article=data.article,
+                        field=dimension_label(key),
+                        current_value=format_mm(current),
+                        etim_value=format_mm(value),
+                        source_sheet=data.sheet_name,
+                        source_field=source_field,
+                        action="Проверить вручную: база не перезаписана",
+                    )
+                )
+    return written, conflicts, new_rows, conflict_rows
+
+
+def write_etim_report(
+    report_path: Path,
+    result: EtimImportResult,
+    new_rows: list[DimensionReportRow],
+    conflict_rows: list[DimensionReportRow],
+) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Итог"
+    summary.append(["Показатель", "Значение"])
+    summary.append(["ETIM-файл", str(result.etim_file)])
+    summary.append(["База", str(result.db_path)])
+    summary.append(["Импорт id", result.import_id])
+    summary.append(["Артикулов в базе для поиска", result.scanned_articles])
+    summary.append(["Артикулов найдено в ETIM", result.found_articles])
+    summary.append(["Габаритных значений найдено", result.dimension_values_found])
+    summary.append(["Новых габаритных значений записано", result.dimension_values_written])
+    summary.append(["Конфликтов с уже заполненными габаритами", result.dimension_conflicts])
+    summary.append(["Характеристик записано", result.attributes_written])
+    summary.append(["Бэкап базы", str(result.backup_path or "")])
+
+    new_sheet = workbook.create_sheet("Новые габариты")
+    new_sheet.append(["Артикул", "Поле", "Записано из ETIM", "Лист ETIM", "Колонка ETIM", "Действие"])
+    for row in new_rows:
+        new_sheet.append([row.article, row.field, row.etim_value, row.source_sheet, row.source_field, row.action])
+
+    conflicts = workbook.create_sheet("Конфликты")
+    conflicts.append(
+        [
+            "Артикул",
+            "Поле",
+            "Сейчас в базе",
+            "Пришло из ETIM",
+            "Лист ETIM",
+            "Колонка ETIM",
+            "Что делать",
+        ]
+    )
+    for row in conflict_rows:
+        conflicts.append(
+            [
+                row.article,
+                row.field,
+                row.current_value,
+                row.etim_value,
+                row.source_sheet,
+                row.source_field,
+                row.action,
+            ]
+        )
+
+    for sheet in (summary, new_sheet, conflicts):
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        for column_cells in sheet.columns:
+            max_len = max(len(str(cell.value or "")) for cell in column_cells)
+            sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 70)
+
+    workbook.save(report_path)
 
 
 def insert_etim_data(
@@ -427,7 +547,12 @@ def insert_etim_data(
     return dimension_values_found, attributes_written
 
 
-def import_etim_workbook(etim_path: Path, db_path: Path, make_backup: bool = True) -> EtimImportResult:
+def import_etim_workbook(
+    etim_path: Path,
+    db_path: Path,
+    make_backup: bool = True,
+    report_dir: Path | None = None,
+) -> EtimImportResult:
     if not etim_path.exists():
         raise FileNotFoundError(f"ETIM-файл не найден: {etim_path}")
     if not db_path.exists():
@@ -445,7 +570,12 @@ def import_etim_workbook(etim_path: Path, db_path: Path, make_backup: bool = Tru
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         ensure_etim_import_tables(conn)
-        dimension_values_written, dimension_conflicts = count_written_and_conflicts(conn, article_data)
+        (
+            dimension_values_written,
+            dimension_conflicts,
+            new_dimension_rows,
+            conflict_rows,
+        ) = build_dimension_report_rows(conn, article_data)
         cur = conn.cursor()
         cur.execute(
             """
@@ -465,9 +595,12 @@ def import_etim_workbook(etim_path: Path, db_path: Path, make_backup: bool = Tru
         )
         conn.commit()
 
-    return EtimImportResult(
+    report_dir = report_dir or db_path.parent / "reports"
+    report_path = report_dir / f"etim_import_report_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
+    result = EtimImportResult(
         etim_file=etim_path,
         db_path=db_path,
+        report_path=report_path,
         backup_path=backup_path,
         import_id=import_id,
         scanned_articles=scanned_articles,
@@ -477,6 +610,8 @@ def import_etim_workbook(etim_path: Path, db_path: Path, make_backup: bool = Tru
         dimension_conflicts=dimension_conflicts,
         attributes_written=attributes_written,
     )
+    write_etim_report(report_path, result, new_dimension_rows, conflict_rows)
+    return result
 
 
 def check_sqlite_integrity(db_path: Path) -> None:
@@ -513,6 +648,7 @@ def result_lines(result: EtimImportResult) -> list[str]:
         f"Новых габаритных значений записано: {result.dimension_values_written}",
         f"Конфликтов с уже заполненными габаритами: {result.dimension_conflicts}",
         f"Характеристик записано: {result.attributes_written}",
+        f"Отчет ETIM: {result.report_path}",
     ]
     if result.backup_path:
         lines.append(f"Бэкап базы: {result.backup_path}")

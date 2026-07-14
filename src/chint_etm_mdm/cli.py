@@ -50,7 +50,7 @@ def main() -> None:
         return
 
     if args.import_etim:
-        result = import_etim_workbook(Path(args.import_etim), db_path)
+        result = import_etim_workbook(Path(args.import_etim), db_path, report_dir=output_dir)
         for line in etim_result_lines(result):
             print(line)
         return

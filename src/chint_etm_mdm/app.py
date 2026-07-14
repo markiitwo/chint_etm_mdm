@@ -161,14 +161,22 @@ class EtimImportWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, etim_path: Path) -> None:
+    def __init__(self, db_path: Path, etim_path: Path, report_dir: Path) -> None:
         super().__init__()
         self.db_path = db_path
         self.etim_path = etim_path
+        self.report_dir = report_dir
 
     def run(self) -> None:
         try:
-            self.done.emit(import_etim_workbook(self.etim_path, self.db_path, make_backup=True))
+            self.done.emit(
+                import_etim_workbook(
+                    self.etim_path,
+                    self.db_path,
+                    make_backup=True,
+                    report_dir=self.report_dir,
+                )
+            )
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -196,11 +204,13 @@ class MainWindow(QMainWindow):
         self.last_output_path: Path | None = None
         self.last_report_path: Path | None = None
         self.last_mapping_report_path: Path | None = None
+        self.last_etim_report_path: Path | None = None
         self.open_output_button = QPushButton("Открыть заполненный файл")
         self.open_report_button = QPushButton("Открыть отчет")
         self.open_output_dir_button = QPushButton("Открыть папку результата")
         self.open_price_file_button = QPushButton("Открыть прайс")
         self.open_etim_file_button = QPushButton("Открыть ETIM")
+        self.open_etim_report_button = QPushButton("Открыть отчет ETIM")
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.fill_log = QTextEdit()
@@ -371,8 +381,11 @@ class MainWindow(QMainWindow):
         import_etim.clicked.connect(self.run_etim_import)
         self.open_etim_file_button.clicked.connect(self.open_etim_file)
         self.open_etim_file_button.setEnabled(False)
+        self.open_etim_report_button.clicked.connect(self.open_etim_report)
+        self.open_etim_report_button.setEnabled(False)
         actions.addWidget(import_etim)
         actions.addWidget(self.open_etim_file_button)
+        actions.addWidget(self.open_etim_report_button)
         actions.addStretch(1)
         form.addRow("Действия", actions)
         return box
@@ -571,6 +584,12 @@ class MainWindow(QMainWindow):
             return
         self.open_path(Path(etim_text))
 
+    def open_etim_report(self) -> None:
+        if self.last_etim_report_path is None:
+            QMessageBox.information(self, "Отчет еще не создан", "Сначала импортируйте ETIM-файл.")
+            return
+        self.open_path(self.last_etim_report_path)
+
     def choose_mapping_review(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -719,6 +738,15 @@ class MainWindow(QMainWindow):
             return Path(output_text) / "downloads" / "price"
         return Path.cwd() / "downloads" / "price"
 
+    def etim_report_dir(self) -> Path:
+        work_text = self.work_dir_edit.text().strip()
+        if work_text:
+            return Path(work_text) / "reports"
+        output_text = self.output_dir_edit.text().strip()
+        if output_text:
+            return Path(output_text)
+        return Path.cwd() / "reports"
+
     def validated_db_path(self) -> Path | None:
         self.save_current_config()
         db_path = Path(self.db_path_edit.text().strip())
@@ -790,7 +818,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "ETIM не найден", "Выберите существующий XLSX ETIM-файл.")
                 return
             self.price_log.append("Импортирую ETIM-файл...")
-            self.worker = EtimImportWorker(db_path, etim_path)
+            self.worker = EtimImportWorker(db_path, etim_path, self.etim_report_dir())
             self.worker.done.connect(self.on_etim_import_done)
             self.worker.failed.connect(self.on_price_import_failed)
             self.worker.start()
@@ -866,7 +894,9 @@ class MainWindow(QMainWindow):
 
     def on_etim_import_done(self, result: EtimImportResult) -> None:
         self.etim_file_edit.setText(str(result.etim_file))
+        self.last_etim_report_path = result.report_path
         self.open_etim_file_button.setEnabled(True)
+        self.open_etim_report_button.setEnabled(True)
         self.price_log.append("Импорт ETIM готов.")
         for line in etim_result_lines(result):
             self.price_log.append(line)
