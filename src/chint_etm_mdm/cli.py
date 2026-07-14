@@ -47,6 +47,7 @@ def main() -> None:
     print(f"missing_articles={result.missing_articles}")
     print(f"filled_cells={result.filled_cells}")
     print(f"suggested_cells={result.suggested_cells}")
+    print(f"missing_cells={result.missing_cells}")
 
 
 if __name__ == "__main__":
