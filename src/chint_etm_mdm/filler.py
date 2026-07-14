@@ -9,6 +9,7 @@ from typing import Iterable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
+from openpyxl.styles import Font, PatternFill
 
 from .db import ProductRecord, fetch_products
 from .mapping_rules import source_attributes_for
@@ -52,6 +53,8 @@ DIRECT_DB_HEADERS = {
     "Штрих-код5",
     "Штрих-код5уп",
 }
+MISSING_CELL_FILL = PatternFill(fill_type="solid", fgColor="FFFFC7CE")
+MISSING_CELL_FONT = Font(color="FF9C0006")
 
 
 @dataclass(frozen=True)
@@ -220,20 +223,72 @@ def is_reportable_header(header: str) -> bool:
 
 def missing_note(header: str) -> str:
     if header in {"Вес, кг", "Длина, м", "Ширина, м", "Высота, м", "Объем, м3"}:
-        return "Нет значения единицы товара в product_dimensions_resolved или price_snapshot_items"
+        return "В базе нет значения для единицы товара. Нужно заполнить именно изделие, не упаковку."
     if header == "81 класс":
-        return "Нет значения class81_code в ipro_goods или product_etm_class_suggestions"
+        return "В базе нет категории товара."
     if header == "Код ТН ВЭД":
-        return "Нет значения в product_tnved_codes"
+        return "В базе нет кода ТН ВЭД."
     if header == "Код ОКПД2":
-        return "Нет значения в product_okpd2_codes"
+        return "В базе нет кода ОКПД2."
     if header.startswith("Конфиг:"):
-        return "Нет точного ETIM-атрибута или утвержденного правила для этого 81 класса"
+        return "В базе нет подходящего значения для этой характеристики."
     if header.startswith("Упак3") or header in {"Штрих-код3", "Штрих-код3уп", "Отгрузка кратно УпЗавод"}:
-        return "Нет данных заводской упаковки в price_snapshot_items или material_data_items"
+        return "В базе нет данных заводской упаковки."
     if header.startswith("Упак5") or header in {"Штрих-код5", "Штрих-код5уп"}:
-        return "Нет данных транспортной упаковки в price_snapshot_items или material_data_items"
-    return "Нет значения в базе"
+        return "В базе нет данных транспортной упаковки."
+    return "В базе нет значения для этого поля."
+
+
+def report_status_label(status: str) -> str:
+    labels = {
+        "filled": "Заполнено",
+        "filled_suggested": "Заполнено, нужно проверить",
+        "missing_value": "Не заполнено",
+        "not_found": "Артикул не найден",
+        "ok": "Готово",
+        "needs_review": "Нужно проверить",
+        "incomplete": "Заполнено не полностью",
+    }
+    return labels.get(status, status)
+
+
+def product_manager_action(header: str) -> str:
+    if header.startswith("Конфиг:"):
+        return f"Заполнить характеристику: {header.removeprefix('Конфиг:').strip()}"
+    if header:
+        return f"Заполнить поле: {header}"
+    return "Проверить артикул в базе"
+
+
+def source_label(source: str) -> str:
+    if not source:
+        return ""
+    if source == "static":
+        return "Значение по умолчанию"
+    if source == "generated":
+        return "Сформировано программой"
+    if source.startswith("approved_class_rule:"):
+        return f"Выбранный источник: {source.split(':', 1)[1]}"
+    if "attribute" in source:
+        return "Характеристика товара в базе"
+    if "article" in source:
+        return "Артикул из шаблона"
+    if "class81" in source:
+        return "Категория из базы"
+    if "name" in source:
+        return "Название из базы"
+    if "tnved" in source.lower() or "okpd2" in source.lower():
+        return "Код из базы"
+    if "weight" in source or "length" in source or "width" in source or "height" in source or "volume" in source:
+        return "Вес или габариты из базы"
+    if "shipment" in source or "gtin" in source or "transport" in source:
+        return "Данные упаковки из базы"
+    return "База"
+
+
+def mark_missing_cell(cell: Cell) -> None:
+    cell.fill = MISSING_CELL_FILL
+    cell.font = MISSING_CELL_FONT
 
 
 def find_article_index(headers: list[str]) -> int | None:
@@ -263,15 +318,15 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
         [
             "Строка",
             "Артикул",
-            "Статус",
-            "Заполнено точно",
-            "Заполнено по предложению",
+            "Состояние",
+            "Заполнено",
+            "Заполнено после проверки",
             "Не заполнено",
-            "Комментарий",
+            "Что проверить",
         ]
     )
-    details.append(["Строка", "Артикул", "Колонка", "Статус", "Значение", "Источник", "Комментарий"])
-    product_manager.append(["Строка", "Артикул", "Колонка", "Что нужно заполнить", "Причина"])
+    details.append(["Строка", "Артикул", "Поле", "Состояние", "Значение", "Откуда взяли", "Комментарий"])
+    product_manager.append(["Строка", "Артикул", "Поле", "Что сделать", "Комментарий"])
 
     by_row: dict[tuple[int, str], dict[str, object]] = {}
     for item in rows:
@@ -307,15 +362,16 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
                 item.row_number,
                 item.article,
                 item.column,
-                item.status,
+                report_status_label(item.status),
                 item.value,
-                item.source,
+                source_label(item.source),
                 item.note,
             ]
         )
         if item.status in {"missing_value", "not_found"}:
-            needed = f"Заполнить поле: {item.column}" if item.column else "Проверить артикул"
-            product_manager.append([item.row_number, item.article, item.column, needed, item.note])
+            product_manager.append(
+                [item.row_number, item.article, item.column, product_manager_action(item.column), item.note]
+            )
 
     for (row_number, article), bucket in sorted(by_row.items()):
         notes = bucket["notes"]
@@ -324,7 +380,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
             [
                 row_number,
                 article,
-                bucket["status"],
+                report_status_label(str(bucket["status"])),
                 bucket["filled"],
                 bucket["suggested"],
                 bucket["missing"],
@@ -477,6 +533,9 @@ def fill_xlsx_template(
         product = products.get(article)
         if not product:
             report.append(FillReportRow(row_number, article, "", "not_found", "", "", "Артикул не найден в базе"))
+            for col_idx in fillable_columns:
+                if col_idx != article_idx and col_idx < len(row):
+                    mark_missing_cell(row[col_idx])
             continue
         for col_idx, header in enumerate(headers):
             if header == "Артикул" or col_idx >= len(row):
@@ -504,6 +563,7 @@ def fill_xlsx_template(
                     )
                 )
             elif status in {"blank", "filled"} and is_reportable_header(header):
+                mark_missing_cell(row[col_idx])
                 report.append(
                     FillReportRow(
                         row_number,

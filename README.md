@@ -105,10 +105,10 @@ attributes. Use it to decide which mappings can be safely approved for a class.
 
 In the GUI, open the `Правила маппинга` tab, choose the generated
 `mapping_review.xlsx`, and load candidates. The upper table shows coverage for
-each yellow field: what will be filled, what needs a mapping decision, and what
+each yellow field: what will be filled, what needs a source choice, and what
 should be sent to product managers. The lower table shows candidate source
-attributes, sample source values, and how many products each candidate can
-cover. Use `Принять` only when the meaning is correct for that 81 class. Use
+attributes, sample source values, and how many products this source can cover.
+Use `Принять` only when the source is correct for the product category. Use
 `Отклонить` for noisy candidates so they stop appearing in future mapping
 reports. Batch mode is also available through the checkbox column and the
 `Сохранить выбранные правила` / `Отклонить выбранные` buttons.
@@ -117,8 +117,8 @@ The mapping review workbook also includes:
 
 - `Покрытие` — field-level status for all yellow columns;
 - `К продактам` — unfilled fields by article, ready to send for enrichment;
-- `Нужен маппинг` — fields that have source candidates but require a human
-  class-scoped mapping decision first;
+- `Выбор источника` — fields that have source candidates but require a human
+  decision first;
 - `Правила` — candidates that can be accepted or rejected in the GUI.
 
 The app writes approved and rejected class-scoped decisions to:

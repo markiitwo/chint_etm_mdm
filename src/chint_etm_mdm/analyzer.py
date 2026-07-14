@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +17,7 @@ from .filler import (
     normalize_article,
     normalize_header,
     product_value,
+    source_label,
 )
 from .mapping_rules import rejected_sources_for, rules_for, source_attributes_for
 
@@ -135,7 +135,7 @@ def analyze_template_mapping(
                         article=product.article,
                         field=header,
                         needed=f"Заполнить поле шаблона: {header}",
-                        reason="Поле пока не поддерживается логикой автозаполнения",
+                        reason="Программа пока не умеет заполнять это поле автоматически",
                     )
                     for product in class_products
                 ]
@@ -211,8 +211,8 @@ def analyze_config_field(
                     class81_code=class81_code,
                     article=product.article,
                     field=field,
-                    needed=f"Проверить маппинг для {field}",
-                    reason="Есть похожий атрибут, но он не утвержден для этого 81 класса",
+                    needed=f"Проверить источник для {field}",
+                    reason="Есть похожее поле в базе, но нужно проверить, подходит ли оно по смыслу",
                     source=source_name,
                     value=value,
                 )
@@ -227,12 +227,12 @@ def analyze_config_field(
                 article=product.article,
                 field=field,
                 needed=f"Заполнить характеристику: {attr_name}",
-                reason="В базе нет точного ETIM-атрибута и нет утвержденного правила для этого класса",
+                reason="В базе нет подходящего значения для этой характеристики",
             )
         )
 
     known_rules = rules_for(class81_code, field, rules_path)
-    note = "Есть утвержденное правило для класса" if known_rules else "Требуется подтверждение правила для класса"
+    note = "Источник уже выбран" if known_rules else "Нужно выбрать источник вручную"
     if not wanted:
         note = "Пустое имя Конфиг-поля"
 
@@ -310,7 +310,7 @@ def analyze_direct_field(
             approved_sources=tuple(name for name, _ in sources.most_common(5)),
             candidate_sources=(),
             candidate_details=(),
-            note="Прямое поле базы, не ETIM-маппинг",
+            note="Обычное поле из базы",
         ),
         example_rows[:50],
         article_issues,
@@ -351,16 +351,34 @@ def coverage_status(item: FieldCoverage) -> tuple[str, int, int, int]:
     elif will_fill == item.products_count:
         status = "Заполнится"
     elif will_fill == 0 and needs_mapping and not needs_pm:
-        status = "Нужен маппинг"
+        status = "Нужен выбор источника"
     elif will_fill == 0 and needs_pm == item.products_count:
         status = "Нет данных в базе"
     elif will_fill > 0 and needs_pm == 0 and needs_mapping:
-        status = "Частично: нужен маппинг"
+        status = "Частично: нужен выбор источника"
     elif will_fill > 0 and needs_pm > 0:
         status = "Частично заполнится"
     else:
         status = "Смешанный статус"
     return status, will_fill, needs_mapping, needs_pm
+
+
+def example_status_label(status: str) -> str:
+    labels = {
+        "filled": "Заполнится",
+        "exact": "Заполнится",
+        "approved_class_rule": "Заполнится",
+        "candidate": "Нужно проверить источник",
+    }
+    return labels.get(status, status)
+
+
+def review_source_label(source: str) -> str:
+    if not source:
+        return ""
+    if "." in source or "/" in source or source in {"static", "generated"}:
+        return source_label(source)
+    return source
 
 
 def write_mapping_report(
@@ -374,20 +392,13 @@ def write_mapping_report(
     coverage_sheet.title = "Покрытие"
     coverage_sheet.append(
         [
-            "81 класс",
+            "Категория",
             "Поле шаблона",
             "Статус",
             "Товаров",
             "Заполнится",
-            "Нужен маппинг",
+            "Нужен выбор источника",
             "К продактам",
-            "Прямо заполнится",
-            "Точное имя атрибута",
-            "Утвержденное правило",
-            "Есть кандидаты",
-            "Не найдено",
-            "Утвержденные источники",
-            "Кандидаты",
             "Комментарий",
         ]
     )
@@ -402,38 +413,34 @@ def write_mapping_report(
                 will_fill,
                 needs_mapping,
                 needs_pm,
-                item.filled_direct_count,
-                item.exact_count,
-                item.approved_rule_count,
-                item.candidate_count,
-                item.missing_count,
-                "; ".join(item.approved_sources),
-                "; ".join(item.candidate_sources),
                 item.note,
             ]
         )
 
     examples_sheet = workbook.create_sheet("Примеры")
-    examples_sheet.append(["81 класс", "Поле шаблона", "Источник/кандидат", "Артикул", "Значение", "Статус"])
+    examples_sheet.append(["Категория", "Поле шаблона", "Источник", "Артикул", "Значение", "Состояние"])
     for row in examples:
-        examples_sheet.append(row)
+        display_row = list(row)
+        display_row[2] = review_source_label(str(display_row[2] or ""))
+        display_row[5] = example_status_label(str(display_row[5] or ""))
+        examples_sheet.append(display_row)
 
     pm_sheet = workbook.create_sheet("К продактам")
-    pm_sheet.append(["81 класс", "Артикул", "Поле шаблона", "Что нужно заполнить", "Причина"])
+    pm_sheet.append(["Категория", "Артикул", "Поле шаблона", "Что нужно заполнить", "Комментарий"])
     for item in article_issues:
         if item.issue_type != "pm":
             continue
         pm_sheet.append([item.class81_code, item.article, item.field, item.needed, item.reason])
 
-    mapping_sheet = workbook.create_sheet("Нужен маппинг")
+    mapping_sheet = workbook.create_sheet("Выбор источника")
     mapping_sheet.append(
         [
-            "81 класс",
+            "Категория",
             "Артикул",
             "Поле шаблона",
-            "Кандидат источника",
+            "Возможный источник",
             "Значение",
-            "Причина",
+            "Комментарий",
         ]
     )
     for item in article_issues:
@@ -453,7 +460,6 @@ def write_mapping_report(
             "Примеры значений",
             "Примеры артикулов",
             "Действие",
-            "JSON для rules",
         ]
     )
     for item in coverages:
@@ -469,18 +475,10 @@ def write_mapping_report(
                     "",
                     "",
                     "уже утверждено",
-                    "",
                 ]
             )
             continue
         for candidate in item.candidate_details:
-            snippet = {
-                "class81_code": item.class81_code,
-                "template_field": item.field,
-                "source_attributes": [candidate.source],
-                "confidence": "approved_class_rule",
-                "note": "Confirm manually before use.",
-            }
             rules_sheet.append(
                 [
                     item.class81_code,
@@ -489,8 +487,7 @@ def write_mapping_report(
                     candidate.count,
                     "; ".join(candidate.examples),
                     "; ".join(candidate.articles),
-                    "проверить и при подтверждении добавить в rules",
-                    json.dumps(snippet, ensure_ascii=False),
+                    "проверить и принять, если источник подходит",
                 ]
             )
 

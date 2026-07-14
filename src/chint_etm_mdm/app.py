@@ -213,11 +213,11 @@ class MainWindow(QMainWindow):
         self.coverage_table.setHorizontalHeaderLabels(
             [
                 "Статус",
-                "81 класс",
+                "Категория",
                 "Поле шаблона",
                 "Товаров",
                 "Заполнится",
-                "Нужен маппинг",
+                "Нужен выбор источника",
                 "К продактам",
                 "Комментарий",
             ]
@@ -265,7 +265,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(box)
         layout.addWidget(QLabel("Покрытие желтых полей"))
         layout.addWidget(self.coverage_table, stretch=1)
-        layout.addWidget(QLabel("Кандидаты на правила"))
+        layout.addWidget(QLabel("Кандидаты на выбор источника"))
         layout.addWidget(self.rules_table, stretch=1)
         layout.addLayout(actions)
         layout.addWidget(QLabel("Журнал правил"))
@@ -500,7 +500,7 @@ class MainWindow(QMainWindow):
                 row_data["template_field"],
                 row_data["products_count"],
                 row_data["will_fill"],
-                row_data["needs_mapping"],
+                row_data["needs_source_choice"],
                 row_data["needs_pm"],
                 row_data["note"],
             ]
@@ -550,13 +550,13 @@ class MainWindow(QMainWindow):
 
         pm_count = sum(int(row["needs_pm"] or "0") for row in coverage_rows if str(row["needs_pm"]).isdigit())
         mapping_count = sum(
-            int(row["needs_mapping"] or "0")
+            int(row["needs_source_choice"] or "0")
             for row in coverage_rows
-            if str(row["needs_mapping"]).isdigit()
+            if str(row["needs_source_choice"]).isdigit()
         )
         self.rules_log.append(
             f"Загружено полей: {len(coverage_rows)}; кандидатов: {len(rows)}; "
-            f"к продактам строк: {pm_count}; нужен маппинг: {mapping_count}"
+            f"к продактам строк: {pm_count}; нужен выбор источника: {mapping_count}"
         )
 
     def read_mapping_review_coverage(self, review_path: Path) -> list[dict[str, str]]:
@@ -569,13 +569,14 @@ class MainWindow(QMainWindow):
             raise ValueError("Лист 'Покрытие' пустой.")
         headers = [str(value or "").strip() for value in header_row]
         index = {name: idx for idx, name in enumerate(headers)}
+        category_column = "Категория" if "Категория" in index else "81 класс"
         required = [
-            "81 класс",
+            category_column,
             "Поле шаблона",
             "Статус",
             "Товаров",
             "Заполнится",
-            "Нужен маппинг",
+            "Нужен выбор источника",
             "К продактам",
             "Комментарий",
         ]
@@ -585,7 +586,7 @@ class MainWindow(QMainWindow):
 
         rows: list[dict[str, str]] = []
         for values in sheet.iter_rows(min_row=2, values_only=True):
-            class81_code = str(values[index["81 класс"]] or "").strip()
+            class81_code = str(values[index[category_column]] or "").strip()
             template_field = str(values[index["Поле шаблона"]] or "").strip()
             if not class81_code and not template_field:
                 continue
@@ -596,7 +597,9 @@ class MainWindow(QMainWindow):
                     "status": str(values[index["Статус"]] or "").strip(),
                     "products_count": str(values[index["Товаров"]] or "").strip(),
                     "will_fill": str(values[index["Заполнится"]] or "").strip(),
-                    "needs_mapping": str(values[index["Нужен маппинг"]] or "").strip(),
+                    "needs_source_choice": str(
+                        values[index["Нужен выбор источника"]] or ""
+                    ).strip(),
                     "needs_pm": str(values[index["К продактам"]] or "").strip(),
                     "note": str(values[index["Комментарий"]] or "").strip(),
                 }
