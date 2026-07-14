@@ -3,6 +3,9 @@ from __future__ import annotations
 import datetime as dt
 import re
 import csv
+import shutil
+import tempfile
+from zipfile import ZIP_DEFLATED, ZipFile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -55,6 +58,8 @@ DIRECT_DB_HEADERS = {
 }
 MISSING_CELL_FILL = PatternFill(fill_type="solid", fgColor="FFFFC7CE")
 MISSING_CELL_FONT = Font(color="FF9C0006")
+DATA_VALIDATIONS_RE = re.compile(br"<dataValidations\b.*?</dataValidations>", re.DOTALL)
+EXT_LST_RE = re.compile(br"<extLst\b.*?</extLst>", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -289,6 +294,70 @@ def source_label(source: str) -> str:
 def mark_missing_cell(cell: Cell) -> None:
     cell.fill = MISSING_CELL_FILL
     cell.font = MISSING_CELL_FONT
+
+
+def preserve_worksheet_dropdowns(template_path: Path, output_path: Path) -> None:
+    """Restore worksheet validation XML that openpyxl may simplify or drop."""
+    if template_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+        return
+
+    with ZipFile(template_path, "r") as source_zip, ZipFile(output_path, "r") as output_zip:
+        source_names = set(source_zip.namelist())
+        output_names = set(output_zip.namelist())
+        worksheet_names = sorted(
+            name
+            for name in source_names.intersection(output_names)
+            if name.startswith("xl/worksheets/") and name.endswith(".xml")
+        )
+        replacements: dict[str, bytes] = {}
+        for name in worksheet_names:
+            source_xml = source_zip.read(name)
+            output_xml = output_zip.read(name)
+            source_validations = DATA_VALIDATIONS_RE.search(source_xml)
+            source_extensions = EXT_LST_RE.search(source_xml)
+            if not source_validations and not source_extensions:
+                continue
+
+            updated_xml = DATA_VALIDATIONS_RE.sub(b"", output_xml)
+            if source_validations:
+                updated_xml = insert_after_xml_tag(
+                    updated_xml, b"</sheetData>", source_validations.group(0)
+                )
+
+            if source_extensions and b"dataValidations" in source_extensions.group(0):
+                updated_xml = EXT_LST_RE.sub(b"", updated_xml)
+                updated_xml = updated_xml.replace(
+                    b"</worksheet>", source_extensions.group(0) + b"</worksheet>", 1
+                )
+
+            if updated_xml != output_xml:
+                replacements[name] = updated_xml
+
+        if not replacements:
+            return
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=output_path.suffix) as tmp:
+            temp_path = Path(tmp.name)
+
+        try:
+            with ZipFile(temp_path, "w", compression=ZIP_DEFLATED) as new_zip:
+                for info in output_zip.infolist():
+                    data = replacements.get(info.filename)
+                    if data is None:
+                        data = output_zip.read(info.filename)
+                    new_zip.writestr(info, data)
+            shutil.move(str(temp_path), output_path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+
+def insert_after_xml_tag(xml: bytes, tag: bytes, payload: bytes) -> bytes:
+    index = xml.find(tag)
+    if index == -1:
+        return xml.replace(b"</worksheet>", payload + b"</worksheet>", 1)
+    insert_at = index + len(tag)
+    return xml[:insert_at] + payload + xml[insert_at:]
 
 
 def find_article_index(headers: list[str]) -> int | None:
@@ -578,6 +647,7 @@ def fill_xlsx_template(
 
     output_path, report_path = make_output_paths(template_path, output_dir)
     workbook.save(output_path)
+    preserve_worksheet_dropdowns(template_path, output_path)
     write_report(report_path, report)
 
     unique_articles = {a for a in articles if a}

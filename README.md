@@ -52,6 +52,9 @@ are yellow in the template. Non-yellow columns are treated as optional/manual
 fields for now. CSV templates do not contain color metadata, so they are filled
 by known column names.
 
+The filled XLSX keeps the original dropdown lists/data validations and marks
+unfilled required cells in red.
+
 ETM characteristics are not mapped globally across the whole catalog. A mapping
 rule is scoped to an ETM 81 class, for example:
 
