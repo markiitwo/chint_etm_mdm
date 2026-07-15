@@ -261,14 +261,6 @@ def report_status_label(status: str) -> str:
     return labels.get(status, status)
 
 
-def product_manager_action(header: str) -> str:
-    if header.startswith("Конфиг:"):
-        return f"Заполнить характеристику: {header.removeprefix('Конфиг:').strip()}"
-    if header:
-        return f"Заполнить поле: {header}"
-    return "Проверить артикул в базе"
-
-
 def source_label(source: str) -> str:
     if not source:
         return ""
@@ -446,7 +438,6 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
     summary = workbook.active
     summary.title = "Итог"
     details = workbook.create_sheet("Детали")
-    product_manager = workbook.create_sheet("К продактам")
 
     summary.append(
         [
@@ -460,7 +451,6 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
         ]
     )
     details.append(["Строка", "Артикул", "Поле", "Состояние", "Значение", "Откуда взяли", "Комментарий"])
-    product_manager.append(["Строка", "Артикул", "Поле", "Что сделать", "Комментарий"])
 
     by_row: dict[tuple[int, str], dict[str, object]] = {}
     for item in rows:
@@ -502,10 +492,6 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
                 item.note,
             ]
         )
-        if item.status in {"missing_value", "not_found"}:
-            product_manager.append(
-                [item.row_number, item.article, item.column, product_manager_action(item.column), item.note]
-            )
 
     for (row_number, article), bucket in sorted(by_row.items()):
         notes = bucket["notes"]
@@ -522,7 +508,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
             ]
         )
 
-    for sheet in (summary, details, product_manager):
+    for sheet in (summary, details):
         sheet.freeze_panes = "A2"
         for column_cells in sheet.columns:
             max_len = max(len(str(cell.value or "")) for cell in column_cells)

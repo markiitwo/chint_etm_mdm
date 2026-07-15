@@ -523,7 +523,7 @@ class MainWindow(QMainWindow):
                 "Товаров",
                 "Заполнится",
                 "Нужен выбор источника",
-                "К продактам",
+                "Не заполнится",
                 "Комментарий",
             ]
         )
@@ -1191,7 +1191,7 @@ class MainWindow(QMainWindow):
                 row_data["products_count"],
                 row_data["will_fill"],
                 row_data["needs_source_choice"],
-                row_data["needs_pm"],
+                row_data["missing_count"],
                 row_data["note"],
             ]
             for col_idx, value in enumerate(values):
@@ -1238,7 +1238,11 @@ class MainWindow(QMainWindow):
             )
             self.rules_table.setCellWidget(row_idx, 7, reject_button)
 
-        pm_count = sum(int(row["needs_pm"] or "0") for row in coverage_rows if str(row["needs_pm"]).isdigit())
+        missing_count = sum(
+            int(row["missing_count"] or "0")
+            for row in coverage_rows
+            if str(row["missing_count"]).isdigit()
+        )
         mapping_count = sum(
             int(row["needs_source_choice"] or "0")
             for row in coverage_rows
@@ -1246,7 +1250,7 @@ class MainWindow(QMainWindow):
         )
         self.rules_log.append(
             f"Загружено полей: {len(coverage_rows)}; кандидатов: {len(rows)}; "
-            f"к продактам строк: {pm_count}; нужен выбор источника: {mapping_count}"
+            f"не заполнится: {missing_count}; нужен выбор источника: {mapping_count}"
         )
         if mapping_count and not rows:
             self.rules_log.append(
@@ -1270,6 +1274,7 @@ class MainWindow(QMainWindow):
         headers = [str(value or "").strip() for value in header_row]
         index = {name: idx for idx, name in enumerate(headers)}
         category_column = "Категория" if "Категория" in index else "81 класс"
+        missing_column = "Не заполнится" if "Не заполнится" in index else "К продактам"
         required = [
             category_column,
             "Поле шаблона",
@@ -1277,7 +1282,7 @@ class MainWindow(QMainWindow):
             "Товаров",
             "Заполнится",
             "Нужен выбор источника",
-            "К продактам",
+            missing_column,
             "Комментарий",
         ]
         missing = [name for name in required if name not in index]
@@ -1302,7 +1307,7 @@ class MainWindow(QMainWindow):
                     "needs_source_choice": str(
                         values[index["Нужен выбор источника"]] or ""
                     ).strip(),
-                    "needs_pm": str(values[index["К продактам"]] or "").strip(),
+                    "missing_count": str(values[index[missing_column]] or "").strip(),
                     "note": str(values[index["Комментарий"]] or "").strip(),
                 }
             )

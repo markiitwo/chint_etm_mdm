@@ -138,17 +138,7 @@ def analyze_template_mapping(
                     note="Поле пока не поддерживается логикой заполнения",
                 )
                 field_examples = []
-                field_issues = [
-                    ArticleIssue(
-                        issue_type="pm",
-                        class81_code=class81_code,
-                        article=product.article,
-                        field=header,
-                        needed=f"Заполнить поле шаблона: {header}",
-                        reason="Программа пока не умеет заполнять это поле автоматически",
-                    )
-                    for product in class_products
-                ]
+                field_issues = []
             coverages.append(coverage)
             examples.extend(field_examples)
             article_issues.extend(field_issues)
@@ -230,16 +220,6 @@ def analyze_config_field(
             continue
 
         missing_count += 1
-        article_issues.append(
-            ArticleIssue(
-                issue_type="pm",
-                class81_code=class81_code,
-                article=product.article,
-                field=field,
-                needed=f"Заполнить характеристику: {attr_name}",
-                reason="В базе нет подходящего значения для этой характеристики",
-            )
-        )
 
     known_rules = rules_for(class81_code, field, rules_path)
     note = "Источник уже выбран" if known_rules else "Нужно выбрать источник вручную"
@@ -296,16 +276,6 @@ def analyze_direct_field(
             example_rows.append([class81_code, field, source, product.article, value, "filled"])
         else:
             missing_count += 1
-            article_issues.append(
-                ArticleIssue(
-                    issue_type="pm",
-                    class81_code=class81_code,
-                    article=product.article,
-                    field=field,
-                    needed=f"Заполнить поле: {field}",
-                    reason=missing_note(field),
-                )
-            )
 
     return (
         FieldCoverage(
@@ -355,22 +325,22 @@ def find_attribute_candidates(attr_name: str, attrs: dict[str, str]) -> list[tup
 def coverage_status(item: FieldCoverage) -> tuple[str, int, int, int]:
     will_fill = item.filled_direct_count + item.exact_count + item.approved_rule_count
     needs_mapping = item.candidate_count
-    needs_pm = item.missing_count
+    missing_count = item.missing_count
     if item.products_count == 0:
         status = "Нет товаров"
     elif will_fill == item.products_count:
         status = "Заполнится"
-    elif will_fill == 0 and needs_mapping and not needs_pm:
+    elif will_fill == 0 and needs_mapping and not missing_count:
         status = "Нужен выбор источника"
-    elif will_fill == 0 and needs_pm == item.products_count:
+    elif will_fill == 0 and missing_count == item.products_count:
         status = "Нет данных в базе"
-    elif will_fill > 0 and needs_pm == 0 and needs_mapping:
+    elif will_fill > 0 and missing_count == 0 and needs_mapping:
         status = "Частично: нужен выбор источника"
-    elif will_fill > 0 and needs_pm > 0:
+    elif will_fill > 0 and missing_count > 0:
         status = "Частично заполнится"
     else:
         status = "Смешанный статус"
-    return status, will_fill, needs_mapping, needs_pm
+    return status, will_fill, needs_mapping, missing_count
 
 
 def example_status_label(status: str) -> str:
@@ -408,12 +378,12 @@ def write_mapping_report(
             "Товаров",
             "Заполнится",
             "Нужен выбор источника",
-            "К продактам",
+            "Не заполнится",
             "Комментарий",
         ]
     )
     for item in coverages:
-        status, will_fill, needs_mapping, needs_pm = coverage_status(item)
+        status, will_fill, needs_mapping, missing_count = coverage_status(item)
         coverage_sheet.append(
             [
                 item.class81_code,
@@ -422,7 +392,7 @@ def write_mapping_report(
                 item.products_count,
                 will_fill,
                 needs_mapping,
-                needs_pm,
+                missing_count,
                 item.note,
             ]
         )
@@ -434,13 +404,6 @@ def write_mapping_report(
         display_row[2] = review_source_label(str(display_row[2] or ""))
         display_row[5] = example_status_label(str(display_row[5] or ""))
         examples_sheet.append(display_row)
-
-    pm_sheet = workbook.create_sheet("К продактам")
-    pm_sheet.append(["Категория", "Артикул", "Поле шаблона", "Что нужно заполнить", "Комментарий"])
-    for item in article_issues:
-        if item.issue_type != "pm":
-            continue
-        pm_sheet.append([item.class81_code, item.article, item.field, item.needed, item.reason])
 
     mapping_sheet = workbook.create_sheet("Выбор источника")
     mapping_sheet.append(
@@ -501,7 +464,7 @@ def write_mapping_report(
                 ]
             )
 
-    for sheet in (coverage_sheet, examples_sheet, pm_sheet, mapping_sheet, rules_sheet):
+    for sheet in (coverage_sheet, examples_sheet, mapping_sheet, rules_sheet):
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for column_cells in sheet.columns:
