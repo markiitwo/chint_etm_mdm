@@ -7,6 +7,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
+from .atomic_files import atomic_write_json
 from .db import fetch_products
 from .filler import (
     class81_index,
@@ -66,7 +67,7 @@ def read_manual_document(path: Path) -> dict:
 
 def write_manual_document(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, data)
 
 
 def load_manual_values(path: Path | None) -> dict[tuple[str, str], str]:

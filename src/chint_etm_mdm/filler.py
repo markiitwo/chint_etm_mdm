@@ -252,6 +252,7 @@ def report_status_label(status: str) -> str:
     labels = {
         "filled": "Заполнено",
         "filled_suggested": "Заполнено, нужно проверить",
+        "existing_value_preserved": "Существующее значение сохранено",
         "missing_value": "Не заполнено",
         "not_found": "Артикул не найден",
         "ok": "Готово",
@@ -272,6 +273,8 @@ def source_label(source: str) -> str:
         return f"Выбранный источник: {source.split(':', 1)[1]}"
     if source == "manual_completion":
         return "Ручное дозаполнение"
+    if source == "template_existing":
+        return "Уже было в шаблоне"
     if "attribute" in source:
         return "Характеристика товара в базе"
     if "article" in source:
@@ -422,6 +425,18 @@ def product_with_template_class(product: ProductRecord, template_class: str) -> 
     if template_class and not product.class81_code:
         return replace(product, class81_code=template_class)
     return product
+
+
+def cell_text(value: object) -> str:
+    return " ".join(str(value or "").replace("\xa0", " ").split())
+
+
+def has_vba_project(path: Path) -> bool:
+    try:
+        with ZipFile(path) as archive:
+            return "xl/vbaProject.bin" in archive.namelist()
+    except OSError:
+        return False
 
 
 def make_output_paths(template_path: Path, output_dir: Path) -> tuple[Path, Path]:
@@ -583,6 +598,21 @@ def fill_csv_template(
         for col_idx, header in enumerate(headers):
             if header == "Артикул":
                 continue
+            existing_value = cell_text(row[col_idx])
+            if existing_value:
+                if is_reportable_header(header):
+                    report.append(
+                        FillReportRow(
+                            row_number,
+                            article,
+                            header,
+                            "existing_value_preserved",
+                            existing_value,
+                            "template_existing",
+                            "Ячейка уже была заполнена; режим EMPTY_ONLY не перезаписывает ее.",
+                        )
+                    )
+                continue
             manual_value = manual_values.get((article, header), "")
             if manual_value:
                 value, status, source = manual_value, "filled", "manual_completion"
@@ -650,7 +680,9 @@ def fill_xlsx_template(
 ) -> FillResult:
     from .manual_values import load_manual_values
 
-    workbook = load_workbook(template_path)
+    keep_vba = template_path.suffix.lower() == ".xlsm"
+    input_has_vba = has_vba_project(template_path) if keep_vba else False
+    workbook = load_workbook(template_path, keep_vba=keep_vba)
     sheet = workbook.active
     header_cells = list(sheet[1])
     headers = [normalize_header(cell.value) for cell in header_cells]
@@ -698,6 +730,21 @@ def fill_xlsx_template(
                 continue
             if col_idx not in fillable_columns:
                 continue
+            existing_value = cell_text(row[col_idx].value)
+            if existing_value:
+                if is_reportable_header(header):
+                    report.append(
+                        FillReportRow(
+                            row_number,
+                            article,
+                            header,
+                            "existing_value_preserved",
+                            existing_value,
+                            "template_existing",
+                            "Ячейка уже была заполнена; режим EMPTY_ONLY не перезаписывает ее.",
+                        )
+                    )
+                continue
             manual_value = manual_values.get((article, header), "")
             if manual_value:
                 value, status, source = manual_value, "filled", "manual_completion"
@@ -740,6 +787,8 @@ def fill_xlsx_template(
     output_path, report_path = make_output_paths(template_path, output_dir)
     workbook.save(output_path)
     preserve_worksheet_dropdowns(template_path, output_path)
+    if input_has_vba and not has_vba_project(output_path):
+        raise ValueError("После сохранения XLSM потерян xl/vbaProject.bin.")
     write_report(report_path, report)
 
     unique_articles = {a for a in articles if a}

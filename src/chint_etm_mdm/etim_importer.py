@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 
+from .db_utils import connect_database, restore_sqlite_backup
 from .price_importer import backup_database
 
 
@@ -607,16 +607,14 @@ def import_etim_workbook(
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
     backup_path = backup_database(db_path) if make_backup else None
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect_database(db_path) as conn:
         ensure_etim_import_tables(conn)
         articles = fetch_all_articles(conn)
         scanned_articles = len(articles)
 
     article_data = scan_etim_workbook(etim_path, articles)
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect_database(db_path) as conn:
         ensure_etim_import_tables(conn)
         (
             dimension_values_written,
@@ -660,13 +658,6 @@ def import_etim_workbook(
     )
     write_etim_report(report_path, result, new_dimension_rows, conflict_rows)
     return result
-
-
-def check_sqlite_integrity(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
-        result = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
-    if result.lower() != "ok":
-        raise ValueError(f"SQLite integrity_check failed for {db_path}: {result}")
 
 
 def parse_float(value: object) -> float | None:
@@ -720,7 +711,7 @@ def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecis
         accepted.append((article, column, value))
 
     backup_path = backup_database(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with connect_database(db_path) as conn:
         ensure_etim_import_tables(conn)
         for article, column, value in accepted:
             conn.execute(
@@ -746,19 +737,7 @@ def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecis
 
 
 def restore_database_backup(db_path: Path, backup_path: Path) -> Path:
-    if not db_path.exists():
-        raise FileNotFoundError(f"Текущая база не найдена: {db_path}")
-    if not backup_path.exists():
-        raise FileNotFoundError(f"Бэкап не найден: {backup_path}")
-
-    check_sqlite_integrity(backup_path)
-    safety_backup = db_path.with_name(
-        f"{db_path.name}.before_restore_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-    )
-    shutil.copy2(db_path, safety_backup)
-    shutil.copy2(backup_path, db_path)
-    check_sqlite_integrity(db_path)
-    return safety_backup
+    return restore_sqlite_backup(db_path, backup_path).path
 
 
 def result_lines(result: EtimImportResult) -> list[str]:

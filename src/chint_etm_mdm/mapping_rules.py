@@ -6,6 +6,8 @@ from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 
+from .atomic_files import atomic_write_text
+
 
 @dataclass(frozen=True)
 class AttributeRule:
@@ -56,7 +58,7 @@ def ensure_default_rules(work_dir: Path) -> Path:
     path = workdir_rules_path(work_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(default_rules_text(), encoding="utf-8")
+        atomic_write_text(path, default_rules_text())
     return path
 
 
@@ -80,7 +82,7 @@ def read_rules_document(rules_path: Path) -> dict:
 
 def write_rules_document(rules_path: Path, data: dict) -> None:
     rules_path.parent.mkdir(parents=True, exist_ok=True)
-    rules_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(rules_path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     load_attribute_rules.cache_clear()
 
 

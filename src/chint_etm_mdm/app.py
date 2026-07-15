@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import sys
 import traceback
 from collections import Counter, defaultdict
@@ -34,6 +33,7 @@ from openpyxl import load_workbook
 from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, load_config, save_config
 from .db import get_stats
+from .db_utils import copy_sqlite_database
 from .etim_importer import (
     EtimDecisionApplyResult,
     EtimImportResult,
@@ -268,6 +268,7 @@ class MainWindow(QMainWindow):
             | EtimDecisionWorker
             | None
         ) = None
+        self.write_action_buttons: list[QPushButton] = []
         self.tabs: QTabWidget | None = None
 
         self.work_dir_edit = QLineEdit(self.config.work_dir)
@@ -306,6 +307,42 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self.build_ui())
         self.refresh_database_status()
+        self.update_write_action_buttons()
+
+    def update_write_action_buttons(self) -> None:
+        busy = self.worker is not None
+        for button in getattr(self, "write_action_buttons", []):
+            button.setEnabled(not busy)
+        if hasattr(self, "apply_etim_report_button"):
+            self.apply_etim_report_button.setEnabled(
+                not busy and self.last_etim_report_path is not None
+            )
+
+    def start_worker(
+        self,
+        worker: QThread,
+        done_handler,
+        failed_handler,
+    ) -> bool:
+        if self.worker is not None:
+            QMessageBox.warning(
+                self,
+                "Операция уже выполняется",
+                "Дождитесь завершения текущей операции перед запуском новой.",
+            )
+            return False
+        self.worker = worker
+        worker.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.done.connect(done_handler)
+        worker.failed.connect(failed_handler)
+        self.update_write_action_buttons()
+        worker.start()
+        return True
+
+    def on_worker_finished(self, worker: QThread) -> None:
+        if self.worker is worker:
+            self.worker = None
+        self.update_write_action_buttons()
 
     def build_ui(self) -> QWidget:
         self.tabs = QTabWidget()
@@ -348,13 +385,13 @@ class MainWindow(QMainWindow):
         save_button.clicked.connect(self.save_current_config)
         backup_button = QPushButton("Копировать базу в рабочую папку")
         backup_button.clicked.connect(self.copy_db_to_workspace)
-        restore_button = QPushButton("Откатить базу из бэкапа")
-        restore_button.clicked.connect(self.restore_db_from_backup)
+        self.restore_button = QPushButton("Откатить базу из бэкапа")
+        self.restore_button.clicked.connect(self.restore_db_from_backup)
         refresh_button = QPushButton("Обновить статус")
         refresh_button.clicked.connect(self.refresh_database_status)
         buttons.addWidget(save_button)
         buttons.addWidget(backup_button)
-        buttons.addWidget(restore_button)
+        buttons.addWidget(self.restore_button)
         buttons.addWidget(refresh_button)
 
         layout.addWidget(setup_box)
@@ -451,17 +488,17 @@ class MainWindow(QMainWindow):
         form.addRow("Ссылка на прайс", self.price_url_edit)
 
         actions = QHBoxLayout()
-        import_file = QPushButton("Импортировать выбранный XLSX")
-        import_file.clicked.connect(self.run_price_import_from_file)
+        self.import_price_file_button = QPushButton("Импортировать выбранный XLSX")
+        self.import_price_file_button.clicked.connect(self.run_price_import_from_file)
         find_price = QPushButton("Найти свежий прайс")
         find_price.clicked.connect(self.find_latest_price)
-        download_import = QPushButton("Скачать и импортировать")
-        download_import.clicked.connect(self.run_price_import_from_url)
+        self.download_import_price_button = QPushButton("Скачать и импортировать")
+        self.download_import_price_button.clicked.connect(self.run_price_import_from_url)
         self.open_price_file_button.clicked.connect(self.open_price_file)
         self.open_price_file_button.setEnabled(False)
-        actions.addWidget(import_file)
+        actions.addWidget(self.import_price_file_button)
         actions.addWidget(find_price)
-        actions.addWidget(download_import)
+        actions.addWidget(self.download_import_price_button)
         actions.addWidget(self.open_price_file_button)
         actions.addStretch(1)
 
@@ -484,19 +521,26 @@ class MainWindow(QMainWindow):
         form.addRow("XLSX ETIM", etim_row)
 
         actions = QHBoxLayout()
-        import_etim = QPushButton("Импортировать ETIM")
-        import_etim.clicked.connect(self.run_etim_import)
+        self.import_etim_button = QPushButton("Импортировать ETIM")
+        self.import_etim_button.clicked.connect(self.run_etim_import)
         self.open_etim_file_button.clicked.connect(self.open_etim_file)
         self.open_etim_file_button.setEnabled(False)
         self.open_etim_report_button.clicked.connect(self.open_etim_report)
         self.open_etim_report_button.setEnabled(False)
         self.apply_etim_report_button.clicked.connect(self.apply_etim_decisions)
-        actions.addWidget(import_etim)
+        actions.addWidget(self.import_etim_button)
         actions.addWidget(self.open_etim_file_button)
         actions.addWidget(self.open_etim_report_button)
         actions.addWidget(self.apply_etim_report_button)
         actions.addStretch(1)
         form.addRow("Действия", actions)
+        self.write_action_buttons = [
+            self.restore_button,
+            self.import_price_file_button,
+            self.download_import_price_button,
+            self.import_etim_button,
+            self.apply_etim_report_button,
+        ]
         return box
 
     def build_rules_tab(self) -> QWidget:
@@ -746,6 +790,9 @@ class MainWindow(QMainWindow):
         save_config(self.config)
 
     def copy_db_to_workspace(self) -> None:
+        if self.worker is not None:
+            QMessageBox.warning(self, "Операция уже выполняется", "Дождитесь завершения текущей операции.")
+            return
         source = Path(self.db_path_edit.text().strip())
         work_dir_text = self.work_dir_edit.text().strip()
         if not source.exists():
@@ -757,13 +804,16 @@ class MainWindow(QMainWindow):
         target_dir = Path(work_dir_text) / "database"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / "chint_mdm.sqlite"
-        shutil.copy2(source, target)
+        copy_sqlite_database(source, target)
         self.db_path_edit.setText(str(target))
         self.save_current_config()
         self.refresh_database_status()
         QMessageBox.information(self, "Готово", f"База скопирована:\n{target}")
 
     def restore_db_from_backup(self) -> None:
+        if self.worker is not None:
+            QMessageBox.warning(self, "Операция уже выполняется", "Дождитесь завершения текущей операции.")
+            return
         db_path = self.validated_db_path()
         if db_path is None:
             return
@@ -840,16 +890,14 @@ class MainWindow(QMainWindow):
             db_path, template_path, output_dir, rules_path = paths
 
             self.fill_log.append("Запуск заполнения...")
-            self.worker = FillWorker(
+            worker = FillWorker(
                 db_path,
                 template_path,
                 output_dir,
                 rules_path,
                 self.current_manual_values_path(),
             )
-            self.worker.done.connect(self.on_fill_done)
-            self.worker.failed.connect(self.on_fill_failed)
-            self.worker.start()
+            self.start_worker(worker, self.on_fill_done, self.on_fill_failed)
         except Exception:
             self.on_action_failed(traceback.format_exc())
 
@@ -878,16 +926,14 @@ class MainWindow(QMainWindow):
             work_text = self.work_dir_edit.text().strip()
             rules_path = ensure_default_rules(Path(work_text)) if work_text else None
             self.fill_log.append("Импортирую ручные дозаполнения...")
-            self.worker = ManualImportWorker(
+            worker = ManualImportWorker(
                 db_path,
                 filled_path,
                 manual_path,
                 Path(output_text),
                 rules_path,
             )
-            self.worker.done.connect(self.on_manual_import_done)
-            self.worker.failed.connect(self.on_fill_failed)
-            self.worker.start()
+            self.start_worker(worker, self.on_manual_import_done, self.on_fill_failed)
         except Exception:
             self.on_fill_failed(traceback.format_exc())
 
@@ -900,10 +946,8 @@ class MainWindow(QMainWindow):
             db_path, template_path, output_dir, rules_path = paths
 
             self.fill_log.append("Анализирую желтые поля и кандидаты маппинга...")
-            self.worker = AnalyzeWorker(db_path, template_path, output_dir, rules_path)
-            self.worker.done.connect(self.on_mapping_analysis_done)
-            self.worker.failed.connect(self.on_action_failed)
-            self.worker.start()
+            worker = AnalyzeWorker(db_path, template_path, output_dir, rules_path)
+            self.start_worker(worker, self.on_mapping_analysis_done, self.on_action_failed)
         except Exception:
             self.on_action_failed(traceback.format_exc())
 
@@ -955,20 +999,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Прайс не найден", "Выберите существующий XLSX прайс-лист.")
                 return
             self.price_log.append("Импортирую выбранный прайс...")
-            self.worker = PriceImportWorker(db_path, price_path, "", self.price_download_dir())
-            self.worker.done.connect(self.on_price_import_done)
-            self.worker.failed.connect(self.on_price_import_failed)
-            self.worker.start()
+            worker = PriceImportWorker(db_path, price_path, "", self.price_download_dir())
+            self.start_worker(worker, self.on_price_import_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
     def find_latest_price(self) -> None:
         try:
             self.price_log.append(f"Ищу свежий прайс на {DEFAULT_PRICE_SOURCE_URL}...")
-            self.worker = PriceFindWorker(DEFAULT_PRICE_SOURCE_URL)
-            self.worker.done.connect(self.on_price_found)
-            self.worker.failed.connect(self.on_price_import_failed)
-            self.worker.start()
+            worker = PriceFindWorker(DEFAULT_PRICE_SOURCE_URL)
+            self.start_worker(worker, self.on_price_found, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
@@ -983,10 +1023,8 @@ class MainWindow(QMainWindow):
                 return
             downloads_dir = self.price_download_dir()
             self.price_log.append(f"Скачиваю прайс в {downloads_dir}...")
-            self.worker = PriceImportWorker(db_path, None, price_url, downloads_dir)
-            self.worker.done.connect(self.on_price_import_done)
-            self.worker.failed.connect(self.on_price_import_failed)
-            self.worker.start()
+            worker = PriceImportWorker(db_path, None, price_url, downloads_dir)
+            self.start_worker(worker, self.on_price_import_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
@@ -1004,10 +1042,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "ETIM не найден", "Выберите существующий XLSX ETIM-файл.")
                 return
             self.price_log.append("Импортирую ETIM-файл...")
-            self.worker = EtimImportWorker(db_path, etim_path, self.etim_report_dir())
-            self.worker.done.connect(self.on_etim_import_done)
-            self.worker.failed.connect(self.on_price_import_failed)
-            self.worker.start()
+            worker = EtimImportWorker(db_path, etim_path, self.etim_report_dir())
+            self.start_worker(worker, self.on_etim_import_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
@@ -1032,10 +1068,8 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
             self.price_log.append(f"Применяю решения из ETIM-отчета: {report_path}")
-            self.worker = EtimDecisionWorker(db_path, report_path)
-            self.worker.done.connect(self.on_etim_decisions_done)
-            self.worker.failed.connect(self.on_price_import_failed)
-            self.worker.start()
+            worker = EtimDecisionWorker(db_path, report_path)
+            self.start_worker(worker, self.on_etim_decisions_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 

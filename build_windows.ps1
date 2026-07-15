@@ -21,15 +21,24 @@ function New-LocalVenv {
 
     if (Get-Command py -ErrorAction SilentlyContinue) {
         & py -3 -m venv $VenvDir
+        Assert-LastExitCode "venv creation"
         return
     }
 
     if (Get-Command python -ErrorAction SilentlyContinue) {
         & python -m venv $VenvDir
+        Assert-LastExitCode "venv creation"
         return
     }
 
     throw "Python was not found. Install Python 3.10+ to build the portable app."
+}
+
+function Assert-LastExitCode {
+    param([string]$StepName)
+    if ($LASTEXITCODE -ne 0) {
+        throw "$StepName failed with exit code $LASTEXITCODE."
+    }
 }
 
 New-LocalVenv
@@ -40,7 +49,9 @@ if (-not (Test-Path $VenvPython)) {
 
 Write-Host "Updating build tools..."
 & $VenvPython -m pip install --upgrade pip
+Assert-LastExitCode "pip upgrade"
 & $VenvPython -m pip install -r requirements.txt pyinstaller
+Assert-LastExitCode "dependency install"
 
 Write-Host "Building portable app..."
 & $VenvPython -m PyInstaller `
@@ -52,6 +63,7 @@ Write-Host "Building portable app..."
     --paths src `
     --add-data $BundledRules `
     run_app.py
+Assert-LastExitCode "PyInstaller"
 
 $ExePath = Join-Path $AppDir "$AppName.exe"
 if (-not (Test-Path $ExePath)) {

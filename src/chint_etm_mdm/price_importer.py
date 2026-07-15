@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .db_utils import connect_database, create_sqlite_backup
+
 
 NS = {
     "a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
@@ -138,10 +140,7 @@ def unique_path(path: Path) -> Path:
 
 
 def backup_database(db_path: Path) -> Path:
-    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    backup_path = db_path.with_name(f"{db_path.name}.bak_{stamp}")
-    shutil.copy2(db_path, backup_path)
-    return backup_path
+    return create_sqlite_backup(db_path).path
 
 
 def cell_value(cell: ET.Element, shared_strings: list[str]) -> str:
@@ -472,8 +471,7 @@ def import_price_workbook(
     backup_path = backup_database(db_path) if make_backup else None
     snapshot_date = snapshot_date_from_filename(xlsx_path)
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect_database(db_path) as conn:
         previous_snapshot_id = latest_snapshot_id(conn)
         cur = conn.cursor()
         cur.execute(

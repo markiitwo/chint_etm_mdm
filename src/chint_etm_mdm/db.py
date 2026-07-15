@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .db_utils import connect_database
+
 
 @dataclass(frozen=True)
 class DatabaseStats:
@@ -44,9 +46,7 @@ class ProductRecord:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return connect_database(db_path, readonly=True)
 
 
 def _scalar(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> Any:

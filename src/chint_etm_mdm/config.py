@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+from .atomic_files import atomic_write_json
+
 
 APP_DIR_NAME = "CHINT ETM MDM"
 CONFIG_FILE_NAME = "config.json"
@@ -45,10 +47,7 @@ def load_config() -> AppConfig:
 
 def save_config(config: AppConfig) -> None:
     path = user_config_path()
-    path.write_text(
-        json.dumps(asdict(config), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_json(path, asdict(config))
 
 
 def ensure_work_dirs(work_dir: Path) -> None:
