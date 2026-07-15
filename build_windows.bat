@@ -8,10 +8,10 @@ set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.
 if not "%EXIT_CODE%"=="0" (
-    echo Сборка завершилась с ошибкой.
+    echo Build failed.
     pause
     exit /b %EXIT_CODE%
 )
 
-echo Сборка завершена. Можно закрыть это окно.
+echo Build completed. You can close this window.
 pause >nul

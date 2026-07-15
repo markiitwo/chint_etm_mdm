@@ -13,11 +13,11 @@ $BundledRules = "src\chint_etm_mdm\rules\attribute_mappings.json;chint_etm_mdm\r
 
 function New-LocalVenv {
     if (Test-Path $VenvPython) {
-        Write-Host "Локальная среда уже есть: $VenvDir"
+        Write-Host "Local venv already exists: $VenvDir"
         return
     }
 
-    Write-Host "Создаю локальную Python-среду в .venv..."
+    Write-Host "Creating local Python venv in .venv..."
 
     if (Get-Command py -ErrorAction SilentlyContinue) {
         & py -3 -m venv $VenvDir
@@ -29,20 +29,20 @@ function New-LocalVenv {
         return
     }
 
-    throw "Python не найден. Установите Python 3.10+ для сборки portable-версии."
+    throw "Python was not found. Install Python 3.10+ to build the portable app."
 }
 
 New-LocalVenv
 
 if (-not (Test-Path $VenvPython)) {
-    throw "Не найден Python внутри .venv: $VenvPython"
+    throw "Python was not found inside .venv: $VenvPython"
 }
 
-Write-Host "Обновляю инструменты сборки..."
+Write-Host "Updating build tools..."
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r requirements.txt pyinstaller
 
-Write-Host "Собираю portable-приложение..."
+Write-Host "Building portable app..."
 & $VenvPython -m PyInstaller `
     --noconfirm `
     --clean `
@@ -55,17 +55,17 @@ Write-Host "Собираю portable-приложение..."
 
 $ExePath = Join-Path $AppDir "$AppName.exe"
 if (-not (Test-Path $ExePath)) {
-    throw "Сборка завершилась без ожидаемого EXE: $ExePath"
+    throw "Build finished without the expected EXE: $ExePath"
 }
 
 if (Test-Path $ZipPath) {
     Remove-Item $ZipPath -Force
 }
 
-Write-Host "Упаковываю portable-архив..."
+Write-Host "Creating portable zip..."
 Compress-Archive -Path $AppDir -DestinationPath $ZipPath -Force
 
 Write-Host ""
-Write-Host "Готово."
-Write-Host "Папка программы: $AppDir"
-Write-Host "Архив для передачи: $ZipPath"
+Write-Host "Done."
+Write-Host "App folder: $AppDir"
+Write-Host "Portable zip: $ZipPath"
