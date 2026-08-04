@@ -5,6 +5,7 @@ import hashlib
 import os
 import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def connect_database(path: Path, *, readonly: bool = False) -> sqlite3.Connectio
 
 
 def check_sqlite_integrity(db_path: Path) -> None:
-    with connect_database(db_path, readonly=True) as conn:
+    with closing(connect_database(db_path, readonly=True)) as conn:
         result = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
     if result.lower() != "ok":
         raise ValueError(f"SQLite integrity_check failed for {db_path}: {result}")
@@ -69,8 +70,11 @@ def create_sqlite_backup(db_path: Path, backup_dir: Path | None = None, label: s
         ) as temp_file:
             temp_name = temp_file.name
         temp_path = Path(temp_name)
-        with connect_database(db_path, readonly=True) as source, sqlite3.connect(temp_path) as dest:
-            source.backup(dest)
+        with closing(connect_database(db_path, readonly=True)) as source, closing(
+            sqlite3.connect(temp_path)
+        ) as dest:
+            with source, dest:
+                source.backup(dest)
         check_sqlite_integrity(temp_path)
         digest = sha256_file(temp_path)
         final_path = backup_dir / f"{db_path.name}.{label}_{stamp}_{digest[:8]}"
@@ -99,8 +103,11 @@ def copy_sqlite_database(source_path: Path, target_path: Path) -> None:
         ) as temp_file:
             temp_name = temp_file.name
         temp_path = Path(temp_name)
-        with connect_database(source_path, readonly=True) as source, sqlite3.connect(temp_path) as dest:
-            source.backup(dest)
+        with closing(connect_database(source_path, readonly=True)) as source, closing(
+            sqlite3.connect(temp_path)
+        ) as dest:
+            with source, dest:
+                source.backup(dest)
         check_sqlite_integrity(temp_path)
         os.replace(temp_path, target_path)
         temp_name = ""
@@ -129,8 +136,11 @@ def restore_sqlite_backup(db_path: Path, backup_path: Path) -> BackupResult:
         ) as temp_file:
             temp_name = temp_file.name
         temp_path = Path(temp_name)
-        with connect_database(backup_path, readonly=True) as source, sqlite3.connect(temp_path) as dest:
-            source.backup(dest)
+        with closing(connect_database(backup_path, readonly=True)) as source, closing(
+            sqlite3.connect(temp_path)
+        ) as dest:
+            with source, dest:
+                source.backup(dest)
         check_sqlite_integrity(temp_path)
         remove_sqlite_sidecars(db_path)
         os.replace(temp_path, db_path)
