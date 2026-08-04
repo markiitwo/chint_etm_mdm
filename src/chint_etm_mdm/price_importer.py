@@ -9,6 +9,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ PRICE_SHEETS = (
     "Выведено из ассортимента",
     "История изменений",
 )
+REQUIRED_TABLE_HEADERS = ("Артикул", "Наименование")
 DEFAULT_PRICE_SOURCE_URL = "https://ensmas.ru/"
 LOW_VOLTAGE_PRICE_LABEL = "низковольтное оборудование"
 
@@ -209,10 +211,30 @@ def read_sheet_rows(xlsx_path: Path, sheet_name: str) -> list[list[str]]:
         ]
 
 
+def table_rows_from_header(rows: list[list[str]], sheet_name: str) -> list[list[str]]:
+    for header_index, row in enumerate(rows):
+        header = [str(cell).strip() for cell in row]
+        if all(required in header for required in REQUIRED_TABLE_HEADERS):
+            return [header, *rows[header_index + 1 :]]
+    required = ", ".join(REQUIRED_TABLE_HEADERS)
+    raise ValueError(f"На листе '{sheet_name}' не найдены обязательные заголовки: {required}.")
+
+
 def read_price_workbook(xlsx_path: Path) -> dict[str, list[list[str]]]:
     if xlsx_path.suffix.lower() not in {".xlsx", ".xlsm"}:
         raise ValueError("Прайс должен быть XLSX/XLSM файлом.")
-    return {sheet_name: read_sheet_rows(xlsx_path, sheet_name) for sheet_name in PRICE_SHEETS}
+    workbook_rows = {
+        sheet_name: table_rows_from_header(read_sheet_rows(xlsx_path, sheet_name), sheet_name)
+        for sheet_name in PRICE_SHEETS
+    }
+    price_rows = workbook_rows["Price-list"]
+    article_index = price_rows[0].index("Артикул")
+    if not any(
+        article_index < len(row) and str(row[article_index]).strip()
+        for row in price_rows[1:]
+    ):
+        raise ValueError("Лист 'Price-list' не содержит строк с артикулами.")
+    return workbook_rows
 
 
 def snapshot_date_from_filename(path: Path) -> str:
@@ -220,7 +242,19 @@ def snapshot_date_from_filename(path: Path) -> str:
 
 
 def latest_snapshot_id(conn: sqlite3.Connection) -> int | None:
-    row = conn.execute("SELECT id FROM price_snapshots ORDER BY id DESC LIMIT 1").fetchone()
+    row = conn.execute(
+        """
+        SELECT snapshots.id
+        FROM price_snapshots snapshots
+        WHERE EXISTS (
+            SELECT 1
+            FROM price_snapshot_items items
+            WHERE items.snapshot_id = snapshots.id
+        )
+        ORDER BY snapshots.id DESC
+        LIMIT 1
+        """
+    ).fetchone()
     return int(row[0]) if row else None
 
 
@@ -471,7 +505,7 @@ def import_price_workbook(
     backup_path = backup_database(db_path) if make_backup else None
     snapshot_date = snapshot_date_from_filename(xlsx_path)
 
-    with connect_database(db_path) as conn:
+    with closing(connect_database(db_path)) as conn, conn:
         previous_snapshot_id = latest_snapshot_id(conn)
         cur = conn.cursor()
         cur.execute(
