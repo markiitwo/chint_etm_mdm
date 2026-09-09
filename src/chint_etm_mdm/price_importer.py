@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .db_utils import connect_database, create_sqlite_backup
 
@@ -367,15 +367,16 @@ def count_new_articles(conn: sqlite3.Connection, previous_snapshot_id: int | Non
     return int(
         conn.execute(
             """
-            SELECT COUNT(DISTINCT current.article)
-            FROM price_snapshot_items current
-            WHERE current.snapshot_id = ?
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM price_snapshot_items previous
-                  WHERE previous.snapshot_id = ?
-                    AND previous.article = current.article
-              )
+            SELECT COUNT(*)
+            FROM (
+                SELECT article
+                FROM price_snapshot_items
+                WHERE snapshot_id = ? AND article IS NOT NULL
+                EXCEPT
+                SELECT article
+                FROM price_snapshot_items
+                WHERE snapshot_id = ? AND article IS NOT NULL
+            )
             """,
             (snapshot_id, previous_snapshot_id),
         ).fetchone()[0]
@@ -592,16 +593,22 @@ def import_price_workbook(
     db_path: Path,
     source_url: str = "",
     make_backup: bool = True,
+    progress: Callable[[str], None] | None = None,
 ) -> PriceImportResult:
     if not xlsx_path.exists():
         raise FileNotFoundError(f"Прайс не найден: {xlsx_path}")
     if not db_path.exists():
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
+    report_progress = progress or (lambda _message: None)
+    report_progress("Читаю и проверяю прайс-лист...")
     workbook_rows = read_price_workbook(xlsx_path)
+    if make_backup:
+        report_progress("Создаю резервную копию базы. Для большой базы это может занять время...")
     backup_path = backup_database(db_path) if make_backup else None
     snapshot_date = snapshot_date_from_filename(xlsx_path)
 
+    report_progress("Обновляю товары и цены в базе...")
     with closing(connect_database(db_path)) as conn, conn:
         previous_snapshot_id = latest_snapshot_id(conn)
         cur = conn.cursor()
@@ -615,14 +622,16 @@ def import_price_workbook(
         snapshot_id = int(cur.lastrowid)
 
         price_rows = insert_price_rows(cur, snapshot_id, workbook_rows["Price-list"])
+        report_progress("Сохраняю изменения ассортимента и историю цен...")
         new_rows = insert_new_products(cur, snapshot_id, workbook_rows["Введено в ассортимент"])
         out_rows = insert_outgoing(cur, snapshot_id, workbook_rows["Выведено из ассортимента"])
         history_rows = insert_history(cur, snapshot_id, workbook_rows["История изменений"])
-        conn.commit()
-
+        report_progress("Подсчитываю новые артикулы и изменения цен...")
         products_total = int(cur.execute("SELECT COUNT(*) FROM products").fetchone()[0])
         new_articles = count_new_articles(conn, previous_snapshot_id, snapshot_id)
         changed_price_rows = count_changed_prices(conn, previous_snapshot_id, snapshot_id)
+        report_progress("Завершаю сохранение базы...")
+        conn.commit()
 
     return PriceImportResult(
         price_file=xlsx_path,

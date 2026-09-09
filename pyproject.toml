@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chint-etm-mdm"
-version = "0.1.1"
+version = "0.1.2"
 description = "Portable CHINT ETM upload_goods template filler"
 requires-python = ">=3.10"
 dependencies = [

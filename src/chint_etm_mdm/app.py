@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 from openpyxl import load_workbook
 
+from . import __version__
 from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, load_config, save_config
 from .db import get_stats
@@ -164,6 +165,8 @@ class ManualImportWorker(QThread):
 class PriceImportWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
+    progress = Signal(str)
+    downloaded = Signal(object)
 
     def __init__(
         self,
@@ -182,7 +185,10 @@ class PriceImportWorker(QThread):
         try:
             price_path = self.price_path
             if self.price_url:
+                self.progress.emit("Скачиваю и проверяю файл прайса...")
                 price_path = download_price_file(self.price_url, self.downloads_dir)
+                self.downloaded.emit(price_path)
+                self.progress.emit(f"Скачивание завершено: {price_path.name}")
             if price_path is None:
                 raise ValueError("Выберите XLSX прайс или укажите ссылку для скачивания.")
             self.done.emit(
@@ -191,6 +197,7 @@ class PriceImportWorker(QThread):
                     self.db_path,
                     source_url=self.price_url,
                     make_backup=True,
+                    progress=self.progress.emit,
                 )
             )
         except Exception:
@@ -255,7 +262,7 @@ class EtimDecisionWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("CHINT ETM MDM")
+        self.setWindowTitle(f"CHINT ETM MDM {__version__}")
         self.resize(980, 680)
         self.config = load_config()
         self.worker: (
@@ -335,6 +342,9 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda: self.on_worker_finished(worker))
         worker.done.connect(done_handler)
         worker.failed.connect(failed_handler)
+        if isinstance(worker, PriceImportWorker):
+            worker.progress.connect(self.price_log.append)
+            worker.downloaded.connect(self.on_price_downloaded)
         self.update_write_action_buttons()
         worker.start()
         return True
@@ -1141,6 +1151,10 @@ class MainWindow(QMainWindow):
         if self.tabs is not None:
             self.tabs.setCurrentIndex(3)
         QMessageBox.information(self, "Анализ готов", f"Отчет:\n{report_path}")
+
+    def on_price_downloaded(self, price_path: Path) -> None:
+        self.price_file_edit.setText(str(price_path))
+        self.open_price_file_button.setEnabled(True)
 
     def on_price_import_done(self, result: PriceImportResult) -> None:
         self.price_file_edit.setText(str(result.price_file))
