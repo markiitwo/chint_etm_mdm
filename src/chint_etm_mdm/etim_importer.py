@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -607,14 +608,14 @@ def import_etim_workbook(
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
     backup_path = backup_database(db_path) if make_backup else None
-    with connect_database(db_path) as conn:
+    with closing(connect_database(db_path)) as conn, conn:
         ensure_etim_import_tables(conn)
         articles = fetch_all_articles(conn)
         scanned_articles = len(articles)
 
     article_data = scan_etim_workbook(etim_path, articles)
 
-    with connect_database(db_path) as conn:
+    with closing(connect_database(db_path)) as conn, conn:
         ensure_etim_import_tables(conn)
         (
             dimension_values_written,
@@ -711,7 +712,7 @@ def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecis
         accepted.append((article, column, value))
 
     backup_path = backup_database(db_path)
-    with connect_database(db_path) as conn:
+    with closing(connect_database(db_path)) as conn, conn:
         ensure_etim_import_tables(conn)
         for article, column, value in accepted:
             conn.execute(

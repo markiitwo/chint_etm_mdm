@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import datetime as dt
 import html.parser
+import os
+import posixpath
 import re
-import shutil
 import sqlite3
+import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
@@ -30,6 +32,7 @@ PRICE_SHEETS = (
 REQUIRED_TABLE_HEADERS = ("Артикул", "Наименование")
 DEFAULT_PRICE_SOURCE_URL = "https://ensmas.ru/"
 LOW_VOLTAGE_PRICE_LABEL = "низковольтное оборудование"
+MAX_PRICE_DOWNLOAD_BYTES = 100 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -107,26 +110,111 @@ def download_price_file(url: str, downloads_dir: Path) -> Path:
         raise ValueError("Укажите ссылку на прайс-лист.")
     downloads_dir.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "CHINT ETM MDM"})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        filename = filename_from_response(url, response.headers.get("Content-Disposition", ""))
-        target = unique_path(downloads_dir / filename)
-        with target.open("wb") as fh:
-            shutil.copyfileobj(response, fh)
-    return target
+    temp_path: Path | None = None
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            filename = filename_from_response(url, response.headers.get("Content-Disposition", ""))
+            content_length_text = response.headers.get("Content-Length", "")
+            try:
+                content_length = int(content_length_text) if content_length_text else None
+            except ValueError:
+                content_length = None
+            if content_length is not None and content_length > MAX_PRICE_DOWNLOAD_BYTES:
+                raise ValueError("Скачиваемый прайс превышает допустимый размер.")
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=".price-", suffix=".part", dir=downloads_dir, delete=False
+            ) as fh:
+                temp_path = Path(fh.name)
+                downloaded = 0
+                while chunk := response.read(1024 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > MAX_PRICE_DOWNLOAD_BYTES:
+                        raise ValueError("Скачиваемый прайс превышает допустимый размер.")
+                    fh.write(chunk)
+
+        if content_length is not None and downloaded != content_length:
+            raise ValueError("Скачанный файл короче размера, указанного сервером.")
+
+        validate_excel_package(temp_path)
+        target = publish_unique_path(temp_path, downloads_dir / filename)
+        temp_path = None
+        return target
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def filename_from_response(url: str, content_disposition: str) -> str:
-    match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', content_disposition)
-    if match:
-        name = urllib.parse.unquote(match.group(1)).strip()
+    extended = re.search(r"(?:^|;)\s*filename\*\s*=\s*(?:UTF-8'[^']*')?([^;]+)", content_disposition, re.I)
+    regular = re.search(r'(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]*))', content_disposition, re.I)
+    if extended:
+        name = urllib.parse.unquote(extended.group(1).strip().strip('"'))
+    elif regular:
+        name = (regular.group(1) if regular.group(1) is not None else regular.group(2)).strip()
     else:
-        name = Path(urllib.parse.urlparse(url).path).name
+        name = urllib.parse.unquote(urllib.parse.urlparse(url).path.rsplit("/", 1)[-1])
+    name = re.split(r"[/\\]", name)[-1]
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).rstrip(" .")
     if not name:
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         name = f"Price-list-CHINT_{stamp}.xlsx"
     if not name.lower().endswith((".xlsx", ".xlsm")):
         name = f"{name}.xlsx"
+    if name.split(".", 1)[0].upper() in {
+        "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))
+    }:
+        name = f"_{name}"
     return name
+
+
+def validate_excel_package(path: Path) -> None:
+    if path.stat().st_size == 0:
+        raise ValueError("Скачанный файл пуст.")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            required = {"[Content_Types].xml", "xl/workbook.xml", "xl/_rels/workbook.xml.rels"}
+            if not required.issubset(names):
+                raise ValueError("Скачанный файл не содержит структуру книги Excel.")
+            if archive.testzip() is not None:
+                raise ValueError("Скачанный ZIP-архив поврежден.")
+            ET.fromstring(archive.read("[Content_Types].xml"))
+            workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+            rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+            if workbook.tag != f"{{{NS['a']}}}workbook" or workbook.find("a:sheets", NS) is None:
+                raise ValueError("Скачанный файл не содержит корректную книгу Excel.")
+            worksheet_targets = [
+                rel.attrib.get("Target", "")
+                for rel in rels
+                if rel.attrib.get("Type", "").endswith("/worksheet")
+                and rel.attrib.get("TargetMode") != "External"
+            ]
+            if not worksheet_targets:
+                raise ValueError("Скачанная книга Excel не содержит листов.")
+            for target in worksheet_targets:
+                member = posixpath.normpath(
+                    target.lstrip("/") if target.startswith("/") else posixpath.join("xl", target)
+                )
+                if member.startswith("../") or member not in names:
+                    raise ValueError("Скачанная книга Excel ссылается на отсутствующий лист.")
+    except (OSError, zipfile.BadZipFile, ET.ParseError) as exc:
+        raise ValueError("Скачанный файл не является корректной книгой Excel.") from exc
+
+
+def publish_unique_path(temp_path: Path, path: Path) -> Path:
+    for index in range(1000):
+        candidate = path if index == 0 else path.with_name(f"{path.stem}_{index}{path.suffix}")
+        try:
+            if os.name == "nt":
+                os.rename(temp_path, candidate)
+            else:
+                os.link(temp_path, candidate)
+        except FileExistsError:
+            continue
+        if os.name != "nt":
+            temp_path.unlink()
+        return candidate
+    raise ValueError(f"Не удалось подобрать свободное имя файла для {path}")
 
 
 def unique_path(path: Path) -> Path:
@@ -176,7 +264,7 @@ def read_sheet_rows(xlsx_path: Path, sheet_name: str) -> list[list[str]]:
     with zipfile.ZipFile(xlsx_path) as archive:
         workbook = ET.fromstring(archive.read("xl/workbook.xml"))
         rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
-        relmap = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
+        relmap = {rel.attrib["Id"]: rel for rel in rels}
         shared_strings: list[str] = []
         if "xl/sharedStrings.xml" in archive.namelist():
             root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
@@ -184,15 +272,24 @@ def read_sheet_rows(xlsx_path: Path, sheet_name: str) -> list[list[str]]:
                 shared_strings.append("".join(t.text or "" for t in item.iterfind(".//a:t", NS)))
 
         target_sheet = None
-        for sheet in workbook.find("a:sheets", NS) or []:
+        sheets = workbook.find("a:sheets", NS)
+        for sheet in sheets if sheets is not None else []:
             if sheet.attrib["name"] == sheet_name:
                 target_sheet = sheet
                 break
         if target_sheet is None:
             raise ValueError(f"В прайсе нет листа '{sheet_name}'.")
 
-        rid = target_sheet.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]
-        sheet_path = "xl/" + relmap[rid]
+        rid = target_sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+        relation = relmap.get(rid or "")
+        if relation is None:
+            raise ValueError(f"Для листа '{sheet_name}' не найдена связь в книге.")
+        if not relation.attrib.get("Type", "").endswith("/worksheet") or relation.attrib.get("TargetMode") == "External":
+            raise ValueError(f"Связь листа '{sheet_name}' не указывает на лист внутри книги.")
+        target = relation.attrib.get("Target", "").replace("\\", "/")
+        sheet_path = posixpath.normpath(target.lstrip("/") if target.startswith("/") else posixpath.join("xl", target))
+        if sheet_path.startswith("../") or sheet_path not in archive.namelist():
+            raise ValueError(f"Файл листа '{sheet_name}' отсутствует в книге.")
         root = ET.fromstring(archive.read(sheet_path))
         rows_xml = root.findall(".//a:sheetData/a:row", NS)
         max_col = 0

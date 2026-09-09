@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,7 +56,7 @@ def _scalar(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) 
 
 
 def get_stats(db_path: Path) -> DatabaseStats:
-    with connect(db_path) as conn:
+    with closing(connect(db_path)) as conn:
         latest = conn.execute(
             """
             SELECT COALESCE(snapshot_date, '') AS snapshot_date,
@@ -85,7 +86,7 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
 
     placeholders = ",".join("?" for _ in clean_articles)
     products: dict[str, ProductRecord] = {}
-    with connect(db_path) as conn:
+    with closing(connect(db_path)) as conn:
         rows = conn.execute(
             f"""
             SELECT

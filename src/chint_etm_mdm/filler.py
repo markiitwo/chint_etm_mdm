@@ -428,7 +428,9 @@ def product_with_template_class(product: ProductRecord, template_class: str) -> 
 
 
 def cell_text(value: object) -> str:
-    return " ".join(str(value or "").replace("\xa0", " ").split())
+    if value is None:
+        return ""
+    return " ".join(str(value).replace("\xa0", " ").split())
 
 
 def has_vba_project(path: Path) -> bool:
