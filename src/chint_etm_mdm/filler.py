@@ -104,6 +104,7 @@ def report_status_label(status: str) -> str:
         "filled_suggested": "Заполнено, нужно проверить",
         "existing_value_preserved": "Существующее значение сохранено",
         "missing_value": "Не заполнено",
+        "value_not_allowed": "Значения нет в списке партнёра",
         "not_found": "Артикул не найден",
         "ok": "Готово",
         "needs_review": "Нужно проверить",
@@ -334,7 +335,7 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
         elif item.status == "filled_suggested":
             bucket["suggested"] = int(bucket["suggested"]) + 1
             bucket["status"] = "needs_review"
-        elif item.status == "missing_value":
+        elif item.status in {"missing_value", "value_not_allowed"}:
             bucket["missing"] = int(bucket["missing"]) + 1
             bucket["status"] = "incomplete"
         elif item.status == "not_found":
@@ -500,6 +501,19 @@ def fill_csv_template(
                         "Заполнено по близкому совпадению; желательно проверить",
                     )
                 )
+            elif status == "value_not_allowed":
+                missing_cells += 1
+                report.append(
+                    FillReportRow(
+                        row_number,
+                        article,
+                        header,
+                        status,
+                        value,
+                        source,
+                        template.not_allowed_note(header, value, rules_path),
+                    )
+                )
             elif status in {"blank", "filled"} and template.is_reportable(header):
                 missing_cells += 1
                 report.append(
@@ -633,6 +647,20 @@ def fill_xlsx_template(
                         value,
                         source,
                         "Заполнено по близкому совпадению; желательно проверить",
+                    )
+                )
+            elif status == "value_not_allowed":
+                missing_cells += 1
+                mark_missing_cell(row[col_idx])
+                report.append(
+                    FillReportRow(
+                        row_number,
+                        article,
+                        header,
+                        status,
+                        value,
+                        source,
+                        template.not_allowed_note(header, value, rules_path),
                     )
                 )
             elif status in {"blank", "filled"} and template.is_reportable(header):

@@ -8,7 +8,9 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from .atomic_files import atomic_write_json
-from .db import fetch_products
+from .db import ProductRecord, fetch_products
+from .export_templates import DEFAULT_PARTNER, PartnerTemplate, load_partner_template
+from .value_matching import canonical, remember_matches
 from .filler import (
     class81_index,
     find_article_index,
@@ -37,6 +39,7 @@ class ManualImportResult:
     report_path: Path
     imported_values: int
     skipped_values: int
+    learned_matches: int = 0
 
 
 def manual_values_path(work_dir: Path) -> Path:
@@ -126,6 +129,26 @@ def write_manual_import_report(path: Path, rows: list[ManualImportRow]) -> None:
     workbook.save(path)
 
 
+def value_match_to_remember(
+    template: PartnerTemplate,
+    product: ProductRecord,
+    header: str,
+    manual_value: str,
+    rules_path: Path | None,
+) -> tuple[str, str, str] | None:
+    """A value the user typed or kept in a closed-list column, paired with the product's own value."""
+    columns = template.attribute_columns_for(header)
+    if columns is None:
+        return None
+    allowed = template.allowed_values_for(header, rules_path)
+    if manual_value not in allowed:
+        return None
+    raw, _ = template.attribute_raw(product, header, columns, rules_path)
+    if not raw or canonical(raw) == canonical(manual_value):
+        return None
+    return header.removeprefix(columns.prefix).strip(), raw, manual_value
+
+
 def import_manual_completions(
     db_path: Path,
     filled_path: Path,
@@ -162,7 +185,9 @@ def import_manual_completions(
             articles.append(normalize_article(row[article_idx].value))
     products = fetch_products(db_path, articles)
 
+    template = load_partner_template(DEFAULT_PARTNER)
     imported: list[ManualImportRow] = []
+    learned_matches: list[tuple[str, str, str]] = []
     skipped = 0
     for row in rows:
         article = normalize_article(row[article_idx].value if article_idx < len(row) else "")
@@ -181,8 +206,12 @@ def import_manual_completions(
                 continue
             db_value = ""
             if product:
-                db_value, _, _ = product_value(product, header, rules_path)
+                db_value, db_status, _ = product_value(product, header, rules_path)
                 db_value = normalize_value(db_value)
+                if db_status in {"value_not_allowed", "suggested"}:
+                    learned_match = value_match_to_remember(template, product, header, manual_value, rules_path)
+                    if learned_match:
+                        learned_matches.append(learned_match)
             if db_value == manual_value:
                 skipped += 1
                 continue
@@ -198,6 +227,8 @@ def import_manual_completions(
     workbook.close()
 
     upsert_manual_values(values_path, imported, filled_path)
+    learned_path = template.learned_matches_path(rules_path)
+    learned_added = remember_matches(learned_path, learned_matches) if learned_path and learned_matches else 0
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"{filled_path.stem}_manual_import_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
     write_manual_import_report(report_path, imported)
@@ -207,6 +238,7 @@ def import_manual_completions(
         report_path=report_path,
         imported_values=len(imported),
         skipped_values=skipped,
+        learned_matches=learned_added,
     )
 
 
@@ -215,6 +247,7 @@ def result_lines(result: ManualImportResult) -> list[str]:
         f"Файл: {result.filled_file}",
         f"Ручных значений сохранено: {result.imported_values}",
         f"Пропущено без изменений: {result.skipped_values}",
+        f"Запомнено новых сопоставлений значений: {result.learned_matches}",
         f"Файл ручных значений: {result.values_path}",
         f"Отчет: {result.report_path}",
     ]

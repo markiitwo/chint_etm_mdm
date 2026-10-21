@@ -12,6 +12,7 @@
   "article_headers": ["Артикул", "Расширенный артикул"],
   "skip_headers": ["Артикул"],
   "classification": {"header": "81 класс", "field": "class81_code"},
+  "value_lists": {"reference": "etm_reference.json", "learned": "etm_value_matches.json"},
   "notes": {
     "default": "В базе нет значения для этого поля.",
     "unit_dimensions": "В базе нет значения для единицы товара. Нужно заполнить именно изделие, не упаковку.",
