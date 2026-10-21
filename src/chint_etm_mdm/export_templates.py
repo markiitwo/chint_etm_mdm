@@ -517,8 +517,13 @@ def load_partner_template(code: str = DEFAULT_PARTNER) -> PartnerTemplate:
 
 
 def available_partners() -> list[str]:
+    """Partners whose files the program fills column by column (raek.json describes an archive instead)."""
     folder = resources.files(partners)
-    return sorted(item.name.removesuffix(".json") for item in folder.iterdir() if item.name.endswith(".json"))
+    return sorted(
+        item.name.removesuffix(".json")
+        for item in folder.iterdir()
+        if item.name.endswith(".json") and "writer" in json.loads(item.read_text(encoding="utf-8"))
+    )
 
 
 def etm_reference_path(rules_path: Path) -> Path:

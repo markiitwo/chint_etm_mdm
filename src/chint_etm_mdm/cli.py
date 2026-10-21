@@ -21,6 +21,7 @@ from .manual_values import (
     result_lines as manual_result_lines,
 )
 from .value_matching import import_etm_reference
+from .raek import fill_raek_zip, remember_name_answers, result_lines as raek_result_lines
 from .price_importer import download_price_file, find_latest_price_url, import_price_workbook, result_lines
 
 
@@ -66,6 +67,8 @@ def main() -> None:
     parser.add_argument("--articles", help="Comma-separated articles for new ETM cards instead of --new-since")
     parser.add_argument("--category-templates", help="Folder with ETM category templates (upload_goods_category_template_<class>.xlsx)")
     parser.add_argument("--codes-file", help="Честный знак product list XLSX with ТН ВЭД and ОКПД2; a newer one in Downloads wins")
+    parser.add_argument("--raek-zip", help="Fill the RAEK manager's archive (zip) with --output-dir; ЧЗ codes from --codes-file or Downloads")
+    parser.add_argument("--raek-answers", help="Remember the да/нет answers from the «Названия» sheet of a RAEK report (needs --rules)")
     args = parser.parse_args()
 
     db_path = Path(args.db)
@@ -82,6 +85,30 @@ def main() -> None:
         print(f"etm_reference={target}")
         print(f"characteristics={characteristics}")
         print(f"allowed_values={values}")
+        return
+
+    if args.raek_answers:
+        if rules_path is None:
+            parser.error("--rules is required for --raek-answers")
+        kept, rejected = remember_name_answers(Path(args.raek_answers), rules_path)
+        print(f"kept={kept}")
+        print(f"rejected={rejected}")
+        return
+
+    if args.raek_zip:
+        if output_dir is None:
+            parser.error("--output-dir is required for --raek-zip")
+        result = fill_raek_zip(
+            db_path,
+            Path(args.raek_zip),
+            output_dir,
+            latest_codes_file(
+                [Path.home() / "Downloads", Path.home() / "Загрузки"], Path(args.codes_file) if args.codes_file else None
+            ),
+            rules_path,
+        )
+        for line in raek_result_lines(result):
+            print(line)
         return
 
     if args.restore_backup:
