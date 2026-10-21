@@ -65,7 +65,7 @@ def write_reference_xlsx(path: Path) -> None:
     for value in CURRENT.values:
         sheet.append(["68", "Род тока", "Текстовая", value, None, None])
     for value in [12, 24, 220, 230]:
-        sheet.append(["132", "Напряжение, В", "Числовая", value, None, None])
+        sheet.append(["132", "Напряжение, В", "Текстовая", value, None, None])
     sheet.append(["132", "Напряжение, В", "Текстовая", "220/380", None, None])
     sheet.append(["900", "Серия", "Текстовая", None, None, None])
     workbook.save(path)
@@ -177,3 +177,92 @@ class NameCandidateTests(unittest.TestCase):
         self.assertEqual([], self.names("Тип устройства"))
         self.assertEqual([], self.names("Номинальная мощность электродвигателя, кВт"))
         self.assertEqual(["С подсветкой"], self.names("Наличие подсветки"))
+
+
+class NumericCharacteristicTests(unittest.TestCase):
+    BACKLIGHT = Characteristic("Напряжение подсветки, В", formats=["Числовая"], values=["AC 220", "AC/DC 24"])
+
+    def test_numeric_list_is_only_an_example(self) -> None:
+        voltage = Characteristic("Напряжение, В", formats=["Числовая", "Текстовая"], values=["12", "24", "220/380"])
+        self.assertEqual(("230", "open"), (match_value("230 В", voltage).value, match_value("230 В", voltage).kind))
+
+    def test_current_kind_is_added(self) -> None:
+        self.assertEqual("AC/DC 230", match_value("230", self.BACKLIGHT, current_kind="AC/DC").value)
+        self.assertEqual("none", match_value("230", self.BACKLIGHT).kind)
+
+    def test_kind_and_voltage_from_product_name(self) -> None:
+        from chint_etm_mdm.export_templates import load_partner_template
+
+        template = load_partner_template("etm")
+        product = ProductRecord(article="B", name="Кнопка с подсветкой NP2 AC/DC230В", attributes={"Род тока": "AC"})
+        self.assertEqual(("230", "AC/DC", "product_name_current"), template.with_current_kind(product, "220", "db"))
+        plain = ProductRecord(article="L", name="Лампа ND16", attributes={"Род тока": "Переменный ток (AC)"})
+        self.assertEqual(("220", "AC", "db"), template.with_current_kind(plain, "220", "db"))
+
+    def test_range_is_written_with_a_dash(self) -> None:
+        from chint_etm_mdm.value_matching import clean_open_value
+
+        self.assertEqual("380-415", clean_open_value("Номинальное напряжение питания переменного тока 50 Гц, В", "380…415"))
+
+
+class ShippedNameAliasTests(unittest.TestCase):
+    def test_only_listed_values_carry_over(self) -> None:
+        from chint_etm_mdm.export_templates import load_partner_template
+
+        template = load_partner_template("etm")
+        columns = template.attribute_columns_for("Конфиг:")
+        fixed = ProductRecord(article="1", attributes={"Тип подсветки": "LED несменный"})
+        without = ProductRecord(article="2", attributes={"Тип подсветки": "Нет (без)"})
+        self.assertEqual("Нет", template.attribute_raw(fixed, "Конфиг:Сменная лампа", columns, None)[0])
+        # "Нет (без)" means there is no light at all, not a fixed lamp.
+        self.assertEqual("", template.attribute_raw(without, "Конфиг:Сменная лампа", columns, None)[0])
+
+    def test_same_name_up_to_unit_is_found(self) -> None:
+        from chint_etm_mdm.value_matching import same_name_attributes
+
+        attrs = {"Условный тепловой ток, А": "16", "Условный тепловой ток, В": "1"}
+        self.assertEqual(["Условный тепловой ток, А"], same_name_attributes("Условный тепловой ток (А)", attrs))
+
+
+class CurrentKindFromNameTests(unittest.TestCase):
+    def test_range_in_name_is_kept_and_flagged(self) -> None:
+        from chint_etm_mdm.value_matching import current_kind_from_text
+
+        self.assertEqual(("AC", "110-230"), current_kind_from_text("Кнопка NP8 AC110-230В(LED)"))
+        backlight = NumericCharacteristicTests.BACKLIGHT
+        result = match_value("110-230", backlight, current_kind="AC")
+        self.assertEqual(("AC 110-230", "words"), (result.value, result.kind))
+
+    def test_letter_instead_of_digit_is_not_read(self) -> None:
+        from chint_etm_mdm.value_matching import current_kind_from_text
+
+        # "AC23ОВ" with a Cyrillic "О" in place of zero must not become "AC 23".
+        self.assertEqual(("", ""), current_kind_from_text("Кнопка NP2 зелёная AC23ОВ (LED)"))
+        self.assertEqual(("AC", "230"), current_kind_from_text("Кнопка NP2 зелёная AC230В (LED)"))
+
+    def test_cut_short_name_is_not_read(self) -> None:
+        from chint_etm_mdm.export_templates import load_partner_template
+        from chint_etm_mdm.value_matching import current_kind_from_text
+
+        self.assertEqual(("", ""), current_kind_from_text("Переключатель NP2-BK12365 зелёная AC23"))
+        self.assertEqual(("AC", "230"), current_kind_from_text("Лампа ND16 AC230В"))
+        product = ProductRecord(
+            article="265954",
+            name="Переключатель NP2-BK12365 зелёная AC23",
+            full_name="Переключатель NP2-BK12365 зелёная AC230В (LED), IP40 (R)",
+        )
+        template = load_partner_template("etm")
+        self.assertEqual(("230", "AC", "product_name_current"), template.with_current_kind(product, "", "db"))
+
+
+class RejectedNamePairTests(unittest.TestCase):
+    def test_rejected_pair_is_not_offered(self) -> None:
+        from chint_etm_mdm.etm_characteristics import names_to_review
+        from chint_etm_mdm.export_templates import load_partner_template
+
+        attrs = [{"Номинальный импульсный ток (8/20), кА": "20"}]
+        offered = names_to_review({"Импульсный ток Iimp (10/350), кА": attrs})
+        self.assertIn("Номинальный импульсный ток (8/20), кА", [row[2] for row in offered])
+        rejects = load_partner_template("etm").name_rejects
+        filtered = names_to_review({"Импульсный ток Iimp (10/350), кА": attrs}, rejects)
+        self.assertEqual([""], [row[2] for row in filtered])
