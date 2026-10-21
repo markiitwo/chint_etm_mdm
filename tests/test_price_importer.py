@@ -68,9 +68,9 @@ class SnapshotSelectionTests(unittest.TestCase):
             conn.executescript(
                 """
                 CREATE TABLE price_snapshots (id INTEGER PRIMARY KEY);
-                CREATE TABLE price_snapshot_items (snapshot_id INTEGER NOT NULL, article TEXT NOT NULL);
+                CREATE TABLE price_snapshot_items (snapshot_id INTEGER NOT NULL, article TEXT NOT NULL, price_with_vat TEXT);
                 INSERT INTO price_snapshots (id) VALUES (1), (2), (3);
-                INSERT INTO price_snapshot_items (snapshot_id, article) VALUES (1, 'A-1'), (2, 'A-2');
+                INSERT INTO price_snapshot_items (snapshot_id, article, price_with_vat) VALUES (1, 'A-1', '10'), (2, 'A-2', '20');
                 """
             )
 
@@ -81,7 +81,7 @@ class SnapshotSelectionTests(unittest.TestCase):
             conn.executescript(
                 """
                 CREATE TABLE price_snapshots (id INTEGER PRIMARY KEY);
-                CREATE TABLE price_snapshot_items (snapshot_id INTEGER NOT NULL, article TEXT NOT NULL);
+                CREATE TABLE price_snapshot_items (snapshot_id INTEGER NOT NULL, article TEXT NOT NULL, price_with_vat TEXT);
                 INSERT INTO price_snapshots (id) VALUES (1), (2);
                 """
             )

@@ -434,12 +434,25 @@ def latest_snapshot_id(conn: sqlite3.Connection) -> int | None:
             SELECT 1
             FROM price_snapshot_items items
             WHERE items.snapshot_id = snapshots.id
+              -- A price without price columns (partial file) is not a baseline for comparison.
+              AND items.price_with_vat IS NOT NULL
         )
         ORDER BY snapshots.id DESC
         LIMIT 1
         """
     ).fetchone()
     return int(row[0]) if row else None
+
+
+def ensure_price_indexes(conn: sqlite3.Connection) -> None:
+    # Product reads take the latest snapshot row per article; without this index
+    # each lookup scans the whole price history.
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_price_snapshot_items_article_snapshot
+        ON price_snapshot_items (article, snapshot_id, id)
+        """
+    )
 
 
 def count_new_articles(conn: sqlite3.Connection, previous_snapshot_id: int | None, snapshot_id: int) -> int:
@@ -483,8 +496,10 @@ def count_changed_prices(conn: sqlite3.Connection, previous_snapshot_id: int | N
             WHERE current.snapshot_id = ?
               AND previous.snapshot_id = ?
               AND (
-                  COALESCE(current.price_with_vat, '') != COALESCE(previous.price_with_vat, '')
-                  OR COALESCE(current.price_without_vat, '') != COALESCE(previous.price_without_vat, '')
+                  (current.price_with_vat IS NOT NULL
+                   AND current.price_with_vat != COALESCE(previous.price_with_vat, ''))
+                  OR (current.price_without_vat IS NOT NULL
+                      AND current.price_without_vat != COALESCE(previous.price_without_vat, ''))
               )
             """,
             (snapshot_id, previous_snapshot_id),
@@ -695,6 +710,7 @@ def import_price_workbook(
 
     report_progress("Обновляю товары и цены в базе...")
     with closing(connect_database(db_path)) as conn, conn:
+        ensure_price_indexes(conn)
         previous_snapshot_id = latest_snapshot_id(conn)
         cur = conn.cursor()
         cur.execute(
