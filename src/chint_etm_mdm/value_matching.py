@@ -341,6 +341,7 @@ def name_candidates(
     target = stems(name)
     unit = name_unit(name)
     base = canonical(UNIT_SUFFIX_RE.sub("", name))
+    logical = canonical(name).startswith("наличие")
     counts: dict[str, int] = {}
     examples: dict[str, list[str]] = {}
     for attributes in products_attributes:
@@ -361,6 +362,10 @@ def name_candidates(
         score = name_score(target, candidate)
         if score == 0 or not (target & candidate) - GENERIC_STEMS:
             continue
+        if unit and not any(char.isdigit() for value in examples[attribute] for char in value):
+            continue  # "Напряжение, В" is a number, "С подсветкой: Да" is not
+        if logical and not all(canonical(value) in LOGICAL_YES | LOGICAL_NO for value in examples[attribute]):
+            continue  # "Наличие подсветки" is yes/no, a voltage is not
         if unit and attribute_unit and unit != attribute_unit:
             continue
         scored.append(((score, count), attribute))
