@@ -17,13 +17,27 @@ from typing import Any
 from . import partners
 from .db import ProductRecord
 from .mapping_rules import source_attributes_for
-from .value_matching import ValueLists, canonical, current_kind_from_text, current_kind_from_value, same_name_attributes
+from .value_matching import (
+    Characteristic,
+    MatchResult,
+    ValueLists,
+    canonical,
+    current_kind_from_text,
+    current_kind_from_value,
+    format_number,
+    match_value,
+    only_number,
+    product_type_from_name,
+    same_name_attributes,
+)
 
 DEFAULT_PARTNER = "etm"
 NAME_ALIAS_SOURCE_PREFIX = "name_alias:"
 SAME_NAME_SOURCE_PREFIX = "same_name:"
 TEMPLATE_ALIAS_SOURCE_PREFIX = "template_alias:"
 CHECK_ALIAS_SOURCE_PREFIX = "template_alias_check:"
+PRODUCT_TYPE_KEY = "тип изделия"
+PRODUCT_TYPE_SOURCE = "product_name_type"
 CURRENT_KIND_ATTRIBUTES = ("Род тока", "Род тока включения", "Род тока катушки управления", "Тип напряжения (тока)")
 
 
@@ -80,6 +94,12 @@ NUMBER_TRANSFORMS = {
     "mm_to_m": lambda value, spec: mm_to_m(value),
     "count": lambda value, spec: format_count(value),
 }
+
+
+def scaled(value: str, factor: float) -> str:
+    """"0.03" with factor 1000 -> "30"; a value that is not one number is dropped."""
+    number = only_number(value)
+    return "" if number is None else format_number(number * factor)
 
 
 def is_present(value: Any) -> bool:
@@ -153,6 +173,8 @@ class NameAlias:
     check: bool = False
     # Only values listed in `values` carry over; any other value of the attribute is skipped.
     only_listed: bool = False
+    # Unit conversion, e.g. 1000 for А -> мА.
+    scale: float | None = None
 
 
 @dataclass(frozen=True)
@@ -172,6 +194,8 @@ class PartnerTemplate:
     name_aliases: dict[str, NameAlias] | None = None
     # Pairs checked and found wrong: never offered on the "Названия" sheet.
     name_rejects: dict[str, frozenset[str]] | None = None
+    # Drop-down lists of an ETM category template, by canonical characteristic name.
+    dropdowns: dict[str, tuple[str, ...]] | None = None
 
     def spreadsheet_value(self, header: str, value: str) -> str | int | float:
         """Weights, sizes and counts go into xlsx as real numbers, so no decimal separator can be misread."""
@@ -229,6 +253,8 @@ class PartnerTemplate:
                 value = attrs.get(attribute, "")
                 if alias.only_listed and value not in alias.values:
                     continue
+                if value and alias.scale:
+                    value = scaled(value, alias.scale)
                 if value:
                     prefix = CHECK_ALIAS_SOURCE_PREFIX if alias.check else TEMPLATE_ALIAS_SOURCE_PREFIX
                     return alias.values.get(value, value), f"{prefix}{attribute}"
@@ -245,21 +271,35 @@ class PartnerTemplate:
         rules_path: Path | None,
     ) -> tuple[str, str, str]:
         raw, source = self.attribute_raw(product, header, columns, rules_path)
+        attr_name = header.removeprefix(columns.prefix).strip()
+        dropdown = self.dropdown_for(attr_name)
+        if not raw and dropdown and canonical(attr_name) == PRODUCT_TYPE_KEY:
+            raw, source = product_type_from_name(product.full_name or product.name, dropdown), PRODUCT_TYPE_SOURCE
         if not raw:
             return "", "blank", ""
         lists = self.value_lists(rules_path)
-        if lists is None:
+        if lists is None and not dropdown:
             return raw, "filled", source
-        attr_name = header.removeprefix(columns.prefix).strip()
         kind = ""
-        if lists.wants_current_kind(attr_name):
+        if lists is not None and not dropdown and lists.wants_current_kind(attr_name):
             raw, kind, source = self.with_current_kind(product, raw, source)
-        match = lists.match(attr_name, raw, kind)
+        match = self.match_allowed(attr_name, raw, rules_path, kind)
         if match.confident and not source.startswith((SAME_NAME_SOURCE_PREFIX, CHECK_ALIAS_SOURCE_PREFIX)):
             return match.value, "filled", source
         if match.confident or match.kind == "words":
             return match.value, "suggested", source
         return raw, "value_not_allowed", source
+
+    def dropdown_for(self, attr_name: str) -> tuple[str, ...]:
+        return (self.dropdowns or {}).get(canonical(attr_name), ())
+
+    def match_allowed(self, attr_name: str, raw: str, rules_path: Path | None, kind: str = "") -> MatchResult:
+        """Against the category template's drop-down when it has one, else ETM's reference."""
+        dropdown = self.dropdown_for(attr_name)
+        lists = self.value_lists(rules_path)
+        if lists is not None:
+            return lists.match(attr_name, raw, kind, dropdown)
+        return match_value(raw, Characteristic(name=attr_name, values=list(dropdown)))
 
     def with_current_kind(self, product: ProductRecord, raw: str, source: str) -> tuple[str, str, str]:
         """For values like "AC 220": the product name ("... AC/DC230В") wins, else the "Род тока" attributes."""
@@ -304,10 +344,12 @@ class PartnerTemplate:
 
     def candidates_for(self, header: str, raw: str, rules_path: Path | None) -> tuple[str, ...]:
         columns = self.attribute_columns_for(header)
-        lists = self.value_lists(rules_path)
-        if columns is None or lists is None:
+        if columns is None:
             return ()
-        return lists.match(header.removeprefix(columns.prefix).strip(), raw).candidates
+        attr_name = header.removeprefix(columns.prefix).strip()
+        if self.value_lists(rules_path) is None and not self.dropdown_for(attr_name):
+            return ()
+        return self.match_allowed(attr_name, raw, rules_path).candidates
 
     def not_allowed_note(self, header: str, raw: str, rules_path: Path | None) -> str:
         candidates = self.candidates_for(header, raw, rules_path)
@@ -403,6 +445,7 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
                 values=dict(item.get("values") or {}),
                 check=bool(item.get("check", False)),
                 only_listed=bool(item.get("only_listed", False)),
+                scale=float(item["scale"]) if item.get("scale") else None,
             )
             for item in data.get("name_aliases", [])
         },

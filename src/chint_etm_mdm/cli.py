@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 from pathlib import Path
 
 from .analyzer import analyze_template_mapping
 from .db import get_stats
+from .etm_categories import fill_new_products, new_articles_since
 from .etim_importer import (
     apply_etim_conflict_decisions,
     decision_result_lines,
@@ -57,6 +59,13 @@ def main() -> None:
         action="store_true",
         help="Create XLSX mapping coverage report without filling the template",
     )
+    parser.add_argument(
+        "--new-since",
+        help="Make ETM cards for products introduced after this date (DD.MM.YYYY), one file per class",
+    )
+    parser.add_argument("--articles", help="Comma-separated articles for new ETM cards instead of --new-since")
+    parser.add_argument("--category-templates", help="Folder with ETM category templates (upload_goods_category_template_<class>.xlsx)")
+    parser.add_argument("--codes-file", help="Честный знак product list XLSX with ТН ВЭД and ОКПД2 by article")
     args = parser.parse_args()
 
     db_path = Path(args.db)
@@ -126,6 +135,32 @@ def main() -> None:
         result = import_price_workbook(price_path, db_path, source_url=price_url)
         for line in result_lines(result):
             print(line)
+        return
+
+    if args.new_since or args.articles:
+        if output_dir is None or not args.category_templates:
+            parser.error("--output-dir and --category-templates are required for new product cards")
+        if args.articles:
+            articles = [item.strip() for item in args.articles.split(",") if item.strip()]
+        else:
+            articles = new_articles_since(db_path, dt.datetime.strptime(args.new_since, "%d.%m.%Y").date())
+        run = fill_new_products(
+            db_path,
+            articles,
+            Path(args.category_templates),
+            output_dir,
+            rules_path,
+            manual_values_file,
+            Path(args.codes_file) if args.codes_file else None,
+        )
+        print(f"articles={len(articles)}")
+        print(f"summary={run.summary_path}")
+        for code, (result, csv_path) in sorted(run.results.items()):
+            print(f"class={code} rows={result.found_articles} filled={result.filled_cells} suggested={result.suggested_cells} missing={result.missing_cells} csv={csv_path}")
+        for code, members in sorted(run.missing_templates.items()):
+            print(f"missing_template={code} articles={len(members)}")
+        print(f"unclassified={len(run.unclassified)}")
+        print(f"not_found={len(run.not_found)}")
         return
 
     if args.stats:
