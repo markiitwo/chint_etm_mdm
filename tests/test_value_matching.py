@@ -39,9 +39,15 @@ class MatchValueTests(unittest.TestCase):
         self.assertFalse(result.confident)
 
     def test_ambiguous_value_is_not_guessed(self) -> None:
-        result = match_value("переменный", CURRENT)
+        result = match_value("переменный 50 Гц", CURRENT)
         self.assertEqual(("", "none"), (result.value, result.kind))
         self.assertIn("Переменный (AC)", result.candidates)
+        self.assertEqual("none", match_value("1P+N", POLES).kind)
+
+    def test_closest_fit_by_words(self) -> None:
+        self.assertEqual("Переменный (AC)", match_value("Переменный ток (AC)", CURRENT).value)
+        self.assertEqual("Переменный/Постоянный (AC/DC)", match_value("AC/DC", CURRENT).value)
+        self.assertEqual("words", match_value("Постоянный ток (DC)", CURRENT).kind)
 
     def test_learned_match_wins(self) -> None:
         result = match_value("~230", VOLTAGE, {"~230": "230"})
@@ -78,7 +84,7 @@ class ReferenceInFillTests(unittest.TestCase):
             self.assertEqual((3, 8), import_etm_reference(reference_xlsx, rules_dir / "etm_reference.json"))
 
             products = {
-                "A-1": ProductRecord(article="A-1", attributes={"Род тока": "AC", "Напряжение, В": "230 V", "Серия": "NXB"}),
+                "A-1": ProductRecord(article="A-1", attributes={"Род тока": "Переменный 50 Гц", "Напряжение, В": "230 V", "Серия": "NXB"}),
                 "A-2": ProductRecord(article="A-2", attributes={"Род тока": "AC (перемен.)", "Напряжение, В": "230-240"}),
             }
             self.assertEqual(("230", "filled", "product_attribute_values.attribute_name"), product_value(products["A-1"], "Конфиг:Напряжение, В", rules_path))
@@ -110,7 +116,7 @@ class ReferenceInFillTests(unittest.TestCase):
             finally:
                 report.close()
             self.assertEqual(2, len(notes))
-            self.assertIn("«AC»", notes[0])
+            self.assertIn("«Переменный 50 Гц»", notes[0])
             self.assertIn("Переменный (AC)", notes[0])
 
             # The user picks the allowed values by hand and keeps the suggestion; the program remembers all three.
@@ -123,7 +129,7 @@ class ReferenceInFillTests(unittest.TestCase):
             with patch("chint_etm_mdm.manual_values.fetch_products", return_value=products):
                 manual = import_manual_completions(root / "db.sqlite", root / "filled.xlsx", rules_dir / "manual_values.json", root / "out", rules_path)
             self.assertEqual(3, manual.learned_matches)
-            other = ProductRecord(article="B-1", attributes={"Род тока": "ac", "Напряжение, В": "230-240"})
+            other = ProductRecord(article="B-1", attributes={"Род тока": "переменный  50 гц", "Напряжение, В": "230-240"})
             self.assertEqual(("Переменный (AC)", "filled"), product_value(other, "Конфиг:Род тока", rules_path)[:2])
             self.assertEqual(("230", "filled"), product_value(other, "Конфиг:Напряжение, В", rules_path)[:2])
 

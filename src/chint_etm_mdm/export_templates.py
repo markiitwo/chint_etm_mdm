@@ -216,17 +216,25 @@ class PartnerTemplate:
         characteristic = lists.characteristic(header.removeprefix(columns.prefix).strip())
         return list(characteristic.values) if characteristic else []
 
-    def not_allowed_note(self, header: str, raw: str, rules_path: Path | None) -> str:
+    def raw_value(self, product: ProductRecord, header: str, rules_path: Path | None) -> str:
+        columns = self.attribute_columns_for(header)
+        if columns is None:
+            return ""
+        return self.attribute_raw(product, header, columns, rules_path)[0]
+
+    def candidates_for(self, header: str, raw: str, rules_path: Path | None) -> tuple[str, ...]:
         columns = self.attribute_columns_for(header)
         lists = self.value_lists(rules_path)
-        candidates: tuple[str, ...] = ()
-        if columns is not None and lists is not None:
-            match = lists.match(header.removeprefix(columns.prefix).strip(), raw)
-            candidates = match.candidates if match else ()
+        if columns is None or lists is None:
+            return ()
+        return lists.match(header.removeprefix(columns.prefix).strip(), raw).candidates
+
+    def not_allowed_note(self, header: str, raw: str, rules_path: Path | None) -> str:
+        candidates = self.candidates_for(header, raw, rules_path)
         note = f"В базе есть значение «{raw}», но его нет в списке допустимых значений {self.name}."
         if candidates:
             note += " Похожие допустимые: " + "; ".join(candidates) + "."
-        return note + " Впишите подходящее значение вручную, программа его запомнит."
+        return note + " Выберите значение на листе «Сопоставления» или впишите вручную, программа его запомнит."
 
     def is_reportable(self, header: str) -> bool:
         return header in self.fields or self.attribute_columns_for(header) is not None

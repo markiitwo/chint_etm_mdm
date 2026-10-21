@@ -40,6 +40,19 @@ class FillReportRow:
     value: str
     source: str
     note: str = ""
+    raw: str = ""
+    candidates: tuple[str, ...] = ()
+
+
+MATCHES_SHEET = "Сопоставления"
+MATCHES_HEADERS = [
+    "Поле",
+    "Значение в базе",
+    "Предложено программой",
+    "Товаров",
+    "Похожие допустимые значения",
+    "Принять значение",
+]
 
 
 @dataclass(frozen=True)
@@ -297,6 +310,28 @@ def make_output_paths(template_path: Path, output_dir: Path) -> tuple[Path, Path
     return output_path, report_path
 
 
+def value_matches_to_review(rows: list[FillReportRow]) -> list[list[object]]:
+    """One line per distinct (field, value in DB, suggestion), most frequent first.
+
+    The user confirms or corrects "Принять значение" once per line instead of
+    once per product; importing the report back remembers those choices.
+    """
+    counts: dict[tuple[str, str, str], int] = {}
+    candidates: dict[tuple[str, str, str], tuple[str, ...]] = {}
+    for item in rows:
+        if not item.raw or item.status not in {"filled_suggested", "value_not_allowed"}:
+            continue
+        suggestion = item.value if item.status == "filled_suggested" else ""
+        key = (item.column, item.raw, suggestion)
+        counts[key] = counts.get(key, 0) + 1
+        candidates.setdefault(key, item.candidates)
+    ordered = sorted(counts, key=lambda key: (-counts[key], key))
+    return [
+        [field, raw, suggestion, counts[(field, raw, suggestion)], "; ".join(candidates[(field, raw, suggestion)]), suggestion]
+        for field, raw, suggestion in ordered
+    ]
+
+
 def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
     rows = list(rows)
     workbook = Workbook()
@@ -373,7 +408,16 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
             ]
         )
 
-    for sheet in (summary, details):
+    sheets = [summary, details]
+    matches = value_matches_to_review(rows)
+    if matches:
+        review = workbook.create_sheet(MATCHES_SHEET)
+        review.append(MATCHES_HEADERS)
+        for item in matches:
+            review.append(item)
+        sheets.append(review)
+
+    for sheet in sheets:
         sheet.freeze_panes = "A2"
         for column_cells in sheet.columns:
             max_len = max(len(str(cell.value or "")) for cell in column_cells)
@@ -391,6 +435,13 @@ def fill_template(
     partner: str = DEFAULT_PARTNER,
 ) -> FillResult:
     template = load_partner_template(partner)
+    if template.code == "etm" and template_path.suffix.lower() == ".csv":
+        from .etm_characteristics import fill_characteristics_report, is_characteristics_report
+
+        if is_characteristics_report(template_path):
+            return fill_characteristics_report(
+                db_path, template_path, output_dir, rules_path, manual_values_path, template
+            )
     if template.writer.get("kind") != "fill_template":
         raise ValueError(f"Шаблон партнёра {template.name} не заполняется поверх файла партнёра.")
     suffix = template_path.suffix.lower()
@@ -499,6 +550,7 @@ def fill_csv_template(
                         value,
                         source,
                         "Заполнено по близкому совпадению; желательно проверить",
+                        raw=template.raw_value(product, header, rules_path),
                     )
                 )
             elif status == "value_not_allowed":
@@ -512,6 +564,8 @@ def fill_csv_template(
                         value,
                         source,
                         template.not_allowed_note(header, value, rules_path),
+                        raw=value,
+                        candidates=template.candidates_for(header, value, rules_path),
                     )
                 )
             elif status in {"blank", "filled"} and template.is_reportable(header):
@@ -647,6 +701,7 @@ def fill_xlsx_template(
                         value,
                         source,
                         "Заполнено по близкому совпадению; желательно проверить",
+                        raw=template.raw_value(product, header, rules_path),
                     )
                 )
             elif status == "value_not_allowed":
@@ -661,6 +716,8 @@ def fill_xlsx_template(
                         value,
                         source,
                         template.not_allowed_note(header, value, rules_path),
+                        raw=value,
+                        candidates=template.candidates_for(header, value, rules_path),
                     )
                 )
             elif status in {"blank", "filled"} and template.is_reportable(header):

@@ -29,7 +29,7 @@
     {"prefix": "Упак5", "note": "transport_pack"}
   ],
   "fields": [
-    {"header": "Код производителя", "const": "CHINT", "source": "static"},
+    {"header": "Код производителя", "const": "2019", "source": "static"},
     {"header": "Страна", "const": "CHN", "source": "static"},
     {"header": "Название упаковки", "const": "шт", "source": "static"},
     {"header": "Расширенный артикул", "field": "article", "source": "products.article"},

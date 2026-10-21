@@ -685,9 +685,9 @@ class MainWindow(QMainWindow):
     def choose_manual_filled_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Выберите дозаполненный _filled.xlsx",
+            "Выберите дозаполненный файл, отчет о заполнении или отчет ЭТМ о характеристиках",
             "",
-            "Filled upload_goods (*.xlsx *.xlsm);;All files (*)",
+            "Заполненные файлы (*.xlsx *.xlsm *.csv);;All files (*)",
         )
         if path:
             self.manual_filled_path_edit.setText(path)

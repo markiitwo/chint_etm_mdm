@@ -8,8 +8,8 @@ goes into a closed-list column it is matched to one of the allowed values:
 - by a match the user confirmed earlier (learned matches);
 - yes/no wording for logical characteristics;
 - the same number ("230 В" -> 230);
-- by words, when exactly one allowed value has the same words in another order
-  or spelling ("AC (перемен.)" -> "Переменный (AC)"); such a value needs a check.
+- by words, when exactly one allowed value is the closest fit by words
+  ("Переменный ток (AC)" -> "Переменный (AC)"); such a value needs a check.
 """
 from __future__ import annotations
 
@@ -33,10 +33,18 @@ WORD_SYNONYMS = {
     "постоян": "постоянный",
     "постоянного": "постоянный",
     "постоянное": "постоянный",
-    "ac": "ac",
-    "dc": "dc",
+    "светодиод": "led",
+    "светодиодный": "led",
+    "светодиодная": "led",
+    "светодиодные": "led",
 }
 NUMBER_RE = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
+UNIT_WORDS = {
+    "в", "v", "а", "a", "ма", "ma", "ка", "ka", "мм", "mm", "см", "м", "m", "вт", "w", "квт", "kw",
+    "гц", "hz", "кг", "kg", "г", "шт", "°c", "с", "мс", "ms", "ч",
+}
+PATTERN_RE = re.compile(r"^0[0/\-.,]*$")
+UNIT_SUFFIX_RE = re.compile(r"(?:,\s*[^,()]{1,12}|\([^()]{1,12}\))\s*$")
 WORD_RE = re.compile(r"[0-9a-zа-я]+")
 
 
@@ -57,10 +65,37 @@ def only_number(value: str) -> float | None:
     numbers = NUMBER_RE.findall(text)
     if len(numbers) != 1:
         return None
-    rest = NUMBER_RE.sub("", text, count=1)
-    if re.search(r"\d", rest) or len(rest.replace(" ", "")) > 6:
+    rest = NUMBER_RE.sub("", text, count=1).replace(" ", "").strip(".")
+    if rest and rest not in UNIT_WORDS and rest != "~":
         return None
     return float(numbers[0].replace(",", "."))
+
+
+def format_number(number: float) -> str:
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.6f}".rstrip("0").rstrip(".")
+
+
+def is_number_pattern(values: list[str]) -> bool:
+    """ETM writes number formats like "000" or "000/000" instead of a list of values."""
+    return bool(values) and all(PATTERN_RE.match(value) for value in values)
+
+
+def clean_open_value(name: str, raw: str) -> str:
+    """For an open characteristic whose name carries a unit ("Ток, А", "Ток (А)"), keep only the number."""
+    suffix = UNIT_SUFFIX_RE.search(name)
+    if not suffix:
+        return raw
+    unit = canonical(suffix.group(0)).strip(" ,()")
+    text = canonical(raw)
+    numbers = NUMBER_RE.findall(text)
+    if len(numbers) != 1:
+        return raw
+    rest = NUMBER_RE.sub("", text, count=1).replace(" ", "").strip(".")
+    if rest and rest != unit and rest not in UNIT_WORDS:
+        return raw
+    return format_number(float(numbers[0].replace(",", ".")))
 
 
 def format_allowed(value: object) -> str:
@@ -79,7 +114,7 @@ class Characteristic:
 
     @property
     def closed(self) -> bool:
-        return bool(self.values)
+        return bool(self.values) and not is_number_pattern(self.values)
 
 
 @dataclass(frozen=True)
@@ -90,7 +125,28 @@ class MatchResult:
 
     @property
     def confident(self) -> bool:
-        return self.kind in {"exact", "normalized", "learned", "logical", "number"}
+        return self.kind in {"exact", "normalized", "learned", "logical", "number", "open"}
+
+
+def word_match(raw_words: set[str], allowed: list[str]) -> str:
+    """The one allowed value that says the same in other words, or "".
+
+    Values with digits are left to the number rule: "230-240" is not "230".
+    """
+    if any(char.isdigit() for word in raw_words for char in word):
+        return ""
+    allowed_words = {value: words(value) for value in allowed}
+    inside = [value for value, item in allowed_words.items() if item and item <= raw_words]
+    if inside:
+        best = max(len(allowed_words[value]) for value in inside)
+        top = [value for value in inside if len(allowed_words[value]) == best]
+        return top[0] if len(top) == 1 else ""
+    around = [value for value, item in allowed_words.items() if raw_words <= item]
+    if around:
+        best = min(len(allowed_words[value]) for value in around)
+        top = [value for value in around if len(allowed_words[value]) == best]
+        return top[0] if len(top) == 1 else ""
+    return ""
 
 
 def match_value(
@@ -99,8 +155,8 @@ def match_value(
     learned: dict[str, str] | None = None,
 ) -> MatchResult:
     allowed = characteristic.values
-    if not allowed:
-        return MatchResult(raw, "open")
+    if not allowed or is_number_pattern(allowed):
+        return MatchResult(clean_open_value(characteristic.name, raw), "open")
     if raw in allowed:
         return MatchResult(raw, "exact")
     by_canonical = {canonical(value): value for value in allowed}
@@ -124,9 +180,9 @@ def match_value(
             return MatchResult(same[0], "number")
     raw_words = words(raw)
     if raw_words:
-        same_words = [value for value in allowed if words(value) == raw_words]
-        if len(same_words) == 1:
-            return MatchResult(same_words[0], "words")
+        by_words = word_match(raw_words, allowed)
+        if by_words:
+            return MatchResult(by_words, "words")
     if number is not None and numeric:
         nearest = sorted(numeric, key=lambda pair: abs(pair[1] - number))[:3]
         return MatchResult("", "none", tuple(value for value, _ in nearest))
@@ -148,10 +204,8 @@ class ValueLists:
     def characteristic(self, name: str) -> Characteristic | None:
         return self.characteristics.get(canonical(name))
 
-    def match(self, name: str, raw: str) -> MatchResult | None:
-        characteristic = self.characteristic(name)
-        if characteristic is None or not characteristic.closed:
-            return None
+    def match(self, name: str, raw: str) -> MatchResult:
+        characteristic = self.characteristic(name) or Characteristic(name=name)
         return match_value(raw, characteristic, self.learned.get(canonical(name)))
 
 
