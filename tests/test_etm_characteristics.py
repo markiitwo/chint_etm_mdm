@@ -63,16 +63,51 @@ class CharacteristicsReportTests(unittest.TestCase):
         self.assertEqual((5, 2, 1, 3), (result.total_rows, result.found_articles, result.missing_articles, result.filled_cells))
         lines = result.output_path.read_bytes().decode("cp1251").split("\n")
         self.assertEqual(HEAD, lines[: len(HEAD)])
+        # Only filled rows are uploaded: sure values here, the close match in the "_check" file.
         self.assertEqual(
             [
-                "'50329025;Катушки;Катушка AC220;1;'A-1;'A-1;2019;CHINT;Род тока;Переменный (AC)",
                 "'50329025;Катушки;Катушка AC220;1;'A-1;'A-1;2019;CHINT;Напряжение, В;230",
-                "'50329025;Катушки;Катушка DC24;2;'A-2;'A-2;2019;CHINT;Род тока; ",
                 "'50329025;Катушки;Катушка DC24;2;'A-2;'A-2;2019;CHINT;Номинальный ток (А);2.5",
-                ROWS[4],
             ],
             lines[len(HEAD) :],
         )
+        self.assertEqual((2, 1), (result.safe_rows, result.check_rows))
+        self.assertEqual(f"{result.output_path.stem}_check.csv", result.check_path.name)
+        held = result.check_path.read_bytes().decode("cp1251").split("\n")
+        self.assertEqual(HEAD, held[: len(HEAD)])
+        self.assertEqual(["'50329025;Катушки;Катушка AC220;1;'A-1;'A-1;2019;CHINT;Род тока;Переменный (AC)"], held[len(HEAD) :])
+
+    def test_contradiction_with_the_name_and_ranges_are_held_back(self) -> None:
+        products = {
+            "T-1": ProductRecord(
+                article="T-1",
+                name="Трансформатор NDK-100 220/24*2",
+                attributes={"Номинальное напряжение вторичной обмотки, В": "48", "Номинальное напряжение первичной обмотки, В": "220"},
+            ),
+            "L-1": ProductRecord(article="L-1", name="Лампа ND16 AC/DC 110-230В", attributes={"Рабочее напряжение, В": "110-230"}),
+        }
+        self.report.write_bytes(
+            "\n".join(
+                HEAD
+                + [
+                    "'50329025;Трансформаторы;NDK;1;'T-1;'T-1;2019;CHINT;Номинальное напряжение вторичной обмотки, В; ",
+                    "'50329025;Трансформаторы;NDK;1;'T-1;'T-1;2019;CHINT;Номинальное напряжение первичной обмотки, В; ",
+                    "'50329025;Лампы;ND16;2;'L-1;'L-1;2019;CHINT;Рабочее напряжение, В; ",
+                ]
+            ).encode("cp1251")
+        )
+        with patch("chint_etm_mdm.etm_characteristics.fetch_products", return_value=products):
+            result = fill_template(self.root / "db.sqlite", self.report, self.root / "out", self.rules_path)
+        safe = result.output_path.read_bytes().decode("cp1251")
+        held = result.check_path.read_bytes().decode("cp1251")
+        self.assertIn("первичной обмотки, В;220", safe)
+        self.assertIn("вторичной обмотки, В;48", held)
+        self.assertIn("Рабочее напряжение, В;110-230", held)
+        workbook = load_workbook(result.report_path)
+        notes = [row[6] for row in workbook["Детали"].iter_rows(min_row=2, values_only=True) if row[6]]
+        workbook.close()
+        self.assertTrue(any("нет числа 48" in note for note in notes))
+        self.assertTrue(any("Диапазон" in note for note in notes))
 
     def test_report_lists_values_to_confirm_once(self) -> None:
         result = self.fill()

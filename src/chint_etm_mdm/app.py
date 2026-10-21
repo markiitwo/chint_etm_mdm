@@ -37,7 +37,7 @@ from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, first_run_defaults, load_config, save_config
 from .db import get_stats
 from .db_utils import copy_sqlite_database
-from .etm_categories import CategoryRun, fill_new_products, new_articles_since, run_lines
+from .etm_categories import CategoryRun, fill_new_products, latest_codes_file, new_articles_since, run_lines
 from .etim_importer import (
     EtimDecisionApplyResult,
     EtimImportResult,
@@ -107,6 +107,14 @@ class FillWorker(QThread):
             )
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+def codes_folders(work_dir: str) -> list[Path]:
+    """Where a new "Честный знак" file usually lands: Downloads and the work folder's input."""
+    folders = [Path.home() / "Downloads", Path.home() / "Загрузки"]
+    if work_dir:
+        folders.append(Path(work_dir) / "input")
+    return folders
 
 
 class NewProductsWorker(QThread):
@@ -548,7 +556,7 @@ class MainWindow(QMainWindow):
         choose_codes = QPushButton("Выбрать...")
         choose_codes.clicked.connect(self.choose_codes_file)
         codes_row.addWidget(choose_codes)
-        form.addRow("Файл ЧЗ с кодами (необязательно)", codes_row)
+        form.addRow("Файл ЧЗ с кодами (самый свежий из «Загрузок» берётся сам)", codes_row)
 
         actions = QHBoxLayout()
         run_button = QPushButton("Сформировать новинки")
@@ -790,10 +798,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Нет папки шаблонов", "Выберите папку, где лежат шаблоны классов ЭТМ.")
                 return
             codes_text = self.codes_file_edit.text().strip()
-            if codes_text and not Path(codes_text).exists():
-                QMessageBox.warning(self, "Файл ЧЗ не найден", "Выберите существующий файл ЧЗ или оставьте поле пустым.")
-                return
             work_text = self.work_dir_edit.text().strip()
+            codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
             base = Path(work_text) / "output" if work_text else Path(templates_text).parent
             since = self.new_since_edit.date().toPython()
             output_dir = base / f"новинки_{dt.date.today().isoformat()}"
@@ -806,7 +812,7 @@ class MainWindow(QMainWindow):
                 output_dir,
                 rules_path,
                 self.current_manual_values_path(),
-                Path(codes_text) if codes_text else None,
+                codes_path,
             )
             self.start_worker(worker, self.on_new_products_done, self.on_new_products_failed)
         except Exception:
@@ -1310,15 +1316,19 @@ class MainWindow(QMainWindow):
         self.open_output_button.setEnabled(True)
         self.open_report_button.setEnabled(True)
 
-        summary = "\n".join(
-            [
-                f"Заполнено ячеек: {result.filled_cells}",
-                f"Красных ячеек: {result.missing_cells}",
-                f"Артикулов не найдено: {result.missing_articles}",
-                f"Файл: {result.output_path}",
-                f"Отчет: {result.report_path}",
+        summary_lines = [
+            f"Заполнено ячеек: {result.filled_cells}",
+            f"Красных ячеек: {result.missing_cells}",
+            f"Артикулов не найдено: {result.missing_articles}",
+            f"Файл: {result.output_path}",
+        ]
+        if result.check_path:
+            summary_lines += [
+                f"Можно грузить сразу: {result.safe_rows} строк — файл выше",
+                f"На проверку: {result.check_rows} строк — {result.check_path.name} (причины в отчёте)",
             ]
-        )
+        summary_lines.append(f"Отчет: {result.report_path}")
+        summary = "\n".join(summary_lines)
         self.fill_log.append("Готово.")
         self.fill_log.append(f"Строк в шаблоне: {result.total_rows}")
         self.fill_log.append(f"Найдено артикулов: {result.found_articles}")
@@ -1326,6 +1336,8 @@ class MainWindow(QMainWindow):
         self.fill_log.append(f"Заполнено ячеек: {result.filled_cells}")
         self.fill_log.append(f"Красных ячеек: {result.missing_cells}")
         self.fill_log.append(f"Файл: {result.output_path}")
+        if result.check_path:
+            self.fill_log.append(f"На проверку ({result.check_rows} строк): {result.check_path}")
         self.fill_log.append(f"Отчет: {result.report_path}")
         QMessageBox.information(self, "Заполнение завершено", summary)
 

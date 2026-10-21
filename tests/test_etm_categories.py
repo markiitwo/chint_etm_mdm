@@ -170,6 +170,11 @@ class CategoryTemplateTests(unittest.TestCase):
 
         result, csv_path = run.results["500820"]
         with csv_path.open(encoding="cp1251", newline="") as handle:
+            self.assertEqual([], list(csv.DictReader(handle, delimiter=";")))
+        # The pole count is a match to check, so the card waits in the "to check" file.
+        self.assertEqual(csv_path.with_name(f"{csv_path.stem}_check.csv"), result.check_path)
+        self.assertEqual((0, 1), (result.safe_rows, result.check_rows))
+        with result.check_path.open(encoding="cp1251", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter=";"))
         self.assertEqual(1, len(rows))
         row = rows[0]
@@ -205,7 +210,8 @@ class CategoryTemplateTests(unittest.TestCase):
         run = results[0]
         self.assertEqual({"500820"}, set(run.results))
         lines = run_lines(run)
-        self.assertTrue(lines[0].startswith("Класс 500820: 1 товаров, файл для ЭТМ upload_new_nb1l-20_"))
+        self.assertTrue(lines[0].startswith("Класс 500820: 1 товаров, можно грузить сразу 0 — файл upload_new_nb1l-20_"))
+        self.assertIn("на проверку 1 — файл upload_new_nb1l-20_", lines[0])
         self.assertIn("Не удалось подобрать класс: 1", "\n".join(lines))
 
         empty = []
