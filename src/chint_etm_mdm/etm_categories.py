@@ -140,7 +140,8 @@ def suggest_classes(
     """The class each product already has, else the usual class of its series in ETM's catalog.
 
     When the series is split between classes, a class whose template the user has wins over a more
-    frequent one without a template; such a choice is marked for a check.
+    frequent one without a template (ETM's catalog mixes in service positions); such a choice is
+    marked for a check.
     """
     choices = {
         article: ClassChoice(product.class81_code, "уже есть в базе", True)
@@ -187,7 +188,7 @@ def suggest_classes(
                 code, votes = counts.most_common(1)[0]
                 if code not in with_template:
                     usable = [(item, count) for item, count in counts.most_common() if item in with_template]
-                    if usable and usable[0][1] / total >= 0.2:
+                    if usable:
                         code, votes = usable[0]
                         sure = False
                 choices[str(article)] = ClassChoice(code, f"{basis} ({votes} из {total})", sure and votes / total >= 0.8)
