@@ -1,0 +1,81 @@
+# Tests and builds the ready-made Windows and Linux versions on every pull request.
+# On main, when the version in src/chint_etm_mdm/__init__.py has no release yet,
+# it publishes a GitHub release; installed programs offer that update on start.
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: runner.os == 'Windows'
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File build_windows.ps1
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1
+          bash build_linux.sh
+      - name: Check the built program starts
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then exe="dist/CHINT ETM MDM/CHINT ETM MDM.exe"; else exe="dist/CHINT ETM MDM/CHINT ETM MDM"; fi
+          "$exe" --self-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ runner.os }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: echo "tag=v$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/chint_etm_mdm/__init__.py)" >> "$GITHUB_OUTPUT"
+      - id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then echo "yes=1" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.exists.outputs.yes != '1'
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - if: steps.exists.outputs.yes != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ steps.version.outputs.tag }}" assets/* --target "$GITHUB_SHA" --title "${{ steps.version.outputs.tag }}" --generate-notes

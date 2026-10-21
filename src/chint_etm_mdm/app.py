@@ -49,6 +49,7 @@ from .etim_importer import (
 )
 from .export_templates import etm_reference_path
 from .filler import FillResult, fill_template
+from .update_ui import Updates, offer_install
 from .value_matching import import_etm_reference
 from .mapping_rules import (
     add_approved_class_rule,
@@ -386,6 +387,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.build_ui())
         self.refresh_database_status()
         self.update_write_action_buttons()
+        self.updates = Updates(self)
 
     def update_write_action_buttons(self) -> None:
         busy = self.worker is not None
@@ -1835,8 +1837,26 @@ class MainWindow(QMainWindow):
         )
 
 
+def self_test() -> None:
+    """Used by the build check: bundled partner templates and rules must load."""
+    from importlib import resources
+
+    from .export_templates import available_partners, load_partner_template
+    from .mapping_rules import DEFAULT_RULES_RESOURCE
+
+    load_partner_template("etm")
+    for code in available_partners():
+        load_partner_template(code)
+    resources.files("chint_etm_mdm.rules").joinpath(DEFAULT_RULES_RESOURCE).read_text(encoding="utf-8")
+
+
 def main() -> None:
+    if "--self-test" in sys.argv:
+        self_test()
+        return
     app = QApplication(sys.argv)
+    if offer_install():
+        return
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
