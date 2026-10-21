@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import json
 import re
 import sqlite3
 from collections import Counter
@@ -23,7 +24,7 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from .db import ProductRecord, connect, fetch_products
-from .export_templates import PartnerTemplate, clean_product_name, load_partner_template
+from .export_templates import PartnerTemplate, clean_product_name, load_partner_template, partner_template_text
 from .filler import FillResult, fill_xlsx_template, normalize_article, normalize_header
 from .value_matching import canonical
 
@@ -224,6 +225,73 @@ def load_codes_file(path: Path) -> dict[tuple[str, str], str]:
         workbook.close()
 
 
+@dataclass(frozen=True)
+class SeriesDefault:
+    """A value the whole series shares, for a characteristic the database has no data on."""
+
+    classes: frozenset[str]
+    series: str
+    characteristic: str
+    value: str
+    basis: str = ""
+    if_name: str = ""
+    unless_name: str = ""
+
+    def applies(self, class_code: str, series: str, name: str) -> bool:
+        if self.classes and class_code not in self.classes:
+            return False
+        if series_family(series) != series_family(self.series) and series.strip().upper() != self.series.upper():
+            return False
+        if self.if_name and not re.search(self.if_name, name, re.IGNORECASE):
+            return False
+        return not (self.unless_name and re.search(self.unless_name, name, re.IGNORECASE))
+
+
+def load_series_defaults(partner: str = "etm") -> list[SeriesDefault]:
+    raw = json.loads(partner_template_text(partner)).get("series_defaults", [])
+    return [
+        SeriesDefault(
+            classes=frozenset(str(code) for code in item.get("classes", [])),
+            series=item["series"],
+            characteristic=item["characteristic"],
+            value=item["value"],
+            basis=item.get("basis", ""),
+            if_name=item.get("if_name", ""),
+            unless_name=item.get("unless_name", ""),
+        )
+        for item in raw
+    ]
+
+
+def series_names(db_path: Path, articles: list[str]) -> dict[str, str]:
+    if not articles:
+        return {}
+    placeholders = ",".join("?" for _ in articles)
+    with closing(connect(db_path)) as conn:
+        rows = conn.execute(
+            f"SELECT article, COALESCE(series_name, '') FROM products WHERE article IN ({placeholders})", articles
+        ).fetchall()
+    return {normalize_article(article): series for article, series in rows}
+
+
+def series_default_values(
+    defaults: list[SeriesDefault],
+    category: CategoryTemplate,
+    articles: list[str],
+    products: dict[str, ProductRecord],
+    series: dict[str, str],
+) -> dict[tuple[str, str], tuple[str, str]]:
+    values: dict[tuple[str, str], tuple[str, str]] = {}
+    for article in articles:
+        product = products[article]
+        name = product.full_name or product.name
+        for rule in defaults:
+            if rule.applies(category.class_code, series.get(article, ""), name):
+                source = f"series_default:{rule.series}" + (f" ({rule.basis})" if rule.basis else "")
+                values[(article, CONFIG_PREFIX + rule.characteristic)] = (rule.value, source)
+    return values
+
+
 def prepare_input(category: CategoryTemplate, articles: list[str], target: Path) -> None:
     """A copy of the category template with one row per article (style of ETM's first row)."""
     workbook = load_workbook(category.path)
@@ -328,7 +396,9 @@ def fill_new_products(
     library = category_library(templates_dir)
     run.classes = suggest_classes(db_path, products, frozenset(library))
     run.unclassified = sorted(article for article in products if article not in run.classes)
-    fallback = load_codes_file(codes_path) if codes_path else {}
+    codes = load_codes_file(codes_path) if codes_path else {}
+    defaults = load_series_defaults(template.code)
+    series = series_names(db_path, sorted(products))
 
     by_class: dict[str, list[str]] = {}
     for article, choice in run.classes.items():
@@ -341,6 +411,7 @@ def fill_new_products(
         category = read_category_template(library[code])
         input_path = output_dir / f"новинки_{code}.xlsx"
         prepare_input(category, members, input_path)
+        fallback = {**series_default_values(defaults, category, members, products, series), **codes}
         result = fill_xlsx_template(
             db_path,
             input_path,
