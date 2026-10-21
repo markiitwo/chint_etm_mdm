@@ -49,7 +49,7 @@ def features_file():
     relay.append(BASE + ["EF003978", "EF003980", "EF008242", "EF008257", "EF003359", "EF005474", "EF000008", "EF000001"])
     relay.append(list(RELAY) + ["ЧИНТ (CHINT)", "Z", "A"])
     drive = workbook.create_sheet("EC001857")
-    drive.append([None] * 7 + ["EV000599 - 1\nEV000069 - 3\nEV000154 - Прочее", None, None])
+    drive.append([None] * 7 + ["EV000599 - 1\nEV000069 - 3\nEV000154 - Прочее", None, None, "EV008013 - 50 Гц\nEV008017 - 60 Гц\nEV008015 - 50/60 Гц"])
     drive.append(
         [None] * 6
         + [
@@ -57,9 +57,10 @@ def features_file():
             "<обязательное>\nA - Количество вход. фаз",
             "<обязательное>\nN - Макс. частота на выходе, Гц",
             "<обязательное>\nN - Высота, мм",
+            "<обязательное>\nA - Частота сети",
         ]
     )
-    drive.append(BASE + ["EF006780", "EF007117", "EF007350", "EF000040"])
+    drive.append(BASE + ["EF006780", "EF007117", "EF007350", "EF000040", "EF006783"])
     drive.append(list(DRIVE) + ["ЧИНТ (CHINT)", "Z", "A"])
     return workbook
 
@@ -127,6 +128,7 @@ class RaekTests(unittest.TestCase):
                     (RELAY[1], "Дата окончания", "2030-03-20 00:00:00"),
                     (DRIVE[1], "Напряжение сети, В", "525-690"),
                     (DRIVE[1], "Количество входных фаз", "3"),
+                    (DRIVE[1], "Диапазон входной частоты, Гц", "47-63"),
                     (DRIVE[1], "Диапазон выходной частоты, Гц", "0-500"),
                     (DRIVE[1], "Габаритные и установочные размеры (ШхВхГ), мм", "270х466х268.1"),
                     (DRIVE[1], "Номер сертификата", "ЕАЭС N RU Д-CN.РА06.В.41573/24"),
@@ -194,7 +196,7 @@ class RaekTests(unittest.TestCase):
         relay = cells(self.member(result, "ChINT (CHINT)_required_features.xlsx"), "EC001437")
         self.assertEqual(("24...24", "-...-", "AC (перемен.)", "4", "false", "IP40", "27,8", "6"), relay[3][6:14])
         drive = cells(self.member(result, "ChINT (CHINT)_required_features.xlsx"), "EC001857")
-        self.assertEqual(("525...690", "3", "500", "466"), drive[3][6:10])
+        self.assertEqual(("525...690", "3", "500", "466", "50/60 Гц"), drive[3][6:11])
         report = load_workbook(result.report_path)
         checks = [row for row in report["Проверить"].iter_rows(min_row=2, values_only=True)]
         self.assertTrue(any(row[5].startswith("EF007350") and "верхний предел" in row[7] for row in checks))
