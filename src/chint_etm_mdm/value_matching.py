@@ -43,6 +43,9 @@ UNIT_WORDS = {
     "в", "v", "а", "a", "ма", "ma", "ка", "ka", "мм", "mm", "см", "м", "m", "вт", "w", "квт", "kw",
     "гц", "hz", "кг", "kg", "г", "шт", "°c", "с", "мс", "ms", "ч",
 }
+RANGE_RE = re.compile(r"\d+(?:[.,]\d+)?(?:…|\.\.\.|-|–)\d+(?:[.,]\d+)?[^\d]{0,4}")
+CURRENT_PREFIX_RE = re.compile(r"^(AC/DC|AC|DC) \d")
+NAME_CURRENT_RE = re.compile(r"(?<![A-Za-z])(AC/DC|AC|DC)\s*(\d+(?:[.,]\d+)?)(?:\s*[-–/]\s*\d+(?:[.,]\d+)?)?\s*(?:В|V)?(?![\dA-Za-z])")
 PATTERN_RE = re.compile(r"^0[0/\-.,]*$")
 UNIT_SUFFIX_RE = re.compile(r"(?:,\s*[^,()]{1,12}|\([^()]{1,12}\))\s*$")
 WORD_RE = re.compile(r"[0-9a-zа-я]+")
@@ -90,6 +93,9 @@ def clean_open_value(name: str, raw: str) -> str:
     unit = canonical(suffix.group(0)).strip(" ,()")
     text = canonical(raw)
     numbers = NUMBER_RE.findall(text)
+    if len(numbers) == 2 and RANGE_RE.fullmatch(text.replace(" ", "")):
+        low, high = (format_number(float(item.replace(",", "."))) for item in numbers)
+        return f"{low}-{high}"
     if len(numbers) != 1:
         return raw
     rest = NUMBER_RE.sub("", text, count=1).replace(" ", "").strip(".")
@@ -113,8 +119,13 @@ class Characteristic:
     comment: str = ""
 
     @property
+    def numeric(self) -> bool:
+        """ETM's "Числовая" characteristics list examples of the format, not every allowed value."""
+        return "Числовая" in self.formats
+
+    @property
     def closed(self) -> bool:
-        return bool(self.values) and not is_number_pattern(self.values)
+        return bool(self.values) and not is_number_pattern(self.values) and not self.numeric
 
 
 @dataclass(frozen=True)
@@ -149,14 +160,51 @@ def word_match(raw_words: set[str], allowed: list[str]) -> str:
     return ""
 
 
+def match_numeric(raw: str, characteristic: Characteristic, current_kind: str = "") -> MatchResult:
+    """Numeric characteristic: the value is a number (or "AC 220" when ETM's examples carry the current kind)."""
+    if raw in characteristic.values:
+        return MatchResult(raw, "exact")
+    value = clean_open_value(characteristic.name, raw)
+    with_kind = [item for item in characteristic.values if CURRENT_PREFIX_RE.match(item)]
+    if with_kind and not CURRENT_PREFIX_RE.match(value):
+        number = only_number(value)
+        if number is None:
+            return MatchResult("", "none", tuple(with_kind[:3]))
+        if not current_kind:
+            return MatchResult("", "none", tuple(with_kind[:3]))
+        return MatchResult(f"{current_kind} {format_number(number)}", "open")
+    return MatchResult(value, "open")
+
+
+def current_kind_from_text(text: str) -> tuple[str, str]:
+    """("AC/DC", "230") from a product name like "Кнопка ... AC/DC230В", or ("", "")."""
+    found = NAME_CURRENT_RE.search(text or "")
+    if not found:
+        return "", ""
+    return found.group(1), format_number(float(found.group(2).replace(",", ".")))
+
+
+def current_kind_from_value(value: str) -> str:
+    """AC / DC / AC/DC from a "Род тока" style value."""
+    found = words(value)
+    ac = bool(found & {"ac", "переменный"})
+    dc = bool(found & {"dc", "постоянный"})
+    if ac and dc:
+        return "AC/DC"
+    return "AC" if ac else "DC" if dc else ""
+
+
 def match_value(
     raw: str,
     characteristic: Characteristic,
     learned: dict[str, str] | None = None,
+    current_kind: str = "",
 ) -> MatchResult:
     allowed = characteristic.values
     if not allowed or is_number_pattern(allowed):
         return MatchResult(clean_open_value(characteristic.name, raw), "open")
+    if characteristic.numeric:
+        return match_numeric(raw, characteristic, current_kind)
     if raw in allowed:
         return MatchResult(raw, "exact")
     by_canonical = {canonical(value): value for value in allowed}
@@ -208,9 +256,13 @@ class ValueLists:
     def aliases_for(self, name: str) -> list[str]:
         return self.name_aliases.get(canonical(name), [])
 
-    def match(self, name: str, raw: str) -> MatchResult:
+    def match(self, name: str, raw: str, current_kind: str = "") -> MatchResult:
         characteristic = self.characteristic(name) or Characteristic(name=name)
-        return match_value(raw, characteristic, self.learned.get(canonical(name)))
+        return match_value(raw, characteristic, self.learned.get(canonical(name)), current_kind)
+
+    def wants_current_kind(self, name: str) -> bool:
+        characteristic = self.characteristic(name)
+        return bool(characteristic and characteristic.numeric and any(CURRENT_PREFIX_RE.match(item) for item in characteristic.values))
 
 
 def load_reference(path: Path) -> dict[str, Characteristic]:

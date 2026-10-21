@@ -65,7 +65,7 @@ def write_reference_xlsx(path: Path) -> None:
     for value in CURRENT.values:
         sheet.append(["68", "Род тока", "Текстовая", value, None, None])
     for value in [12, 24, 220, 230]:
-        sheet.append(["132", "Напряжение, В", "Числовая", value, None, None])
+        sheet.append(["132", "Напряжение, В", "Текстовая", value, None, None])
     sheet.append(["132", "Напряжение, В", "Текстовая", "220/380", None, None])
     sheet.append(["900", "Серия", "Текстовая", None, None, None])
     workbook.save(path)
@@ -177,3 +177,29 @@ class NameCandidateTests(unittest.TestCase):
         self.assertEqual([], self.names("Тип устройства"))
         self.assertEqual([], self.names("Номинальная мощность электродвигателя, кВт"))
         self.assertEqual(["С подсветкой"], self.names("Наличие подсветки"))
+
+
+class NumericCharacteristicTests(unittest.TestCase):
+    BACKLIGHT = Characteristic("Напряжение подсветки, В", formats=["Числовая"], values=["AC 220", "AC/DC 24"])
+
+    def test_numeric_list_is_only_an_example(self) -> None:
+        voltage = Characteristic("Напряжение, В", formats=["Числовая", "Текстовая"], values=["12", "24", "220/380"])
+        self.assertEqual(("230", "open"), (match_value("230 В", voltage).value, match_value("230 В", voltage).kind))
+
+    def test_current_kind_is_added(self) -> None:
+        self.assertEqual("AC/DC 230", match_value("230", self.BACKLIGHT, current_kind="AC/DC").value)
+        self.assertEqual("none", match_value("230", self.BACKLIGHT).kind)
+
+    def test_kind_and_voltage_from_product_name(self) -> None:
+        from chint_etm_mdm.export_templates import load_partner_template
+
+        template = load_partner_template("etm")
+        product = ProductRecord(article="B", name="Кнопка с подсветкой NP2 AC/DC230В", attributes={"Род тока": "AC"})
+        self.assertEqual(("230", "AC/DC", "product_name_current"), template.with_current_kind(product, "220", "db"))
+        plain = ProductRecord(article="L", name="Лампа ND16", attributes={"Род тока": "Переменный ток (AC)"})
+        self.assertEqual(("220", "AC", "db"), template.with_current_kind(plain, "220", "db"))
+
+    def test_range_is_written_with_a_dash(self) -> None:
+        from chint_etm_mdm.value_matching import clean_open_value
+
+        self.assertEqual("380-415", clean_open_value("Номинальное напряжение питания переменного тока 50 Гц, В", "380…415"))

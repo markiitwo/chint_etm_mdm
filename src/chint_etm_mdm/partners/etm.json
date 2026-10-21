@@ -63,6 +63,19 @@
     {"header": "Штрих-код5", "field": "gtin_outer", "source": "material_data_items.gtin_outer", "note": "transport_pack"},
     {"header": "Штрих-код5уп", "when_present": "gtin_outer", "const": "5", "source": "static", "note": "transport_pack"}
   ],
+  "name_aliases": [
+    {"characteristic": "Напряжение подсветки, В", "attributes": ["Напряжение питания лампы, В", "Напряжение лампы, В", "Напряжение питания, В"]},
+    {"characteristic": "Номинальное напряжение основной вторичной обмотки, В", "attributes": ["Вторичное напряжение 1, В"]},
+    {"characteristic": "Номинальное напряжение первичной обмотки, В", "attributes": ["Первичное напряжение 1, В"]},
+    {"characteristic": "Количество НЗ контактов", "attributes": ["Количество размыкающих контактов"]},
+    {"characteristic": "Количество НО контактов", "attributes": ["Количество замыкающих контактов"]},
+    {"characteristic": "Номинальная мощность электродвигателя, КВт", "attributes": ["Номинальная мощность при AC-3, 400 В, кВт", "Номинальная коммутируемая мощность, кВт"]},
+    {"characteristic": "Номинальное напряжение питания переменного тока 50 Гц, В", "attributes": ["Номинальное напряжение питания цепи управления Us перемен. тока АС при 50 Гц, В"]},
+    {"characteristic": "Тип напряжения (тока)", "attributes": ["Род тока"]},
+    {"characteristic": "Степень защиты", "attributes": ["Степень защиты (IP)", "Степень защиты IP"]},
+    {"characteristic": "Наличие интерфейса связи", "attributes": ["С коммуникационным интерфейсом RS-485"], "values": {"Да": "RS-485"}},
+    {"characteristic": "Поддержка протоколов", "attributes": ["Поддержка протокола MODBUS"], "values": {"Да": "Modbus RTU"}, "check": true}
+  ],
   "attribute_columns": [
     {
       "prefix": "Конфиг:",

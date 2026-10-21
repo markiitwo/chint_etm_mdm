@@ -16,11 +16,14 @@ from typing import Any
 from . import partners
 from .db import ProductRecord
 from .mapping_rules import source_attributes_for
-from .value_matching import ValueLists, same_name_attributes
+from .value_matching import ValueLists, canonical, current_kind_from_text, current_kind_from_value, same_name_attributes
 
 DEFAULT_PARTNER = "etm"
 NAME_ALIAS_SOURCE_PREFIX = "name_alias:"
 SAME_NAME_SOURCE_PREFIX = "same_name:"
+TEMPLATE_ALIAS_SOURCE_PREFIX = "template_alias:"
+CHECK_ALIAS_SOURCE_PREFIX = "template_alias_check:"
+CURRENT_KIND_ATTRIBUTES = ("Род тока", "Род тока включения", "Род тока катушки управления", "Тип напряжения (тока)")
 
 
 def short_wms_name(value: str, limit: int = 60) -> str:
@@ -127,6 +130,15 @@ class AttributeColumns:
 
 
 @dataclass(frozen=True)
+class NameAlias:
+    """A characteristic of ours that means the partner's one, checked by hand and shipped with the template."""
+
+    attributes: tuple[str, ...]
+    values: dict[str, str]
+    check: bool = False
+
+
+@dataclass(frozen=True)
 class PartnerTemplate:
     code: str
     name: str
@@ -140,6 +152,7 @@ class PartnerTemplate:
     fields: dict[str, FieldSpec]
     attribute_columns: tuple[AttributeColumns, ...]
     value_list_files: tuple[str, str] | None = None
+    name_aliases: dict[str, NameAlias] | None = None
 
     def attribute_columns_for(self, header: str) -> AttributeColumns | None:
         for columns in self.attribute_columns:
@@ -180,6 +193,13 @@ class PartnerTemplate:
             value = attrs.get(alias, "")
             if value:
                 return value, f"{NAME_ALIAS_SOURCE_PREFIX}{alias}"
+        alias = (self.name_aliases or {}).get(canonical(attr_name))
+        if alias is not None:
+            for attribute in alias.attributes:
+                value = attrs.get(attribute, "")
+                if value:
+                    prefix = CHECK_ALIAS_SOURCE_PREFIX if alias.check else TEMPLATE_ALIAS_SOURCE_PREFIX
+                    return alias.values.get(value, value), f"{prefix}{attribute}"
         if lists:
             for attribute in same_name_attributes(attr_name, attrs):
                 return attrs[attribute], f"{SAME_NAME_SOURCE_PREFIX}{attribute}"
@@ -196,14 +216,31 @@ class PartnerTemplate:
         if not raw:
             return "", "blank", ""
         lists = self.value_lists(rules_path)
-        match = lists.match(header.removeprefix(columns.prefix).strip(), raw) if lists else None
-        if match is None:
+        if lists is None:
             return raw, "filled", source
-        if match.confident and not source.startswith(SAME_NAME_SOURCE_PREFIX):
+        attr_name = header.removeprefix(columns.prefix).strip()
+        kind = ""
+        if lists.wants_current_kind(attr_name):
+            raw, kind, source = self.with_current_kind(product, raw, source)
+        match = lists.match(attr_name, raw, kind)
+        if match.confident and not source.startswith((SAME_NAME_SOURCE_PREFIX, CHECK_ALIAS_SOURCE_PREFIX)):
             return match.value, "filled", source
         if match.confident or match.kind == "words":
             return match.value, "suggested", source
         return raw, "value_not_allowed", source
+
+    def with_current_kind(self, product: ProductRecord, raw: str, source: str) -> tuple[str, str, str]:
+        """For values like "AC 220": the product name ("... AC/DC230В") wins, else the "Род тока" attributes."""
+        for text in (product.name, product.full_name):
+            kind, number = current_kind_from_text(text)
+            if kind:
+                return number, kind, "product_name_current"
+        attrs = product.attributes or {}
+        for name in CURRENT_KIND_ATTRIBUTES:
+            kind = current_kind_from_value(attrs.get(name, ""))
+            if kind:
+                return raw, kind, source
+        return raw, "", source
 
     def value_lists(self, rules_path: Path | None) -> ValueLists | None:
         if self.value_list_files is None or rules_path is None:
@@ -327,6 +364,14 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
         value_list_files=(
             (value_lists["reference"], value_lists["learned"]) if value_lists else None
         ),
+        name_aliases={
+            canonical(item["characteristic"]): NameAlias(
+                attributes=_as_tuple(item.get("attributes")),
+                values=dict(item.get("values") or {}),
+                check=bool(item.get("check", False)),
+            )
+            for item in data.get("name_aliases", [])
+        },
     )
     validate_partner_template(template)
     return template
