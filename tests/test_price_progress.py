@@ -45,6 +45,7 @@ class PriceProgressTests(unittest.TestCase):
                         id INTEGER PRIMARY KEY, snapshot_date TEXT, source_url TEXT,
                         local_file TEXT, workbook_name TEXT);
                     CREATE TABLE products(article TEXT);
+                    CREATE TABLE price_snapshot_items(id INTEGER PRIMARY KEY, snapshot_id INTEGER, article TEXT);
                 """)
             messages = []
 

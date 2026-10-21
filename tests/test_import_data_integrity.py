@@ -169,6 +169,52 @@ class PartialPriceTests(unittest.TestCase):
         self.assertIsNone(self.product())
 
 
+class PartialPriceStatisticsTests(unittest.TestCase):
+    """A partial price must not become the baseline for the next import's counters."""
+
+    def test_counters_after_partial_price_compare_with_last_full_price(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "db.sqlite"
+            make_database(database)
+            header = ["Артикул", "Наименование", "Тариф с НДС, руб", "Тариф без НДС, руб"]
+            rows = [["A-1", "Автомат", "120", "100"], ["A-2", "Щит", "240", "200"]]
+            full = write_price(root / "Price-list-CHINT_2026-07-01.xlsx", header, rows)
+            import_price_workbook(full, database, make_backup=False)
+            partial = write_price(
+                root / "Price-list-CHINT_2026-07-15.xlsx", ["Артикул", "Наименование"], [["A-1", "Автомат"]]
+            )
+
+            partial_result = import_price_workbook(partial, database, make_backup=False)
+            next_full = write_price(
+                root / "Price-list-CHINT_2026-08-01.xlsx", header, [*rows, ["A-3", "Новый", "60", "50"]]
+            )
+            full_result = import_price_workbook(next_full, database, make_backup=False)
+
+            self.assertEqual(0, partial_result.changed_price_rows)
+            self.assertEqual(1, full_result.new_articles)
+            self.assertEqual(0, full_result.changed_price_rows)
+
+    def test_import_adds_index_for_product_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "db.sqlite"
+            make_database(database)
+            price = write_price(root / "Price-list-CHINT_2026-09-01.xlsx", ["Артикул", "Наименование"], [["A-1", "Автомат"]])
+
+            import_price_workbook(price, database, make_backup=False)
+
+            with closing(sqlite3.connect(database)) as conn:
+                plan = " ".join(
+                    str(row[-1])
+                    for row in conn.execute(
+                        "EXPLAIN QUERY PLAN SELECT gross_weight_unit FROM price_snapshot_items "
+                        "WHERE article = 'A-1' ORDER BY snapshot_id DESC, id DESC LIMIT 1"
+                    )
+                )
+            self.assertIn("idx_price_snapshot_items_article_snapshot", plan)
+
+
 class NumericTextTests(unittest.TestCase):
     """PRI-03: numbers written as text are parsed strictly, never turned into 0."""
 
