@@ -6,7 +6,7 @@ import csv
 import shutil
 import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -15,47 +15,13 @@ from openpyxl.cell.cell import Cell
 from openpyxl.styles import Font, PatternFill
 
 from .db import ProductRecord, fetch_products
-from .mapping_rules import source_attributes_for
+from .export_templates import (
+    DEFAULT_PARTNER,
+    PartnerTemplate,
+    load_partner_template,
+)
 
 
-ARTICLE_HEADERS = ("Артикул", "Расширенный артикул")
-CONFIDENT_STATIC_VALUES = {
-    "Код производителя": "CHINT",
-    "Страна": "CHN",
-    "Название упаковки": "шт",
-}
-DIRECT_DB_HEADERS = {
-    "Расширенный артикул",
-    "81 класс",
-    "Название",
-    "Полное название",
-    "Краткое имя WMS",
-    "Вес, кг",
-    "Длина, м",
-    "Ширина, м",
-    "Высота, м",
-    "Объем, м3",
-    "Код ТН ВЭД",
-    "Код ОКПД2",
-    "Упак3 Название",
-    "Упак3 Емкость",
-    "Упак3 Вес, кг",
-    "Упак3 Длина, м",
-    "Упак3 Ширина, м",
-    "Упак3 Высота, м",
-    "Упак3 Объем, м3",
-    "Штрих-код3",
-    "Штрих-код3уп",
-    "Отгрузка кратно УпЗавод",
-    "Упак5 Емкость",
-    "Упак5 Вес, кг",
-    "Упак5 Длина, м",
-    "Упак5 Ширина, м",
-    "Упак5 Высота, м",
-    "Упак5 Объем, м3",
-    "Штрих-код5",
-    "Штрих-код5уп",
-}
 MISSING_CELL_FILL = PatternFill(fill_type="solid", fgColor="FFFFC7CE")
 MISSING_CELL_FONT = Font(color="FF9C0006")
 DATA_VALIDATIONS_RE = re.compile(br"<dataValidations\b.*?</dataValidations>", re.DOTALL)
@@ -111,141 +77,25 @@ def comparable_text(value: str) -> str:
     return re.sub(r"[^0-9a-zа-я]+", "", value.lower())
 
 
-def short_wms_name(value: str, limit: int = 60) -> str:
-    clean = " ".join(value.split())
-    return clean[:limit].rstrip()
-
-
-def format_decimal(value: float | int | None, digits: int = 6) -> str:
-    if value is None:
-        return ""
-    text = f"{float(value):.{digits}f}".rstrip("0").rstrip(".")
-    return text
-
-
-def mm_to_m(value: float | int | None) -> str:
-    if value is None:
-        return ""
-    return format_decimal(float(value) / 1000.0, 6)
-
-
-def format_count(value: float | int | None) -> str:
-    if value is None:
-        return ""
-    number = float(value)
-    if number.is_integer():
-        return str(int(number))
-    return format_decimal(number, 6)
-
-
-def suggested_attribute(
-    product: ProductRecord, attr_name: str, rules_path: Path | None = None
-) -> tuple[str, str]:
-    attrs = product.attributes or {}
-    template_field = f"Конфиг:{attr_name}"
-    for alias in source_attributes_for(product.class81_code, template_field, rules_path):
-        value = attrs.get(alias, "")
-        if value:
-            return value, alias
-
-    return "", ""
+def partner_template(template: PartnerTemplate | None = None) -> PartnerTemplate:
+    return template or load_partner_template(DEFAULT_PARTNER)
 
 
 def product_value(
-    product: ProductRecord, header: str, rules_path: Path | None = None
+    product: ProductRecord,
+    header: str,
+    rules_path: Path | None = None,
+    template: PartnerTemplate | None = None,
 ) -> tuple[str, str, str]:
-    if header in CONFIDENT_STATIC_VALUES:
-        return CONFIDENT_STATIC_VALUES[header], "filled", "static"
-    if header == "Расширенный артикул":
-        return product.article, "filled", "products.article"
-    if header == "81 класс":
-        return product.class81_code, "filled", "ipro_goods/product_etm_class_suggestions.class81_code"
-    if header == "Название":
-        return product.name or product.full_name, "filled", "products/ipro_goods.name"
-    if header == "Полное название":
-        return product.full_name or product.name, "filled", "ipro_goods.full_name"
-    if header == "Краткое имя WMS":
-        return short_wms_name(product.name or product.full_name), "filled", "generated"
-    if header == "Вес, кг":
-        return (
-            format_decimal(product.weight_kg, 6),
-            "filled",
-            "product_dimensions_resolved.weight_kg/price_snapshot_items.gross_weight_unit",
-        )
-    if header == "Длина, м":
-        return mm_to_m(product.length_mm), "filled", "product_dimensions_resolved.length_mm"
-    if header == "Ширина, м":
-        return mm_to_m(product.width_mm), "filled", "product_dimensions_resolved.width_mm"
-    if header == "Высота, м":
-        return mm_to_m(product.height_mm), "filled", "product_dimensions_resolved.height_mm"
-    if header == "Объем, м3":
-        return format_decimal(product.volume_m3, 9), "filled", "product_dimensions_resolved/price_snapshot_items.volume_m3"
-    if header == "Код ТН ВЭД":
-        return product.tnved_code, "filled", "product_tnved_codes.tnved_code"
-    if header == "Код ОКПД2":
-        return product.okpd2_code, "filled", "product_okpd2_codes.okpd2"
-    if header == "Упак3 Название" and product.min_shipment is not None:
-        return "УпЗавод", "filled", "generated"
-    if header == "Упак3 Емкость":
-        return format_count(product.min_shipment), "filled", "price_snapshot_items.min_shipment"
-    if header == "Упак3 Вес, кг":
-        return format_decimal(product.package_min_weight_kg, 6), "filled", "price_snapshot_items.gross_weight_min"
-    if header == "Упак3 Объем, м3":
-        return format_decimal(product.package_min_volume_m3, 9), "filled", "price_snapshot_items.min_volume"
-    if header == "Штрих-код3":
-        return product.gtin_inner, "filled", "material_data_items.gtin_inner"
-    if header == "Штрих-код3уп" and product.gtin_inner:
-        return "3", "filled", "static"
-    if header == "Отгрузка кратно УпЗавод" and product.min_shipment is not None:
-        return "ДА", "filled", "generated"
-    if header == "Упак5 Емкость":
-        return format_count(product.pack_multiple), "filled", "price_snapshot_items.pack_multiple"
-    if header == "Упак5 Вес, кг":
-        return format_decimal(product.transport_weight_kg, 6), "filled", "price_snapshot_items/material_data_items.transport_weight"
-    if header == "Упак5 Длина, м":
-        return mm_to_m(product.transport_length_mm), "filled", "material_data_items.outer_length_mm"
-    if header == "Упак5 Ширина, м":
-        return mm_to_m(product.transport_width_mm), "filled", "material_data_items.outer_width_mm"
-    if header == "Упак5 Высота, м":
-        return mm_to_m(product.transport_height_mm), "filled", "material_data_items.outer_height_mm"
-    if header == "Упак5 Объем, м3":
-        return format_decimal(product.transport_volume_m3, 9), "filled", "price_snapshot_items.transport_volume"
-    if header == "Штрих-код5":
-        return product.gtin_outer, "filled", "material_data_items.gtin_outer"
-    if header == "Штрих-код5уп" and product.gtin_outer:
-        return "5", "filled", "static"
-    if header.startswith("Конфиг:"):
-        attr_name = header.removeprefix("Конфиг:").strip()
-        value = (product.attributes or {}).get(attr_name, "")
-        if value:
-            return value, "filled", "product_attribute_values.attribute_name"
-        suggestion, source_name = suggested_attribute(product, attr_name, rules_path)
-        if suggestion:
-            return suggestion, "filled", f"approved_class_rule:{source_name}"
-        return "", "blank", ""
-    return "", "blank", ""
+    return partner_template(template).product_value(product, header, rules_path)
 
 
-def is_reportable_header(header: str) -> bool:
-    return header in CONFIDENT_STATIC_VALUES or header in DIRECT_DB_HEADERS or header.startswith("Конфиг:")
+def is_reportable_header(header: str, template: PartnerTemplate | None = None) -> bool:
+    return partner_template(template).is_reportable(header)
 
 
-def missing_note(header: str) -> str:
-    if header in {"Вес, кг", "Длина, м", "Ширина, м", "Высота, м", "Объем, м3"}:
-        return "В базе нет значения для единицы товара. Нужно заполнить именно изделие, не упаковку."
-    if header == "81 класс":
-        return "В базе нет категории товара."
-    if header == "Код ТН ВЭД":
-        return "В базе нет кода ТН ВЭД."
-    if header == "Код ОКПД2":
-        return "В базе нет кода ОКПД2."
-    if header.startswith("Конфиг:"):
-        return "В базе нет подходящего значения для этой характеристики."
-    if header.startswith("Упак3") or header in {"Штрих-код3", "Штрих-код3уп", "Отгрузка кратно УпЗавод"}:
-        return "В базе нет данных заводской упаковки."
-    if header.startswith("Упак5") or header in {"Штрих-код5", "Штрих-код5уп"}:
-        return "В базе нет данных транспортной упаковки."
-    return "В базе нет значения для этого поля."
+def missing_note(header: str, template: PartnerTemplate | None = None) -> str:
+    return partner_template(template).missing_note(header)
 
 
 def report_status_label(status: str) -> str:
@@ -410,21 +260,18 @@ def insert_before_tag_end(tag: bytes, attribute: bytes) -> bytes:
     return tag[:end] + attribute + tag[end:]
 
 
-def find_article_index(headers: list[str]) -> int | None:
-    for candidate in ARTICLE_HEADERS:
-        if candidate in headers:
-            return headers.index(candidate)
-    return None
+def find_article_index(headers: list[str], template: PartnerTemplate | None = None) -> int | None:
+    return partner_template(template).find_article_index(headers)
 
 
-def class81_index(headers: list[str]) -> int | None:
-    return headers.index("81 класс") if "81 класс" in headers else None
+def class81_index(headers: list[str], template: PartnerTemplate | None = None) -> int | None:
+    return partner_template(template).class_index(headers)
 
 
-def product_with_template_class(product: ProductRecord, template_class: str) -> ProductRecord:
-    if template_class and not product.class81_code:
-        return replace(product, class81_code=template_class)
-    return product
+def product_with_template_class(
+    product: ProductRecord, template_class: str, template: PartnerTemplate | None = None
+) -> ProductRecord:
+    return partner_template(template).with_template_class(product, template_class)
 
 
 def cell_text(value: object) -> str:
@@ -540,12 +387,23 @@ def fill_template(
     output_dir: Path,
     rules_path: Path | None = None,
     manual_values_path: Path | None = None,
+    partner: str = DEFAULT_PARTNER,
 ) -> FillResult:
+    template = load_partner_template(partner)
+    if template.writer.get("kind") != "fill_template":
+        raise ValueError(f"Шаблон партнёра {template.name} не заполняется поверх файла партнёра.")
     suffix = template_path.suffix.lower()
+    formats = {f".{name}" for name in template.writer.get("formats", [])}
+    if suffix not in formats:
+        raise ValueError(f"Для {template.name} поддерживаются файлы: {', '.join(sorted(formats))}.")
     if suffix == ".csv":
-        return fill_csv_template(db_path, template_path, output_dir, rules_path, manual_values_path)
+        return fill_csv_template(
+            db_path, template_path, output_dir, rules_path, manual_values_path, template
+        )
     if suffix in {".xlsx", ".xlsm"}:
-        return fill_xlsx_template(db_path, template_path, output_dir, rules_path, manual_values_path)
+        return fill_xlsx_template(
+            db_path, template_path, output_dir, rules_path, manual_values_path, template
+        )
     raise ValueError("Поддерживаются только CSV, XLSX и XLSM шаблоны.")
 
 
@@ -555,8 +413,11 @@ def fill_csv_template(
     output_dir: Path,
     rules_path: Path | None = None,
     manual_values_path: Path | None = None,
+    template: PartnerTemplate | None = None,
 ) -> FillResult:
     from .manual_values import load_manual_values
+
+    template = partner_template(template)
 
     with template_path.open("r", newline="", encoding="utf-8-sig") as fh:
         sample = fh.read(4096)
@@ -572,10 +433,10 @@ def fill_csv_template(
         raise ValueError("Шаблон пустой.")
 
     headers = [normalize_header(h) for h in reader[0]]
-    article_idx = find_article_index(headers)
+    article_idx = template.find_article_index(headers)
     if article_idx is None:
         raise ValueError("Не найдена колонка Артикул или Расширенный артикул.")
-    class_idx = class81_index(headers)
+    class_idx = template.class_index(headers)
 
     articles = [normalize_article(row[article_idx]) for row in reader[1:] if len(row) > article_idx]
     products = fetch_products(db_path, articles)
@@ -596,13 +457,13 @@ def fill_csv_template(
             report.append(FillReportRow(row_number, article, "", "not_found", "", "", "Артикул не найден в базе"))
             continue
         if class_idx is not None and class_idx < len(row):
-            product = product_with_template_class(product, normalize_header(row[class_idx]))
+            product = template.with_template_class(product, normalize_header(row[class_idx]))
         for col_idx, header in enumerate(headers):
-            if header == "Артикул":
+            if header in template.skip_headers:
                 continue
             existing_value = cell_text(row[col_idx])
             if existing_value:
-                if is_reportable_header(header):
+                if template.is_reportable(header):
                     report.append(
                         FillReportRow(
                             row_number,
@@ -619,7 +480,7 @@ def fill_csv_template(
             if manual_value:
                 value, status, source = manual_value, "filled", "manual_completion"
             else:
-                value, status, source = product_value(product, header, rules_path)
+                value, status, source = template.product_value(product, header, rules_path)
             if status == "filled" and value:
                 row[col_idx] = value
                 filled_cells += 1
@@ -639,7 +500,7 @@ def fill_csv_template(
                         "Заполнено по близкому совпадению; желательно проверить",
                     )
                 )
-            elif status in {"blank", "filled"} and is_reportable_header(header):
+            elif status in {"blank", "filled"} and template.is_reportable(header):
                 missing_cells += 1
                 report.append(
                     FillReportRow(
@@ -649,7 +510,7 @@ def fill_csv_template(
                         "missing_value",
                         "",
                         source,
-                        missing_note(header),
+                        template.missing_note(header),
                     )
                 )
 
@@ -679,8 +540,11 @@ def fill_xlsx_template(
     output_dir: Path,
     rules_path: Path | None = None,
     manual_values_path: Path | None = None,
+    template: PartnerTemplate | None = None,
 ) -> FillResult:
     from .manual_values import load_manual_values
+
+    template = partner_template(template)
 
     keep_vba = template_path.suffix.lower() == ".xlsm"
     input_has_vba = has_vba_project(template_path) if keep_vba else False
@@ -691,12 +555,12 @@ def fill_xlsx_template(
     fillable_columns = {
         idx
         for idx, cell in enumerate(header_cells)
-        if is_yellow_header_cell(cell)
+        if is_yellow_header_cell(cell) or not template.fills_only_yellow_headers
     }
-    article_idx = find_article_index(headers)
+    article_idx = template.find_article_index(headers)
     if article_idx is None:
         raise ValueError("Не найдена колонка Артикул или Расширенный артикул.")
-    class_idx = class81_index(headers)
+    class_idx = template.class_index(headers)
 
     articles: list[str] = []
     for row in sheet.iter_rows(min_row=2):
@@ -720,21 +584,21 @@ def fill_xlsx_template(
             for col_idx in fillable_columns:
                 if col_idx != article_idx and col_idx < len(row):
                     mark_missing_cell(row[col_idx])
-                    if is_reportable_header(headers[col_idx]):
+                    if template.is_reportable(headers[col_idx]):
                         missing_cells += 1
             continue
         if class_idx is not None and class_idx < len(row):
-            product = product_with_template_class(
+            product = template.with_template_class(
                 product, normalize_header(row[class_idx].value)
             )
         for col_idx, header in enumerate(headers):
-            if header == "Артикул" or col_idx >= len(row):
+            if header in template.skip_headers or col_idx >= len(row):
                 continue
             if col_idx not in fillable_columns:
                 continue
             existing_value = cell_text(row[col_idx].value)
             if existing_value:
-                if is_reportable_header(header):
+                if template.is_reportable(header):
                     report.append(
                         FillReportRow(
                             row_number,
@@ -751,7 +615,7 @@ def fill_xlsx_template(
             if manual_value:
                 value, status, source = manual_value, "filled", "manual_completion"
             else:
-                value, status, source = product_value(product, header, rules_path)
+                value, status, source = template.product_value(product, header, rules_path)
             if status == "filled" and value:
                 row[col_idx].value = value
                 filled_cells += 1
@@ -771,7 +635,7 @@ def fill_xlsx_template(
                         "Заполнено по близкому совпадению; желательно проверить",
                     )
                 )
-            elif status in {"blank", "filled"} and is_reportable_header(header):
+            elif status in {"blank", "filled"} and template.is_reportable(header):
                 missing_cells += 1
                 mark_missing_cell(row[col_idx])
                 report.append(
@@ -782,7 +646,7 @@ def fill_xlsx_template(
                         "missing_value",
                         "",
                         source,
-                        missing_note(header),
+                        template.missing_note(header),
                     )
                 )
 
