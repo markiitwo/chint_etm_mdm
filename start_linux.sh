@@ -11,4 +11,14 @@ if git fetch --quiet origin main >"$LOG" 2>&1 && git checkout --quiet -B main or
         .venv/bin/python -m pip install --quiet -r requirements.txt >>"$LOG" 2>&1 && echo "$WANT" > .venv/requirements.sha256
     fi
 fi
+
+# Move onto the ready-made builds from GitHub releases: they ask before updating
+# and can roll back. The installed build takes over the desktop and menu icons.
+STATE="${XDG_DATA_HOME:-$HOME/.local/share}/chint-etm-mdm/state.json"
+if [ ! -f "$STATE" ]; then
+    notify-send "CHINT ETM MDM" "Устанавливаю новую версию программы, это займёт пару минут" 2>/dev/null || true
+fi
+if EXE="$(PYTHONPATH="$ROOT/src" .venv/bin/python -m chint_etm_mdm.updater --install-latest 2>>"$LOG")" && [ -x "$EXE" ]; then
+    exec "$EXE" "$@"
+fi
 PYTHONPATH="$ROOT/src" exec .venv/bin/python run_app.py "$@"
