@@ -420,3 +420,26 @@ def fill_new_products(
         run.results[code] = (result, csv_path)
     write_summary(run, products, library)
     return run
+
+
+def run_lines(run: CategoryRun) -> list[str]:
+    """What the user needs to know after a run, in plain words."""
+    lines = []
+    for code, (result, csv_path) in sorted(run.results.items()):
+        line = f"Класс {code}: {result.found_articles} товаров, файл для ЭТМ {csv_path.name}"
+        if result.missing_cells:
+            line += f"; не заполнено полей: {result.missing_cells}"
+        if result.suggested_cells:
+            line += f"; проверить: {result.suggested_cells}"
+        lines.append(line)
+    for code, members in sorted(run.missing_templates.items()):
+        lines.append(
+            f"Нет шаблона класса {code} ({len(members)} товаров): скачайте его в личном кабинете ЭТМ, "
+            "положите в папку шаблонов и запустите ещё раз."
+        )
+    if run.unclassified:
+        lines.append(f"Не удалось подобрать класс: {len(run.unclassified)} товаров, список в сводке.")
+    if run.not_found:
+        lines.append(f"Нет в базе: {len(run.not_found)} артикулов.")
+    lines.append(f"Сводка: {run.summary_path.name}")
+    return lines

@@ -193,6 +193,27 @@ class CategoryTemplateTests(unittest.TestCase):
         summary = load_workbook(run.summary_path).active
         self.assertEqual(5, summary.max_row)
 
+    def test_app_worker_finds_and_fills_new_products(self) -> None:
+        from chint_etm_mdm.app import NewProductsWorker
+        from chint_etm_mdm.etm_categories import run_lines
+
+        results = []
+        worker = NewProductsWorker(self.db, dt.date(2026, 9, 4), self.templates, self.root / "out", None, None, None)
+        worker.done.connect(results.append)
+        worker.failed.connect(self.fail)
+        worker.run()
+        run = results[0]
+        self.assertEqual({"500820"}, set(run.results))
+        lines = run_lines(run)
+        self.assertTrue(lines[0].startswith("Класс 500820: 1 товаров, файл для ЭТМ upload_new_nb1l-20_"))
+        self.assertIn("Не удалось подобрать класс: 1", "\n".join(lines))
+
+        empty = []
+        worker = NewProductsWorker(self.db, dt.date(2026, 12, 1), self.templates, self.root / "out2", None, None, None)
+        worker.done.connect(empty.append)
+        worker.run()
+        self.assertEqual([None], empty)
+
 
 if __name__ == "__main__":
     unittest.main()

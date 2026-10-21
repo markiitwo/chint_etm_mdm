@@ -15,6 +15,9 @@ CONFIG_FILE_NAME = "config.json"
 class AppConfig:
     work_dir: str = ""
     db_path: str = ""
+    class_templates_dir: str = ""
+    codes_file: str = ""
+    last_new_since: str = ""
 
     @property
     def work_path(self) -> Path | None:
@@ -42,6 +45,9 @@ def load_config() -> AppConfig:
     return AppConfig(
         work_dir=str(raw.get("work_dir") or ""),
         db_path=str(raw.get("db_path") or ""),
+        class_templates_dir=str(raw.get("class_templates_dir") or ""),
+        codes_file=str(raw.get("codes_file") or ""),
+        last_new_since=str(raw.get("last_new_since") or ""),
     )
 
 
@@ -51,5 +57,5 @@ def save_config(config: AppConfig) -> None:
 
 
 def ensure_work_dirs(work_dir: Path) -> None:
-    for name in ["database", "input", "output", "downloads/price", "logs", "reports", "rules"]:
+    for name in ["database", "input", "output", "downloads/price", "logs", "reports", "rules", "etm_class_templates"]:
         (work_dir / name).mkdir(parents=True, exist_ok=True)
