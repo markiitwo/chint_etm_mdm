@@ -10,6 +10,7 @@ $DistDir = Join-Path $Root "dist"
 $AppDir = Join-Path $DistDir $AppName
 $ZipPath = Join-Path $DistDir "CHINT_ETM_MDM_portable.zip"
 $BundledRules = "src\chint_etm_mdm\rules\attribute_mappings.json;chint_etm_mdm\rules"
+$BundledPartners = "src\chint_etm_mdm\partners\*.json;chint_etm_mdm\partners"
 
 function New-LocalVenv {
     if (Test-Path $VenvPython) {
@@ -62,6 +63,7 @@ Write-Host "Building portable app..."
     --name $AppName `
     --paths src `
     --add-data $BundledRules `
+    --add-data $BundledPartners `
     run_app.py
 Assert-LastExitCode "PyInstaller"
 

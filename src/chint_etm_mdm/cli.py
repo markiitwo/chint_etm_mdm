@@ -12,6 +12,7 @@ from .etim_importer import (
     restore_database_backup,
     result_lines as etim_result_lines,
 )
+from .export_templates import DEFAULT_PARTNER, available_partners
 from .filler import fill_template
 from .manual_values import (
     import_manual_completions,
@@ -25,6 +26,12 @@ def main() -> None:
     parser.add_argument("--db", required=True, help="Path to chint_mdm.sqlite")
     parser.add_argument("--template", help="Path to upload_goods CSV/XLSX template")
     parser.add_argument("--output-dir", help="Directory for filled file and report")
+    parser.add_argument(
+        "--partner",
+        default=DEFAULT_PARTNER,
+        choices=available_partners(),
+        help="Partner export template to fill (default: etm)",
+    )
     parser.add_argument("--rules", help="Optional path to attribute_mappings.json")
     parser.add_argument("--manual-values", help="Optional path to manual_values.json")
     parser.add_argument("--stats", action="store_true", help="Print database status before filling")
@@ -122,7 +129,9 @@ def main() -> None:
 
     if template_path is None or output_dir is None:
         parser.error("--template and --output-dir are required for filling")
-    result = fill_template(db_path, template_path, output_dir, rules_path, manual_values_file)
+    result = fill_template(
+        db_path, template_path, output_dir, rules_path, manual_values_file, partner=args.partner
+    )
     print(f"output={result.output_path}")
     print(f"report={result.report_path}")
     print(f"rows={result.total_rows}")

@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "code": "etm",
+  "name": "ЭТМ",
+  "description": "Шаблон upload_goods из личного кабинета ЭТМ.",
+  "writer": {
+    "kind": "fill_template",
+    "formats": ["xlsx", "xlsm", "csv"],
+    "fillable_columns": "yellow_header",
+    "mode": "empty_only"
+  },
+  "article_headers": ["Артикул", "Расширенный артикул"],
+  "skip_headers": ["Артикул"],
+  "classification": {"header": "81 класс", "field": "class81_code"},
+  "notes": {
+    "default": "В базе нет значения для этого поля.",
+    "unit_dimensions": "В базе нет значения для единицы товара. Нужно заполнить именно изделие, не упаковку.",
+    "class": "В базе нет категории товара.",
+    "tnved": "В базе нет кода ТН ВЭД.",
+    "okpd2": "В базе нет кода ОКПД2.",
+    "attribute": "В базе нет подходящего значения для этой характеристики.",
+    "factory_pack": "В базе нет данных заводской упаковки.",
+    "transport_pack": "В базе нет данных транспортной упаковки."
+  },
+  "note_prefixes": [
+    {"prefix": "Конфиг:", "note": "attribute"},
+    {"prefix": "Упак3", "note": "factory_pack"},
+    {"prefix": "Упак5", "note": "transport_pack"}
+  ],
+  "fields": [
+    {"header": "Код производителя", "const": "CHINT", "source": "static"},
+    {"header": "Страна", "const": "CHN", "source": "static"},
+    {"header": "Название упаковки", "const": "шт", "source": "static"},
+    {"header": "Расширенный артикул", "field": "article", "source": "products.article"},
+    {"header": "81 класс", "field": "class81_code", "source": "ipro_goods/product_etm_class_suggestions.class81_code", "note": "class"},
+    {"header": "Название", "field": ["name", "full_name"], "source": "products/ipro_goods.name"},
+    {"header": "Полное название", "field": ["full_name", "name"], "source": "ipro_goods.full_name"},
+    {"header": "Краткое имя WMS", "field": ["name", "full_name"], "transform": "truncate", "limit": 60, "source": "generated"},
+    {"header": "Вес, кг", "field": "weight_kg", "transform": "decimal", "digits": 6, "source": "product_dimensions_resolved.weight_kg/price_snapshot_items.gross_weight_unit", "note": "unit_dimensions"},
+    {"header": "Длина, м", "field": "length_mm", "transform": "mm_to_m", "source": "product_dimensions_resolved.length_mm", "note": "unit_dimensions"},
+    {"header": "Ширина, м", "field": "width_mm", "transform": "mm_to_m", "source": "product_dimensions_resolved.width_mm", "note": "unit_dimensions"},
+    {"header": "Высота, м", "field": "height_mm", "transform": "mm_to_m", "source": "product_dimensions_resolved.height_mm", "note": "unit_dimensions"},
+    {"header": "Объем, м3", "field": "volume_m3", "transform": "decimal", "digits": 9, "source": "product_dimensions_resolved/price_snapshot_items.volume_m3", "note": "unit_dimensions"},
+    {"header": "Код ТН ВЭД", "field": "tnved_code", "source": "product_tnved_codes.tnved_code", "note": "tnved"},
+    {"header": "Код ОКПД2", "field": "okpd2_code", "source": "product_okpd2_codes.okpd2", "note": "okpd2"},
+    {"header": "Упак3 Название", "when_present": "min_shipment", "const": "УпЗавод", "source": "generated"},
+    {"header": "Упак3 Емкость", "field": "min_shipment", "transform": "count", "source": "price_snapshot_items.min_shipment"},
+    {"header": "Упак3 Вес, кг", "field": "package_min_weight_kg", "transform": "decimal", "digits": 6, "source": "price_snapshot_items.gross_weight_min"},
+    {"header": "Упак3 Длина, м"},
+    {"header": "Упак3 Ширина, м"},
+    {"header": "Упак3 Высота, м"},
+    {"header": "Упак3 Объем, м3", "field": "package_min_volume_m3", "transform": "decimal", "digits": 9, "source": "price_snapshot_items.min_volume"},
+    {"header": "Штрих-код3", "field": "gtin_inner", "source": "material_data_items.gtin_inner", "note": "factory_pack"},
+    {"header": "Штрих-код3уп", "when_present": "gtin_inner", "const": "3", "source": "static", "note": "factory_pack"},
+    {"header": "Отгрузка кратно УпЗавод", "when_present": "min_shipment", "const": "ДА", "source": "generated", "note": "factory_pack"},
+    {"header": "Упак5 Емкость", "field": "pack_multiple", "transform": "count", "source": "price_snapshot_items.pack_multiple"},
+    {"header": "Упак5 Вес, кг", "field": "transport_weight_kg", "transform": "decimal", "digits": 6, "source": "price_snapshot_items/material_data_items.transport_weight"},
+    {"header": "Упак5 Длина, м", "field": "transport_length_mm", "transform": "mm_to_m", "source": "material_data_items.outer_length_mm"},
+    {"header": "Упак5 Ширина, м", "field": "transport_width_mm", "transform": "mm_to_m", "source": "material_data_items.outer_width_mm"},
+    {"header": "Упак5 Высота, м", "field": "transport_height_mm", "transform": "mm_to_m", "source": "material_data_items.outer_height_mm"},
+    {"header": "Упак5 Объем, м3", "field": "transport_volume_m3", "transform": "decimal", "digits": 9, "source": "price_snapshot_items.transport_volume"},
+    {"header": "Штрих-код5", "field": "gtin_outer", "source": "material_data_items.gtin_outer", "note": "transport_pack"},
+    {"header": "Штрих-код5уп", "when_present": "gtin_outer", "const": "5", "source": "static", "note": "transport_pack"}
+  ],
+  "attribute_columns": [
+    {
+      "prefix": "Конфиг:",
+      "source": "product_attribute_values.attribute_name",
+      "rule_source_prefix": "approved_class_rule:",
+      "note": "attribute"
+    }
+  ]
+}

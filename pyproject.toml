@@ -20,4 +20,4 @@ chint-etm-mdm-fill = "chint_etm_mdm.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-chint_etm_mdm = ["rules/*.json"]
+chint_etm_mdm = ["rules/*.json", "partners/*.json"]

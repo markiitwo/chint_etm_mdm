@@ -264,9 +264,8 @@ def build_snapshot() -> dict[str, object]:
             csv_result = filler.fill_template(
                 root / "db.sqlite", csv_template, root / "out_csv", rules_path, manual_path
             )
-        csv_rows = list(
-            csv.reader(csv_result.output_path.open(newline="", encoding="utf-8-sig"), delimiter=";")
-        )
+        with csv_result.output_path.open(newline="", encoding="utf-8-sig") as fh:
+            csv_rows = list(csv.reader(fh, delimiter=";"))
         return {
             "product_value": direct,
             "headers": headers_info,
