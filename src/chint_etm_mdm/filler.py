@@ -156,6 +156,8 @@ def source_label(source: str) -> str:
         return "Ручное дозаполнение"
     if source == "codes_file":
         return "Файл кодов (ЧЗ)"
+    if source.startswith("series_default:"):
+        return f"Значение для серии: {source.split(':', 1)[1]}"
     if source == "product_name_type":
         return "Тип изделия по названию товара"
     if source == "template_existing":
@@ -638,9 +640,9 @@ def fill_xlsx_template(
     rules_path: Path | None = None,
     manual_values_path: Path | None = None,
     template: PartnerTemplate | None = None,
-    fallback_values: dict[tuple[str, str], str] | None = None,
+    fallback_values: dict[tuple[str, str], str | tuple[str, str]] | None = None,
 ) -> FillResult:
-    """`fallback_values` ((article, header) -> value) fill what the database leaves empty."""
+    """`fallback_values` ((article, header) -> value or (value, source)) fill what the database leaves empty."""
     from .manual_values import load_manual_values
 
     template = partner_template(template)
@@ -717,7 +719,9 @@ def fill_xlsx_template(
             else:
                 value, status, source = template.product_value(product, header, rules_path)
             if not value and (article, header) in fallback_values:
-                value, status, source = fallback_values[(article, header)], "filled", "codes_file"
+                fallback = fallback_values[(article, header)]
+                value, source = fallback if isinstance(fallback, tuple) else (fallback, "codes_file")
+                status = "filled"
             if status == "filled" and value:
                 row[col_idx].value = template.spreadsheet_value(header, value)
                 filled_cells += 1

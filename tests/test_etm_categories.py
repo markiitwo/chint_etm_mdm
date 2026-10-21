@@ -120,6 +120,32 @@ class CategoryTemplateTests(unittest.TestCase):
         choice = suggest_classes(self.db, products, frozenset({"50350599"}))["634412"]
         self.assertEqual(("50350599", False), (choice.code, choice.sure))
 
+    def test_series_defaults_follow_series_and_name(self) -> None:
+        from chint_etm_mdm.db import fetch_products
+        from chint_etm_mdm.etm_categories import (
+            CategoryTemplate,
+            load_series_defaults,
+            series_default_values,
+        )
+        from chint_etm_mdm.upload_names import series_names
+
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute(
+                "INSERT INTO products(article, name, series_name) VALUES ('555', 'АВДТ NB1L-20 S 2P C25 электромеханический', 'NB1L-20')"
+            )
+        articles = ["586772", "555", "100"]
+        products = fetch_products(self.db, articles)
+        category = CategoryTemplate("500820", self.root / "x.xlsx", {})
+        values = series_default_values(load_series_defaults(), category, articles, products, series_names(self.db, articles))
+        self.assertEqual("Нет", values[("586772", "Конфиг:Селективное исполнение")][0])
+        self.assertNotIn(("586772", "Конфиг:Тип устройства"), values)
+        self.assertNotIn(("555", "Конфиг:Селективное исполнение"), values)
+        self.assertEqual("Электромеханический", values[("555", "Конфиг:Тип устройства")][0])
+        other = series_default_values(
+            load_series_defaults(), CategoryTemplate("50341020", self.root / "x.xlsx", {}), articles, products, {}
+        )
+        self.assertEqual({}, other)
+
     def test_new_articles_are_after_the_date(self) -> None:
         self.assertEqual(["586772", "777"], new_articles_since(self.db, dt.date(2026, 9, 4)))
 
@@ -158,11 +184,35 @@ class CategoryTemplateTests(unittest.TestCase):
         self.assertEqual("30", row["Конфиг:Дифференциальный ток (мА)"])
         self.assertEqual("AC", row["Конфиг:Тип срабатывания по диф.току"])
         self.assertEqual("500820", row["81 класс"])
+        self.assertEqual(f"upload_new_nb1l-20_{dt.date.today().isoformat()}.csv", csv_path.name)
+        self.assertEqual(csv_path.with_suffix(".xlsx"), result.output_path)
+        self.assertEqual(f"{csv_path.stem}_report.xlsx", result.report_path.name)
 
         filled = load_workbook(result.output_path)["Шаблон"]
         self.assertEqual(0.158, filled["L2"].value)
         summary = load_workbook(run.summary_path).active
         self.assertEqual(5, summary.max_row)
+
+    def test_app_worker_finds_and_fills_new_products(self) -> None:
+        from chint_etm_mdm.app import NewProductsWorker
+        from chint_etm_mdm.etm_categories import run_lines
+
+        results = []
+        worker = NewProductsWorker(self.db, dt.date(2026, 9, 4), self.templates, self.root / "out", None, None, None)
+        worker.done.connect(results.append)
+        worker.failed.connect(self.fail)
+        worker.run()
+        run = results[0]
+        self.assertEqual({"500820"}, set(run.results))
+        lines = run_lines(run)
+        self.assertTrue(lines[0].startswith("Класс 500820: 1 товаров, файл для ЭТМ upload_new_nb1l-20_"))
+        self.assertIn("Не удалось подобрать класс: 1", "\n".join(lines))
+
+        empty = []
+        worker = NewProductsWorker(self.db, dt.date(2026, 12, 1), self.templates, self.root / "out2", None, None, None)
+        worker.done.connect(empty.append)
+        worker.run()
+        self.assertEqual([None], empty)
 
 
 if __name__ == "__main__":

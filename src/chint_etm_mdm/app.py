@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import datetime as dt
 import re
 import sys
 import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QDate, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QDateEdit,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -32,9 +34,10 @@ from openpyxl import load_workbook
 
 from . import __version__
 from .analyzer import analyze_template_mapping
-from .config import AppConfig, ensure_work_dirs, load_config, save_config
+from .config import AppConfig, ensure_work_dirs, first_run_defaults, load_config, save_config
 from .db import get_stats
 from .db_utils import copy_sqlite_database
+from .etm_categories import CategoryRun, fill_new_products, new_articles_since, run_lines
 from .etim_importer import (
     EtimDecisionApplyResult,
     EtimImportResult,
@@ -100,6 +103,50 @@ class FillWorker(QThread):
                     self.output_dir,
                     self.rules_path,
                     self.manual_values_file,
+                )
+            )
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class NewProductsWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        db_path: Path,
+        since: dt.date,
+        templates_dir: Path,
+        output_dir: Path,
+        rules_path: Path | None,
+        manual_values_file: Path | None,
+        codes_file: Path | None,
+    ) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.since = since
+        self.templates_dir = templates_dir
+        self.output_dir = output_dir
+        self.rules_path = rules_path
+        self.manual_values_file = manual_values_file
+        self.codes_file = codes_file
+
+    def run(self) -> None:
+        try:
+            articles = new_articles_since(self.db_path, self.since)
+            if not articles:
+                self.done.emit(None)
+                return
+            self.done.emit(
+                fill_new_products(
+                    self.db_path,
+                    articles,
+                    self.templates_dir,
+                    self.output_dir,
+                    self.rules_path,
+                    self.manual_values_file,
+                    self.codes_file,
                 )
             )
         except Exception:
@@ -266,9 +313,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"CHINT ETM MDM {__version__}")
         self.resize(980, 680)
-        self.config = load_config()
+        self.config = first_run_defaults(load_config())
         self.worker: (
             FillWorker
+            | NewProductsWorker
             | AnalyzeWorker
             | ManualImportWorker
             | PriceImportWorker
@@ -290,6 +338,19 @@ class MainWindow(QMainWindow):
         self.price_url_edit = QLineEdit()
         self.etim_file_edit = QLineEdit()
         self.backup_file_edit = QLineEdit()
+        self.class_templates_edit = QLineEdit(self.config.class_templates_dir or self.default_class_templates_dir())
+        self.codes_file_edit = QLineEdit(self.config.codes_file)
+        self.new_since_edit = QDateEdit()
+        self.new_since_edit.setCalendarPopup(True)
+        self.new_since_edit.setDisplayFormat("dd.MM.yyyy")
+        last_since = QDate.fromString(self.config.last_new_since, "dd.MM.yyyy")
+        self.new_since_edit.setDate(last_since if last_since.isValid() else QDate.currentDate().addDays(-30))
+        self.new_products_log = QTextEdit()
+        self.new_products_log.setReadOnly(True)
+        self.last_new_products_dir: Path | None = None
+        self.last_new_products_summary: Path | None = None
+        self.open_new_products_dir_button = QPushButton("Открыть папку с файлами")
+        self.open_new_products_summary_button = QPushButton("Открыть сводку")
         self.coverage_table = QTableWidget(0, 8)
         self.rules_table = QTableWidget(0, 8)
         self.last_output_path: Path | None = None
@@ -359,6 +420,7 @@ class MainWindow(QMainWindow):
     def build_ui(self) -> QWidget:
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_database_tab(), "База")
+        self.tabs.addTab(self.build_new_products_tab(), "Новинки ЭТМ")
         self.tabs.addTab(self.build_fill_tab(), "Заполнение upload_goods")
         self.tabs.addTab(self.build_price_tab(), "Обновление базы")
         self.tabs.addTab(self.build_rules_tab(), "Правила маппинга")
@@ -459,6 +521,51 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.build_manual_import_box())
         layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.fill_log, stretch=1)
+        return root
+
+    def build_new_products_tab(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.addWidget(
+            QLabel(
+                "Программа найдёт новинки из прайса, подберёт каждой класс ЭТМ, заполнит шаблоны классов\n"
+                "и сохранит файлы для загрузки в ЭТМ. Если шаблона какого-то класса нет, она скажет, какой скачать."
+            )
+        )
+        box = QGroupBox("Что нужно")
+        form = QFormLayout(box)
+        form.addRow("Новинки, появившиеся после", self.new_since_edit)
+
+        templates_row = QHBoxLayout()
+        templates_row.addWidget(self.class_templates_edit)
+        choose_templates = QPushButton("Выбрать...")
+        choose_templates.clicked.connect(self.choose_class_templates_dir)
+        templates_row.addWidget(choose_templates)
+        form.addRow("Папка шаблонов классов ЭТМ", templates_row)
+
+        codes_row = QHBoxLayout()
+        codes_row.addWidget(self.codes_file_edit)
+        choose_codes = QPushButton("Выбрать...")
+        choose_codes.clicked.connect(self.choose_codes_file)
+        codes_row.addWidget(choose_codes)
+        form.addRow("Файл ЧЗ с кодами (необязательно)", codes_row)
+
+        actions = QHBoxLayout()
+        run_button = QPushButton("Сформировать новинки")
+        run_button.clicked.connect(self.run_new_products)
+        self.open_new_products_dir_button.clicked.connect(self.open_new_products_dir)
+        self.open_new_products_summary_button.clicked.connect(self.open_new_products_summary)
+        self.open_new_products_dir_button.setEnabled(False)
+        self.open_new_products_summary_button.setEnabled(False)
+        actions.addWidget(run_button)
+        actions.addWidget(self.open_new_products_dir_button)
+        actions.addWidget(self.open_new_products_summary_button)
+        actions.addStretch(1)
+
+        layout.addWidget(box)
+        layout.addLayout(actions)
+        layout.addWidget(QLabel("Журнал"))
+        layout.addWidget(self.new_products_log, stretch=1)
         return root
 
     def build_manual_import_box(self) -> QGroupBox:
@@ -645,6 +752,87 @@ class MainWindow(QMainWindow):
             return str(Path(self.config.work_dir) / "output")
         return ""
 
+    def default_class_templates_dir(self) -> str:
+        if self.config.work_dir:
+            return str(Path(self.config.work_dir) / "etm_class_templates")
+        return ""
+
+    def choose_class_templates_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Папка с шаблонами классов ЭТМ (upload_goods_category_template_...)")
+        if path:
+            self.class_templates_edit.setText(path)
+            self.save_current_config()
+
+    def choose_codes_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Файл ЧЗ с кодами ТН ВЭД и ОКПД2", "", "Excel (*.xlsx *.xlsm);;All files (*)"
+        )
+        if path:
+            self.codes_file_edit.setText(path)
+            self.save_current_config()
+
+    def open_new_products_dir(self) -> None:
+        if self.last_new_products_dir is not None:
+            self.open_path(self.last_new_products_dir)
+
+    def open_new_products_summary(self) -> None:
+        if self.last_new_products_summary is not None:
+            self.open_path(self.last_new_products_summary)
+
+    def run_new_products(self) -> None:
+        try:
+            self.save_current_config()
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            templates_text = self.class_templates_edit.text().strip()
+            if not templates_text or not Path(templates_text).is_dir():
+                QMessageBox.warning(self, "Нет папки шаблонов", "Выберите папку, где лежат шаблоны классов ЭТМ.")
+                return
+            codes_text = self.codes_file_edit.text().strip()
+            if codes_text and not Path(codes_text).exists():
+                QMessageBox.warning(self, "Файл ЧЗ не найден", "Выберите существующий файл ЧЗ или оставьте поле пустым.")
+                return
+            work_text = self.work_dir_edit.text().strip()
+            base = Path(work_text) / "output" if work_text else Path(templates_text).parent
+            since = self.new_since_edit.date().toPython()
+            output_dir = base / f"новинки_{dt.date.today().isoformat()}"
+            rules_path = ensure_default_rules(Path(work_text)) if work_text else None
+            self.new_products_log.append(f"Ищу новинки после {since:%d.%m.%Y}...")
+            worker = NewProductsWorker(
+                db_path,
+                since,
+                Path(templates_text),
+                output_dir,
+                rules_path,
+                self.current_manual_values_path(),
+                Path(codes_text) if codes_text else None,
+            )
+            self.start_worker(worker, self.on_new_products_done, self.on_new_products_failed)
+        except Exception:
+            self.on_new_products_failed(traceback.format_exc())
+
+    def on_new_products_done(self, run: CategoryRun | None) -> None:
+        if run is None:
+            self.new_products_log.append("Новинок после этой даты нет. Если прайс давно не обновлялся, обновите базу из прайса.")
+            return
+        self.last_new_products_dir = run.output_dir
+        self.last_new_products_summary = run.summary_path
+        self.open_new_products_dir_button.setEnabled(True)
+        self.open_new_products_summary_button.setEnabled(True)
+        self.config.last_new_since = dt.date.today().strftime("%d.%m.%Y")
+        save_config(self.config)
+        lines = run_lines(run)
+        self.new_products_log.append("Готово.")
+        for line in lines:
+            self.new_products_log.append(line)
+        QMessageBox.information(self, "Новинки готовы", "\n".join(lines))
+
+    def on_new_products_failed(self, details: str) -> None:
+        self.new_products_log.append("Ошибка.")
+        self.new_products_log.append(details)
+        QMessageBox.critical(self, "Ошибка", details)
+
     def choose_work_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Выберите рабочую папку")
         if not path:
@@ -802,6 +990,9 @@ class MainWindow(QMainWindow):
         self.config = AppConfig(
             work_dir=self.work_dir_edit.text().strip(),
             db_path=self.db_path_edit.text().strip(),
+            class_templates_dir=self.class_templates_edit.text().strip(),
+            codes_file=self.codes_file_edit.text().strip(),
+            last_new_since=self.config.last_new_since,
         )
         if self.config.work_path:
             ensure_work_dirs(self.config.work_path)
