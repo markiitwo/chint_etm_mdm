@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 1
 LOG="$ROOT/.venv/update.log"
 
-if git -C "$ROOT" pull --ff-only --quiet origin main >"$LOG" 2>&1; then
+if git fetch --quiet origin main >"$LOG" 2>&1 && git checkout --quiet -B main origin/main >>"$LOG" 2>&1; then
     WANT="$(sha256sum requirements.txt | cut -d' ' -f1)"
     if [ "$WANT" != "$(cat .venv/requirements.sha256 2>/dev/null)" ]; then
         .venv/bin/python -m pip install --quiet -r requirements.txt >>"$LOG" 2>&1 && echo "$WANT" > .venv/requirements.sha256

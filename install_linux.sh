@@ -26,6 +26,7 @@ Name=$APP_NAME
 Comment=Заполнение файлов для ЭТМ и РАЭК из базы CHINT
 Exec=\"$ROOT/start_linux.sh\"
 Path=$ROOT
+Icon=x-office-spreadsheet
 Terminal=false
 Categories=Office;"
 APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -37,4 +38,5 @@ if [ -d "$DESKTOP_DIR" ]; then
     chmod +x "$DESKTOP_DIR/chint-etm-mdm.desktop"
     gio set "$DESKTOP_DIR/chint-etm-mdm.desktop" metadata::trusted true 2>/dev/null || true
 fi
+git -C "$ROOT" fetch --quiet origin main && git -C "$ROOT" checkout --quiet -B main origin/main || true
 echo "Готово. Значок «$APP_NAME» есть в меню приложений и на рабочем столе."

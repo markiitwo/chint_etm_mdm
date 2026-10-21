@@ -51,6 +51,23 @@ def load_config() -> AppConfig:
     )
 
 
+DEFAULT_WORK_DIR_NAME = "CHINT ETM MDM Work"
+DB_FILE_NAME = "chint_mdm.sqlite"
+
+
+def first_run_defaults(config: AppConfig, home: Path | None = None) -> AppConfig:
+    """Fill an empty work folder and database path so a first start needs no setup."""
+    home = home or Path.home()
+    work_dir = config.work_dir or str(home / DEFAULT_WORK_DIR_NAME)
+    db_path = config.db_path
+    if not db_path:
+        candidates = [Path(work_dir) / "database" / DB_FILE_NAME] + [
+            home / folder / DB_FILE_NAME for folder in ("Downloads", "Загрузки", "Documents", "Документы", "")
+        ]
+        db_path = next((str(path) for path in candidates if path.is_file()), "")
+    return AppConfig(work_dir, db_path, config.class_templates_dir, config.codes_file, config.last_new_since)
+
+
 def save_config(config: AppConfig) -> None:
     path = user_config_path()
     atomic_write_json(path, asdict(config))

@@ -34,7 +34,7 @@ from openpyxl import load_workbook
 
 from . import __version__
 from .analyzer import analyze_template_mapping
-from .config import AppConfig, ensure_work_dirs, load_config, save_config
+from .config import AppConfig, ensure_work_dirs, first_run_defaults, load_config, save_config
 from .db import get_stats
 from .db_utils import copy_sqlite_database
 from .etm_categories import CategoryRun, fill_new_products, new_articles_since, run_lines
@@ -313,7 +313,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"CHINT ETM MDM {__version__}")
         self.resize(980, 680)
-        self.config = load_config()
+        self.config = first_run_defaults(load_config())
         self.worker: (
             FillWorker
             | NewProductsWorker
