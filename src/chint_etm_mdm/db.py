@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .db_utils import connect_database
+from .number_parsing import parse_number
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def _scalar(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> Any:
     row = conn.execute(query, params).fetchone()
     return row[0] if row else None
+
+
+def first_number(*values: Any) -> float | None:
+    """First value that is a real number; text such as 'нет' is skipped, not read as 0."""
+    for item in values:
+        number = parse_number(item)
+        if number is not None:
+            return number
+    return None
 
 
 def get_stats(db_path: Path) -> DatabaseStats:
@@ -110,33 +120,29 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                 d.height_mm,
                 -- Main template weight is strictly unit weight. Do not fall back to
                 -- min/transport package weights here; those belong to Упак3/Упак5.
-                COALESCE(
-                    d.weight_kg,
-                    (
-                        SELECT CAST(NULLIF(gross_weight_unit, '') AS REAL)
-                        FROM price_snapshot_items psi
-                        WHERE psi.article = p.article
-                        ORDER BY psi.snapshot_id DESC, psi.id DESC
-                        LIMIT 1
-                    ),
-                    (
-                        SELECT CAST(NULLIF(net_weight_unit, '') AS REAL)
-                        FROM price_snapshot_items psi
-                        WHERE psi.article = p.article
-                        ORDER BY psi.snapshot_id DESC, psi.id DESC
-                        LIMIT 1
-                    )
-                ) AS weight_kg,
-                COALESCE(
-                    d.volume_m3,
-                    (
-                        SELECT CAST(NULLIF(unit_volume, '') AS REAL)
-                        FROM price_snapshot_items psi
-                        WHERE psi.article = p.article
-                        ORDER BY psi.snapshot_id DESC, psi.id DESC
-                        LIMIT 1
-                    )
-                ) AS volume_m3,
+                d.weight_kg AS resolved_weight_kg,
+                (
+                    SELECT NULLIF(psi.gross_weight_unit, '')
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article AND psi.gross_weight_unit IS NOT NULL
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS gross_weight_unit,
+                (
+                    SELECT NULLIF(psi.net_weight_unit, '')
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article AND psi.net_weight_unit IS NOT NULL
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS net_weight_unit,
+                d.volume_m3 AS resolved_volume_m3,
+                (
+                    SELECT NULLIF(psi.unit_volume, '')
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article AND psi.unit_volume IS NOT NULL
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS unit_volume,
                 COALESCE((
                     SELECT tnved_code
                     FROM product_tnved_codes t
@@ -152,53 +158,51 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                     LIMIT 1
                 ), '') AS okpd2_code,
                 (
-                    SELECT CAST(NULLIF(min_shipment, '') AS REAL)
+                    SELECT NULLIF(psi.min_shipment, '')
                     FROM price_snapshot_items psi
-                    WHERE psi.article = p.article
+                    WHERE psi.article = p.article AND psi.min_shipment IS NOT NULL
                     ORDER BY psi.snapshot_id DESC, psi.id DESC
                     LIMIT 1
                 ) AS min_shipment,
                 (
-                    SELECT CAST(NULLIF(pack_multiple, '') AS REAL)
+                    SELECT NULLIF(psi.pack_multiple, '')
                     FROM price_snapshot_items psi
-                    WHERE psi.article = p.article
+                    WHERE psi.article = p.article AND psi.pack_multiple IS NOT NULL
                     ORDER BY psi.snapshot_id DESC, psi.id DESC
                     LIMIT 1
                 ) AS pack_multiple,
                 (
-                    SELECT CAST(NULLIF(gross_weight_min, '') AS REAL)
+                    SELECT NULLIF(psi.gross_weight_min, '')
                     FROM price_snapshot_items psi
-                    WHERE psi.article = p.article
+                    WHERE psi.article = p.article AND psi.gross_weight_min IS NOT NULL
                     ORDER BY psi.snapshot_id DESC, psi.id DESC
                     LIMIT 1
                 ) AS package_min_weight_kg,
                 (
-                    SELECT CAST(NULLIF(min_volume, '') AS REAL)
+                    SELECT NULLIF(psi.min_volume, '')
                     FROM price_snapshot_items psi
-                    WHERE psi.article = p.article
+                    WHERE psi.article = p.article AND psi.min_volume IS NOT NULL
                     ORDER BY psi.snapshot_id DESC, psi.id DESC
                     LIMIT 1
                 ) AS package_min_volume_m3,
-                COALESCE(
-                    (
-                        SELECT CAST(NULLIF(gross_weight_transport, '') AS REAL)
-                        FROM price_snapshot_items psi
-                        WHERE psi.article = p.article
-                        ORDER BY psi.snapshot_id DESC, psi.id DESC
-                        LIMIT 1
-                    ),
-                    (
-                        SELECT gross_weight_kg
-                        FROM material_data_items mdi
-                        WHERE mdi.article = p.article
-                        ORDER BY mdi.id DESC
-                        LIMIT 1
-                    )
-                ) AS transport_weight_kg,
                 (
-                    SELECT CAST(NULLIF(transport_volume, '') AS REAL)
+                    SELECT NULLIF(psi.gross_weight_transport, '')
                     FROM price_snapshot_items psi
-                    WHERE psi.article = p.article
+                    WHERE psi.article = p.article AND psi.gross_weight_transport IS NOT NULL
+                    ORDER BY psi.snapshot_id DESC, psi.id DESC
+                    LIMIT 1
+                ) AS gross_weight_transport,
+                (
+                    SELECT gross_weight_kg
+                    FROM material_data_items mdi
+                    WHERE mdi.article = p.article
+                    ORDER BY mdi.id DESC
+                    LIMIT 1
+                ) AS material_gross_weight_kg,
+                (
+                    SELECT NULLIF(psi.transport_volume, '')
+                    FROM price_snapshot_items psi
+                    WHERE psi.article = p.article AND psi.transport_volume IS NOT NULL
                     ORDER BY psi.snapshot_id DESC, psi.id DESC
                     LIMIT 1
                 ) AS transport_volume_m3,
@@ -265,16 +269,16 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                 length_mm=row["length_mm"],
                 width_mm=row["width_mm"],
                 height_mm=row["height_mm"],
-                weight_kg=row["weight_kg"],
-                volume_m3=row["volume_m3"],
+                weight_kg=first_number(row["resolved_weight_kg"], row["gross_weight_unit"], row["net_weight_unit"]),
+                volume_m3=first_number(row["resolved_volume_m3"], row["unit_volume"]),
                 tnved_code=str(row["tnved_code"] or ""),
                 okpd2_code=str(row["okpd2_code"] or ""),
-                min_shipment=row["min_shipment"],
-                pack_multiple=row["pack_multiple"],
-                package_min_weight_kg=row["package_min_weight_kg"],
-                package_min_volume_m3=row["package_min_volume_m3"],
-                transport_weight_kg=row["transport_weight_kg"],
-                transport_volume_m3=row["transport_volume_m3"],
+                min_shipment=parse_number(row["min_shipment"]),
+                pack_multiple=parse_number(row["pack_multiple"]),
+                package_min_weight_kg=parse_number(row["package_min_weight_kg"]),
+                package_min_volume_m3=parse_number(row["package_min_volume_m3"]),
+                transport_weight_kg=first_number(row["gross_weight_transport"], row["material_gross_weight_kg"]),
+                transport_volume_m3=parse_number(row["transport_volume_m3"]),
                 transport_length_mm=row["transport_length_mm"],
                 transport_width_mm=row["transport_width_mm"],
                 transport_height_mm=row["transport_height_mm"],

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .db_utils import connect_database, create_sqlite_backup
+from .number_parsing import parse_number
 
 
 NS = {
@@ -30,6 +31,60 @@ PRICE_SHEETS = (
     "История изменений",
 )
 REQUIRED_TABLE_HEADERS = ("Артикул", "Наименование")
+PRODUCT_FIELDS = (
+    ("series_name", "Серия"),
+    ("equipment_type", "Тип оборудования"),
+    ("equipment_group", "Группа оборудования"),
+    ("price_collection", "Коллекция"),
+    ("unit", "Ед."),
+    ("stock_status", "Складской статус"),
+    ("is_new", "Новинка"),
+    ("is_promo", "Акция"),
+)
+SNAPSHOT_FIELDS = (
+    ("name", "Наименование"),
+    ("price_with_vat", "Тариф с НДС, руб"),
+    ("price_without_vat", "Тариф без НДС, руб"),
+    ("unit", "Ед."),
+    ("price_collection", "Коллекция"),
+    ("stock_status", "Складской статус"),
+    ("is_removed", "Вывод из ассортимента"),
+    ("is_new", "Новинка"),
+    ("is_promo", "Акция"),
+    ("equipment_type", "Тип оборудования"),
+    ("equipment_group", "Группа оборудования"),
+    ("series_name", "Серия"),
+    ("pack_multiple", "Кратность транспортной упаковки"),
+    ("min_shipment", "Минимальная отгрузка"),
+    ("gross_weight_transport", "Вес брутто транспортной упаковки, кг"),
+    ("net_weight_transport", "Вес нетто транспортной упаковки, кг"),
+    ("transport_volume", "Объём транспортной упаковки, м^3"),
+    ("gross_weight_min", "Вес брутто минимальной отгрузки, кг"),
+    ("net_weight_min", "Вес нетто минимальной отгрузки, кг"),
+    ("min_volume", "Объем минимальной отгрузки, м^3"),
+    ("gross_weight_unit", "Вес брутто за 1 ед. прод."),
+    ("net_weight_unit", "Вес  нетто за 1 ед. прод."),
+    ("unit_volume", "Объём, за 1 ед. прод."),
+    ("outgoing_stock", "Остатки выводимой продукции"),
+    ("analog_article", "Артикул аналога"),
+    ("analog_name", "Наименование аналога"),
+)
+# Quantities, weights and volumes are read as numbers by the filler; prices are not.
+NUMERIC_SNAPSHOT_FIELDS = frozenset(
+    {
+        "pack_multiple", "min_shipment", "gross_weight_transport", "net_weight_transport",
+        "transport_volume", "gross_weight_min", "net_weight_min", "min_volume",
+        "gross_weight_unit", "net_weight_unit", "unit_volume",
+    }
+)
+SHEET_HEADERS = {
+    "Price-list": ("Артикул", *(header for _column, header in SNAPSHOT_FIELDS)),
+    "Введено в ассортимент": ("Артикул", "Наименование", "Дата ввода"),
+    "Выведено из ассортимента": ("Артикул", "Наименование", "Дата вывода"),
+    "История изменений": (
+        "Артикул", "Наименование", "Что изменилось", "Старое значение", "Новое значение", "Дата изменения",
+    ),
+}
 DEFAULT_PRICE_SOURCE_URL = "https://ensmas.ru/"
 LOW_VOLTAGE_PRICE_LABEL = "низковольтное оборудование"
 MAX_PRICE_DOWNLOAD_BYTES = 100 * 1024 * 1024
@@ -49,6 +104,9 @@ class PriceImportResult:
     products_total: int
     new_articles: int
     changed_price_rows: int
+    missing_columns: tuple[str, ...] = ()
+    unknown_columns: tuple[str, ...] = ()
+    invalid_numbers: int = 0
 
 
 class PriceLinkParser(html.parser.HTMLParser):
@@ -308,13 +366,42 @@ def read_sheet_rows(xlsx_path: Path, sheet_name: str) -> list[list[str]]:
         ]
 
 
+def canonical_header(text: object) -> str:
+    """Comparison key for a header: ignores BOM/NBSP/line breaks, spacing, е/ё, м^3/м³ and case."""
+    value = str(text or "").replace("\ufeff", "")
+    for space in ("\xa0", "\u202f", "\u2009", "\n", "\r", "\t"):
+        value = value.replace(space, " ")
+    value = value.replace("ё", "е").replace("Ё", "Е")
+    value = re.sub(r"м\s*(?:\^\s*3|³|3)(?!\d)", "м3", value)
+    return " ".join(value.split()).casefold()
+
+
+def canonicalize_header_row(row: list[str], sheet_name: str) -> list[str]:
+    expected = {canonical_header(name): name for name in SHEET_HEADERS.get(sheet_name, REQUIRED_TABLE_HEADERS)}
+    header = [expected.get(canonical_header(cell), " ".join(str(cell).split())) for cell in row]
+    duplicates = sorted({name for name in header if name in expected.values() and header.count(name) > 1})
+    if duplicates:
+        raise ValueError(
+            f"На листе '{sheet_name}' повторяются колонки: {', '.join(duplicates)}. "
+            "Оставьте по одной колонке каждого вида."
+        )
+    return header
+
+
 def table_rows_from_header(rows: list[list[str]], sheet_name: str) -> list[list[str]]:
+    required_keys = {canonical_header(name) for name in REQUIRED_TABLE_HEADERS}
     for header_index, row in enumerate(rows):
-        header = [str(cell).strip() for cell in row]
-        if all(required in header for required in REQUIRED_TABLE_HEADERS):
-            return [header, *rows[header_index + 1 :]]
+        if required_keys.issubset({canonical_header(cell) for cell in row}):
+            return [canonicalize_header_row(row, sheet_name), *rows[header_index + 1 :]]
     required = ", ".join(REQUIRED_TABLE_HEADERS)
     raise ValueError(f"На листе '{sheet_name}' не найдены обязательные заголовки: {required}.")
+
+
+def price_header_diagnostics(header: list[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    known = SHEET_HEADERS["Price-list"]
+    missing = tuple(name for name in known if name not in header)
+    unknown = tuple(name for name in header if name and name not in known)
+    return missing, unknown
 
 
 def read_price_workbook(xlsx_path: Path) -> dict[str, list[list[str]]]:
@@ -414,10 +501,64 @@ def value(data: dict[str, str], name: str) -> str:
     return data.get(name, "")
 
 
+def snapshot_value(data: dict[str, str], column: str, header_name: str, present: set[str]) -> str | None:
+    """Value for price_snapshot_items: NULL when the column is absent from the file.
+
+    Numeric fields written as text (``0,125``, ``1 234,5``) are stored in a form
+    SQLite and the filler read correctly; unparseable text is kept as-is and is
+    rejected on read instead of becoming 0.
+    """
+    if header_name not in present:
+        return None
+    raw = value(data, header_name)
+    if column in NUMERIC_SNAPSHOT_FIELDS and str(raw).strip():
+        number = parse_number(raw)
+        if number is not None:
+            return repr(number) if not number.is_integer() else str(int(number))
+    return raw
+
+
+def product_upsert_sql(present: set[str]) -> str:
+    columns = ["article", "name", *(column for column, _header in PRODUCT_FIELDS), "updated_at"]
+    updates = ["name=COALESCE(NULLIF(excluded.name, ''), products.name)"]
+    # A column missing from the file must not wipe what an earlier full price wrote.
+    updates += [f"{column}=excluded.{column}" for column, header in PRODUCT_FIELDS if header in present]
+    updates.append("updated_at=CURRENT_TIMESTAMP")
+    placeholders = ", ".join(["?"] * (len(columns) - 1) + ["CURRENT_TIMESTAMP"])
+    return (
+        f"INSERT INTO products ({', '.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(article) DO UPDATE SET {', '.join(updates)}"
+    )
+
+
+def count_invalid_numbers(rows: list[list[str]]) -> int:
+    if not rows:
+        return 0
+    header = rows[0]
+    present = set(header)
+    invalid = 0
+    for row in rows[1:]:
+        data = row_dict(header, row)
+        if not value(data, "Артикул").strip():
+            continue
+        for column, header_name in SNAPSHOT_FIELDS:
+            raw = value(data, header_name) if header_name in present else ""
+            if column in NUMERIC_SNAPSHOT_FIELDS and str(raw).strip() and parse_number(raw) is None:
+                invalid += 1
+    return invalid
+
+
 def insert_price_rows(cur: sqlite3.Cursor, snapshot_id: int, rows: list[list[str]]) -> int:
     if not rows:
         return 0
     header = rows[0]
+    present = set(header)
+    upsert_sql = product_upsert_sql(present)
+    snapshot_columns = ", ".join(column for column, _header in SNAPSHOT_FIELDS)
+    snapshot_sql = (
+        f"INSERT INTO price_snapshot_items (snapshot_id, article, {snapshot_columns}) "
+        f"VALUES ({', '.join(['?'] * (len(SNAPSHOT_FIELDS) + 2))})"
+    )
     imported = 0
     for row in rows[1:]:
         if not any(row):
@@ -428,78 +569,19 @@ def insert_price_rows(cur: sqlite3.Cursor, snapshot_id: int, rows: list[list[str
             continue
         imported += 1
         cur.execute(
-            """
-            INSERT INTO products (
-                article, name, series_name, equipment_type, equipment_group,
-                price_collection, unit, stock_status, is_new, is_promo, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(article) DO UPDATE SET
-                name=excluded.name,
-                series_name=excluded.series_name,
-                equipment_type=excluded.equipment_type,
-                equipment_group=excluded.equipment_group,
-                price_collection=excluded.price_collection,
-                unit=excluded.unit,
-                stock_status=excluded.stock_status,
-                is_new=excluded.is_new,
-                is_promo=excluded.is_promo,
-                updated_at=CURRENT_TIMESTAMP
-            """,
+            upsert_sql,
             (
                 article,
                 value(data, "Наименование"),
-                value(data, "Серия"),
-                value(data, "Тип оборудования"),
-                value(data, "Группа оборудования"),
-                value(data, "Коллекция"),
-                value(data, "Ед."),
-                value(data, "Складской статус"),
-                value(data, "Новинка"),
-                value(data, "Акция"),
+                *(value(data, header_name) for _column, header_name in PRODUCT_FIELDS),
             ),
         )
         cur.execute(
-            """
-            INSERT INTO price_snapshot_items (
-                snapshot_id, article, name, price_with_vat, price_without_vat, unit,
-                price_collection, stock_status, is_removed, is_new, is_promo,
-                equipment_type, equipment_group, series_name, pack_multiple,
-                min_shipment, gross_weight_transport, net_weight_transport,
-                transport_volume, gross_weight_min, net_weight_min, min_volume,
-                gross_weight_unit, net_weight_unit, unit_volume, outgoing_stock,
-                analog_article, analog_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            snapshot_sql,
             (
                 snapshot_id,
                 article,
-                value(data, "Наименование"),
-                value(data, "Тариф с НДС, руб"),
-                value(data, "Тариф без НДС, руб"),
-                value(data, "Ед."),
-                value(data, "Коллекция"),
-                value(data, "Складской статус"),
-                value(data, "Вывод из ассортимента"),
-                value(data, "Новинка"),
-                value(data, "Акция"),
-                value(data, "Тип оборудования"),
-                value(data, "Группа оборудования"),
-                value(data, "Серия"),
-                value(data, "Кратность транспортной упаковки"),
-                value(data, "Минимальная отгрузка"),
-                value(data, "Вес брутто транспортной упаковки, кг"),
-                value(data, "Вес нетто транспортной упаковки, кг"),
-                value(data, "Объём транспортной упаковки, м^3"),
-                value(data, "Вес брутто минимальной отгрузки, кг"),
-                value(data, "Вес нетто минимальной отгрузки, кг"),
-                value(data, "Объем минимальной отгрузки, м^3"),
-                value(data, "Вес брутто за 1 ед. прод."),
-                value(data, "Вес  нетто за 1 ед. прод."),
-                value(data, "Объём, за 1 ед. прод."),
-                value(data, "Остатки выводимой продукции"),
-                value(data, "Артикул аналога"),
-                value(data, "Наименование аналога"),
+                *(snapshot_value(data, column, header_name, present) for column, header_name in SNAPSHOT_FIELDS),
             ),
         )
     return imported
@@ -603,6 +685,9 @@ def import_price_workbook(
     report_progress = progress or (lambda _message: None)
     report_progress("Читаю и проверяю прайс-лист...")
     workbook_rows = read_price_workbook(xlsx_path)
+    price_sheet = workbook_rows["Price-list"]
+    missing_columns, unknown_columns = price_header_diagnostics(price_sheet[0] if price_sheet else [])
+    invalid_numbers = count_invalid_numbers(workbook_rows["Price-list"])
     if make_backup:
         report_progress("Создаю резервную копию базы. Для большой базы это может занять время...")
     backup_path = backup_database(db_path) if make_backup else None
@@ -646,6 +731,9 @@ def import_price_workbook(
         products_total=products_total,
         new_articles=new_articles,
         changed_price_rows=changed_price_rows,
+        missing_columns=missing_columns,
+        unknown_columns=unknown_columns,
+        invalid_numbers=invalid_numbers,
     )
 
 
@@ -662,6 +750,17 @@ def result_lines(result: PriceImportResult) -> list[str]:
         f"Строк с изменением цены относительно прошлого прайса: {result.changed_price_rows}",
         f"Товаров в базе всего: {result.products_total}",
     ]
+    if result.missing_columns:
+        lines.append(
+            "Нет колонок (прежние значения в базе сохранены): " + ", ".join(result.missing_columns)
+        )
+    if result.unknown_columns:
+        lines.append("Неизвестные колонки (не импортированы): " + ", ".join(result.unknown_columns))
+    if result.invalid_numbers:
+        lines.append(
+            f"Нечисловых значений веса/объёма/количества: {result.invalid_numbers} "
+            "(сохранены как текст, в шаблон не попадут)"
+        )
     if result.backup_path:
         lines.append(f"Бэкап базы: {result.backup_path}")
     return lines
