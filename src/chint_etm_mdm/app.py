@@ -49,6 +49,7 @@ from .etim_importer import (
 )
 from .export_templates import etm_reference_path
 from .filler import FillResult, fill_template
+from .raek import RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answers, result_lines as raek_result_lines
 from .update_ui import Updates, offer_install
 from .value_matching import import_etm_reference
 from .mapping_rules import (
@@ -110,9 +111,32 @@ class FillWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class RaekWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, zip_path: Path, output_dir: Path, codes_file: Path | None, rules_path: Path | None) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.zip_path = zip_path
+        self.output_dir = output_dir
+        self.codes_file = codes_file
+        self.rules_path = rules_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(fill_raek_zip(self.db_path, self.zip_path, self.output_dir, self.codes_file, self.rules_path))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+def download_folders() -> list[Path]:
+    return [Path.home() / "Downloads", Path.home() / "Загрузки"]
+
+
 def codes_folders(work_dir: str) -> list[Path]:
     """Where a new "Честный знак" file usually lands: Downloads and the work folder's input."""
-    folders = [Path.home() / "Downloads", Path.home() / "Загрузки"]
+    folders = download_folders()
     if work_dir:
         folders.append(Path(work_dir) / "input")
     return folders
@@ -326,6 +350,7 @@ class MainWindow(QMainWindow):
         self.worker: (
             FillWorker
             | NewProductsWorker
+            | RaekWorker
             | AnalyzeWorker
             | ManualImportWorker
             | PriceImportWorker
@@ -360,6 +385,13 @@ class MainWindow(QMainWindow):
         self.last_new_products_summary: Path | None = None
         self.open_new_products_dir_button = QPushButton("Открыть папку с файлами")
         self.open_new_products_summary_button = QPushButton("Открыть сводку")
+        self.raek_zip_edit = QLineEdit()
+        self.raek_zip_edit.setPlaceholderText("самый свежий архив РАЭК из «Загрузок»")
+        self.raek_log = QTextEdit()
+        self.raek_log.setReadOnly(True)
+        self.last_raek_result: RaekResult | None = None
+        self.open_raek_dir_button = QPushButton("Открыть папку с архивом")
+        self.open_raek_report_button = QPushButton("Открыть отчёт")
         self.coverage_table = QTableWidget(0, 8)
         self.rules_table = QTableWidget(0, 8)
         self.last_output_path: Path | None = None
@@ -431,6 +463,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_database_tab(), "База")
         self.tabs.addTab(self.build_new_products_tab(), "Новинки ЭТМ")
+        self.tabs.addTab(self.build_raek_tab(), "РАЭК")
         self.tabs.addTab(self.build_fill_tab(), "Заполнение upload_goods")
         self.tabs.addTab(self.build_price_tab(), "Обновление базы")
         self.tabs.addTab(self.build_rules_tab(), "Правила маппинга")
@@ -577,6 +610,104 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.new_products_log, stretch=1)
         return root
+
+    def build_raek_tab(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.addWidget(
+            QLabel(
+                "Сохраните архив от менеджера РАЭК в «Загрузки» и нажмите кнопку. Программа заполнит пустые клетки\n"
+                "и положит рядом готовый архив для ответа и отчёт: что проверить и чего нет в базе. Заполненное РАЭК не трогает."
+            )
+        )
+        box = QGroupBox("Архив")
+        form = QFormLayout(box)
+        zip_row = QHBoxLayout()
+        zip_row.addWidget(self.raek_zip_edit)
+        choose = QPushButton("Выбрать...")
+        choose.clicked.connect(self.choose_raek_zip)
+        zip_row.addWidget(choose)
+        form.addRow("Архив РАЭК", zip_row)
+
+        actions = QHBoxLayout()
+        run_button = QPushButton("Заполнить архив РАЭК")
+        run_button.clicked.connect(self.run_raek)
+        self.write_action_buttons.append(run_button)
+        remember = QPushButton("Запомнить ответы из отчёта...")
+        remember.clicked.connect(self.remember_raek_answers)
+        self.open_raek_dir_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.output_path.parent))
+        self.open_raek_report_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.report_path))
+        self.open_raek_dir_button.setEnabled(False)
+        self.open_raek_report_button.setEnabled(False)
+        for button in (run_button, self.open_raek_dir_button, self.open_raek_report_button, remember):
+            actions.addWidget(button)
+        actions.addStretch(1)
+
+        layout.addWidget(box)
+        layout.addLayout(actions)
+        layout.addWidget(QLabel("Журнал"))
+        layout.addWidget(self.raek_log, stretch=1)
+        return root
+
+    def choose_raek_zip(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Архив от менеджера РАЭК", str(Path.home() / "Downloads"), "ZIP (*.zip)")
+        if path:
+            self.raek_zip_edit.setText(path)
+
+    def run_raek(self) -> None:
+        try:
+            self.save_current_config()
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            zip_text = self.raek_zip_edit.text().strip()
+            zip_path = Path(zip_text) if zip_text else latest_raek_zip(download_folders())
+            if zip_path is None or not zip_path.is_file():
+                QMessageBox.warning(self, "Нет архива", "Сохраните архив РАЭК в «Загрузки» или выберите его кнопкой «Выбрать...».")
+                return
+            work_text = self.work_dir_edit.text().strip()
+            output_dir = (Path(work_text) / "output" if work_text else zip_path.parent) / f"раэк_{dt.date.today().isoformat()}"
+            rules_path = ensure_default_rules(Path(work_text)) if work_text else None
+            codes_text = self.codes_file_edit.text().strip()
+            codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
+            self.raek_log.append(f"Заполняю {zip_path.name}...")
+            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path)
+            self.start_worker(worker, self.on_raek_done, self.on_raek_failed)
+        except Exception:
+            self.on_raek_failed(traceback.format_exc())
+
+    def on_raek_done(self, result: RaekResult) -> None:
+        self.last_raek_result = result
+        self.open_raek_dir_button.setEnabled(True)
+        self.open_raek_report_button.setEnabled(True)
+        lines = raek_result_lines(result)
+        self.raek_log.append("Готово.")
+        for line in lines:
+            self.raek_log.append(line)
+        QMessageBox.information(self, "Архив РАЭК готов", "\n".join(lines))
+
+    def on_raek_failed(self, details: str) -> None:
+        self.raek_log.append("Ошибка.")
+        self.raek_log.append(details)
+        QMessageBox.critical(self, "Ошибка", details)
+
+    def remember_raek_answers(self) -> None:
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
+            return
+        start = str(self.last_raek_result.report_path) if self.last_raek_result else ""
+        path, _ = QFileDialog.getOpenFileName(self, "Отчёт РАЭК с ответами «да»/«нет»", start, "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            kept, rejected = remember_name_answers(Path(path), ensure_default_rules(Path(work_text)))
+        except Exception:
+            self.on_raek_failed(traceback.format_exc())
+            return
+        line = f"Запомнено пар: {kept}, отклонено: {rejected}. В следующий раз программа учтёт это сама."
+        self.raek_log.append(line)
+        QMessageBox.information(self, "Ответы сохранены", line)
 
     def build_manual_import_box(self) -> QGroupBox:
         box = QGroupBox("Ручные дозаполнения")
@@ -1847,6 +1978,9 @@ def self_test() -> None:
     load_partner_template("etm")
     for code in available_partners():
         load_partner_template(code)
+    from .raek import load_settings
+
+    load_settings()
     resources.files("chint_etm_mdm.rules").joinpath(DEFAULT_RULES_RESOURCE).read_text(encoding="utf-8")
 
 

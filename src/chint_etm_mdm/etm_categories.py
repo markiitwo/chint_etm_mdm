@@ -233,8 +233,11 @@ def latest_codes_file(folders: list[Path], chosen: Path | None = None) -> Path |
     return max(found, key=codes_file_date, default=None)
 
 
-def load_codes_file(path: Path) -> dict[tuple[str, str], str]:
-    """ТН ВЭД and ОКПД2 by article from the "Честный знак" product list (sheet "Price-list")."""
+def load_codes_file(path: Path, headers: dict[str, str] = CODE_HEADERS) -> dict[tuple[str, str], str]:
+    """ТН ВЭД and ОКПД2 by article from the "Честный знак" product list (sheet "Price-list").
+
+    `headers` maps the file's column names (lower case) to the names the values are kept under.
+    """
     # keep_links=False: the company file links to another workbook (150 MB), reading it takes a minute.
     workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
     try:
@@ -244,7 +247,7 @@ def load_codes_file(path: Path) -> dict[tuple[str, str], str]:
         for row in rows:
             names = [" ".join(str(cell or "").split()).casefold() for cell in row]
             if "part number" in names:
-                columns = {CODE_HEADERS[name]: idx for idx, name in enumerate(names) if name in CODE_HEADERS}
+                columns = {headers[name]: idx for idx, name in enumerate(names) if name in headers}
                 break
         if "article" not in columns:
             raise ValueError("В файле кодов нет колонки «Part number».")
