@@ -7,6 +7,7 @@ product field, how the value is formatted, and what to say when it is missing.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from importlib import resources
@@ -26,8 +27,17 @@ CHECK_ALIAS_SOURCE_PREFIX = "template_alias_check:"
 CURRENT_KIND_ATTRIBUTES = ("Род тока", "Род тока включения", "Род тока катушки управления", "Тип напряжения (тока)")
 
 
+PRODUCT_MARK_RE = re.compile(r"\s*\(R\)")
+
+
+def clean_product_name(value: str) -> str:
+    """Drop the price list's "(R)" marker, which is not part of the product name."""
+    text = PRODUCT_MARK_RE.sub("", value or "")
+    return " ".join(text.split()).strip(" ,")
+
+
 def short_wms_name(value: str, limit: int = 60) -> str:
-    clean = " ".join(value.split())
+    clean = clean_product_name(value)
     return clean[:limit].rstrip()
 
 
@@ -56,15 +66,20 @@ def format_count(value: float | int | None) -> str:
 def apply_transform(value: Any, spec: "FieldSpec") -> str:
     if spec.transform == "":
         return "" if value is None else value
-    if spec.transform == "decimal":
-        return format_decimal(value, spec.digits)
-    if spec.transform == "mm_to_m":
-        return mm_to_m(value)
-    if spec.transform == "count":
-        return format_count(value)
+    if spec.transform in NUMBER_TRANSFORMS:
+        return NUMBER_TRANSFORMS[spec.transform](value, spec)
+    if spec.transform == "name":
+        return clean_product_name(value or "")
     if spec.transform == "truncate":
         return short_wms_name(value or "", spec.limit)
     raise ValueError(f"Неизвестное преобразование в шаблоне партнёра: {spec.transform}")
+
+
+NUMBER_TRANSFORMS = {
+    "decimal": lambda value, spec: format_decimal(value, spec.digits),
+    "mm_to_m": lambda value, spec: mm_to_m(value),
+    "count": lambda value, spec: format_count(value),
+}
 
 
 def is_present(value: Any) -> bool:
@@ -157,6 +172,17 @@ class PartnerTemplate:
     name_aliases: dict[str, NameAlias] | None = None
     # Pairs checked and found wrong: never offered on the "Названия" sheet.
     name_rejects: dict[str, frozenset[str]] | None = None
+
+    def spreadsheet_value(self, header: str, value: str) -> str | int | float:
+        """Weights, sizes and counts go into xlsx as real numbers, so no decimal separator can be misread."""
+        spec = self.fields.get(header)
+        if spec is None or spec.transform not in NUMBER_TRANSFORMS:
+            return value
+        try:
+            number = float(value.replace(",", "."))
+        except ValueError:
+            return value
+        return int(number) if number.is_integer() else number
 
     def attribute_columns_for(self, header: str) -> AttributeColumns | None:
         for columns in self.attribute_columns:

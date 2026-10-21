@@ -58,3 +58,12 @@ class PartnerTemplateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductNameCleanupTests(unittest.TestCase):
+    def test_price_list_mark_is_dropped(self) -> None:
+        from chint_etm_mdm.export_templates import clean_product_name
+
+        self.assertEqual("Промежуточное реле NJDC-17 10А 24В AC", clean_product_name("Промежуточное реле NJDC-17 10А 24В AC (R)"))
+        self.assertEqual("Трансформатор 25ВА 380 220/24 IEC NDK", clean_product_name("Трансформатор 25ВА 380 220/24 IEC (R) NDK"))
+        self.assertEqual("АВДТ NB1L-20 6кА, электромеханический", clean_product_name("АВДТ NB1L-20 6кА, электромеханический (R)"))

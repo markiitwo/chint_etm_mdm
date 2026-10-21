@@ -710,11 +710,11 @@ def fill_xlsx_template(
             else:
                 value, status, source = template.product_value(product, header, rules_path)
             if status == "filled" and value:
-                row[col_idx].value = value
+                row[col_idx].value = template.spreadsheet_value(header, value)
                 filled_cells += 1
                 report.append(FillReportRow(row_number, article, header, status, value, source))
             elif status == "suggested" and value:
-                row[col_idx].value = value
+                row[col_idx].value = template.spreadsheet_value(header, value)
                 filled_cells += 1
                 suggested_cells += 1
                 report.append(
