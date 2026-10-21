@@ -59,6 +59,9 @@ def format_decimal(value: float | int | None, digits: int = 6) -> str:
     if value is None:
         return ""
     text = f"{float(value):.{digits}f}".rstrip("0").rstrip(".")
+    if text in {"0", "-0"} and float(value) != 0 and digits < 6:
+        # A light part (0.0004 kg) must not round to zero.
+        return format_decimal(value, 6)
     return text
 
 
@@ -94,6 +97,14 @@ NUMBER_TRANSFORMS = {
     "mm_to_m": lambda value, spec: mm_to_m(value),
     "count": lambda value, spec: format_count(value),
 }
+
+
+def range_max(value: str) -> str:
+    """"525-690" / "525...690" -> "690"; a single value stays as it is."""
+    numbers = re.findall(r"\d+(?:[.,]\d+)?", value)
+    if len(numbers) == 2 and re.fullmatch(r"\s*\d+(?:[.,]\d+)?\s*(?:-|–|…|\.\.\.)\s*\d+(?:[.,]\d+)?\s*\D{0,4}", value):
+        return numbers[1].replace(",", ".")
+    return value
 
 
 def scaled(value: str, factor: float) -> str:
@@ -175,6 +186,10 @@ class NameAlias:
     only_listed: bool = False
     # Unit conversion, e.g. 1000 for А -> мА.
     scale: float | None = None
+    # "max": a range such as "525-690" gives its upper value, for lists of single values.
+    range_pick: str = ""
+    # ETM classes (81 класс) the pair holds for; empty means every class.
+    classes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -191,7 +206,7 @@ class PartnerTemplate:
     fields: dict[str, FieldSpec]
     attribute_columns: tuple[AttributeColumns, ...]
     value_list_files: tuple[str, str] | None = None
-    name_aliases: dict[str, NameAlias] | None = None
+    name_aliases: dict[str, tuple[NameAlias, ...]] | None = None
     # Pairs checked and found wrong: never offered on the "Названия" sheet.
     name_rejects: dict[str, frozenset[str]] | None = None
     # Drop-down lists of an ETM category template, by canonical characteristic name.
@@ -247,12 +262,15 @@ class PartnerTemplate:
             value = attrs.get(alias, "")
             if value:
                 return value, f"{NAME_ALIAS_SOURCE_PREFIX}{alias}"
-        alias = (self.name_aliases or {}).get(canonical(attr_name))
-        if alias is not None:
+        for alias in (self.name_aliases or {}).get(canonical(attr_name), ()):
+            if alias.classes and class_code not in alias.classes:
+                continue
             for attribute in alias.attributes:
                 value = attrs.get(attribute, "")
                 if alias.only_listed and value not in alias.values:
                     continue
+                if value and alias.range_pick == "max":
+                    value = range_max(value)
                 if value and alias.scale:
                     value = scaled(value, alias.scale)
                 if value:
@@ -439,16 +457,7 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
         value_list_files=(
             (value_lists["reference"], value_lists["learned"]) if value_lists else None
         ),
-        name_aliases={
-            canonical(item["characteristic"]): NameAlias(
-                attributes=_as_tuple(item.get("attributes")),
-                values=dict(item.get("values") or {}),
-                check=bool(item.get("check", False)),
-                only_listed=bool(item.get("only_listed", False)),
-                scale=float(item["scale"]) if item.get("scale") else None,
-            )
-            for item in data.get("name_aliases", [])
-        },
+        name_aliases=parse_name_aliases(data.get("name_aliases", [])),
         name_rejects={
             canonical(item["characteristic"]): frozenset(_as_tuple(item.get("attributes")))
             for item in data.get("name_rejects", [])
@@ -456,6 +465,24 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
     )
     validate_partner_template(template)
     return template
+
+
+def parse_name_aliases(items: list[dict[str, Any]]) -> dict[str, tuple[NameAlias, ...]]:
+    """Pairs by characteristic, in file order: the first pair that gives a value wins."""
+    result: dict[str, tuple[NameAlias, ...]] = {}
+    for item in items:
+        alias = NameAlias(
+            attributes=_as_tuple(item.get("attributes")),
+            values=dict(item.get("values") or {}),
+            check=bool(item.get("check", False)),
+            only_listed=bool(item.get("only_listed", False)),
+            scale=float(item["scale"]) if item.get("scale") else None,
+            range_pick=item.get("range", ""),
+            classes=frozenset(str(code) for code in _as_tuple(item.get("classes"))),
+        )
+        key = canonical(item["characteristic"])
+        result[key] = (*result.get(key, ()), alias)
+    return result
 
 
 def validate_partner_template(template: PartnerTemplate) -> None:

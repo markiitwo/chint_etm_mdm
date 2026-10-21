@@ -106,6 +106,20 @@ class CategoryTemplateTests(unittest.TestCase):
         self.assertEqual(("10", "30", "100"), category.dropdowns[canonical("Дифференциальный ток (мА)")])
         self.assertEqual({"500820"}, set(category_library(self.templates)))
 
+    def test_split_series_prefers_a_class_with_template(self) -> None:
+        from chint_etm_mdm.db import fetch_products
+        from chint_etm_mdm.etm_categories import suggest_classes
+
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            for idx, code in enumerate(["503599", "503599", "503599", "50350599", "50350599"]):
+                conn.execute("INSERT INTO products(article, name, series_name) VALUES (?, 'Плата', 'NVF Аксессуары')", (f"a{idx}",))
+                conn.execute("INSERT INTO ipro_goods(article, name, full_name, class81_code) VALUES (?, 'x', 'x', ?)", (f"a{idx}", code))
+            conn.execute("INSERT INTO products(article, name, series_name) VALUES ('634412', 'Адаптер Modbus TCP', 'NVF Аксессуары')")
+        products = fetch_products(self.db, ["634412"])
+        self.assertEqual("503599", suggest_classes(self.db, products)["634412"].code)
+        choice = suggest_classes(self.db, products, frozenset({"50350599"}))["634412"]
+        self.assertEqual(("50350599", False), (choice.code, choice.sure))
+
     def test_new_articles_are_after_the_date(self) -> None:
         self.assertEqual(["586772", "777"], new_articles_since(self.db, dt.date(2026, 9, 4)))
 

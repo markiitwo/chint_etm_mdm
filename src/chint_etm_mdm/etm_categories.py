@@ -23,7 +23,7 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from .db import ProductRecord, connect, fetch_products
-from .export_templates import PartnerTemplate, load_partner_template
+from .export_templates import PartnerTemplate, clean_product_name, load_partner_template
 from .filler import FillResult, fill_xlsx_template, normalize_article, normalize_header
 from .value_matching import canonical
 
@@ -134,8 +134,14 @@ def series_family(series: str) -> str:
     return re.split(r"[-\s/(]", series.strip(), maxsplit=1)[0].upper()
 
 
-def suggest_classes(db_path: Path, products: dict[str, ProductRecord]) -> dict[str, ClassChoice]:
-    """The class each product already has, else the usual class of its series in ETM's catalog."""
+def suggest_classes(
+    db_path: Path, products: dict[str, ProductRecord], with_template: frozenset[str] = frozenset()
+) -> dict[str, ClassChoice]:
+    """The class each product already has, else the usual class of its series in ETM's catalog.
+
+    When the series is split between classes, a class whose template the user has wins over a more
+    frequent one without a template; such a choice is marked for a check.
+    """
     choices = {
         article: ClassChoice(product.class81_code, "уже есть в базе", True)
         for article, product in products.items()
@@ -177,9 +183,14 @@ def suggest_classes(db_path: Path, products: dict[str, ProductRecord]) -> dict[s
             (by_group.get(group.strip()) if group else None, f"как у группы «{group}»", False),
         ):
             if counts:
+                total = sum(counts.values())
                 code, votes = counts.most_common(1)[0]
-                share = votes / sum(counts.values())
-                choices[str(article)] = ClassChoice(code, f"{basis} ({votes} из {sum(counts.values())})", sure and share >= 0.8)
+                if code not in with_template:
+                    usable = [(item, count) for item, count in counts.most_common() if item in with_template]
+                    if usable and usable[0][1] / total >= 0.2:
+                        code, votes = usable[0]
+                        sure = False
+                choices[str(article)] = ClassChoice(code, f"{basis} ({votes} из {total})", sure and votes / total >= 0.8)
                 break
     return choices
 
@@ -281,7 +292,7 @@ def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library:
         sheet.append(
             [
                 article,
-                product.full_name or product.name,
+                clean_product_name(product.full_name or product.name),
                 code,
                 choice.basis if choice else "класс не найден, укажите вручную",
                 "" if choice and choice.sure else "да",
@@ -313,9 +324,9 @@ def fill_new_products(
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run = CategoryRun(output_dir=output_dir, summary_path=output_dir / f"новинки_сводка_{stamp}.xlsx")
     run.not_found = sorted(set(articles) - set(products))
-    run.classes = suggest_classes(db_path, products)
-    run.unclassified = sorted(article for article in products if article not in run.classes)
     library = category_library(templates_dir)
+    run.classes = suggest_classes(db_path, products, frozenset(library))
+    run.unclassified = sorted(article for article in products if article not in run.classes)
     fallback = load_codes_file(codes_path) if codes_path else {}
 
     by_class: dict[str, list[str]] = {}

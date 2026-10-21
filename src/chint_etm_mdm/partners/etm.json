@@ -37,7 +37,7 @@
     {"header": "Название", "field": ["name", "full_name"], "transform": "name", "source": "products/ipro_goods.name"},
     {"header": "Полное название", "field": ["full_name", "name"], "transform": "name", "source": "ipro_goods.full_name"},
     {"header": "Краткое имя WMS", "field": ["name", "full_name"], "transform": "truncate", "limit": 60, "source": "generated"},
-    {"header": "Вес, кг", "field": "weight_kg", "transform": "decimal", "digits": 6, "source": "product_dimensions_resolved.weight_kg/price_snapshot_items.gross_weight_unit", "note": "unit_dimensions"},
+    {"header": "Вес, кг", "field": "weight_kg", "transform": "decimal", "digits": 3, "source": "product_dimensions_resolved.weight_kg/price_snapshot_items.gross_weight_unit", "note": "unit_dimensions"},
     {"header": "Длина, м", "field": "length_mm", "transform": "mm_to_m", "source": "product_dimensions_resolved.length_mm", "note": "unit_dimensions"},
     {"header": "Ширина, м", "field": "width_mm", "transform": "mm_to_m", "source": "product_dimensions_resolved.width_mm", "note": "unit_dimensions"},
     {"header": "Высота, м", "field": "height_mm", "transform": "mm_to_m", "source": "product_dimensions_resolved.height_mm", "note": "unit_dimensions"},
@@ -97,6 +97,16 @@
 ,
     {"characteristic": "Дифференциальный ток (мА)", "attributes": ["Номинальный ток утечки, А", "Номинальный ток утечки"], "scale": 1000},
     {"characteristic": "Защитное напряжение (В)", "attributes": ["Уровень напряжения защиты, кВ"], "scale": 1000}
+,
+    {"characteristic": "Номинальная отключающая способность, кA (AC) (IEC/EN 60898)", "attributes": ["Номинальная отключающая способность по IEC 60947-2, кА"], "classes": ["500820"], "check": true},
+    {"characteristic": "Селективное исполнение", "attributes": ["Селективная защита"]},
+    {"characteristic": "Напряжение, В", "attributes": ["Номинальное напряжение питания цепи управления Us перемен. тока АС при 50 Гц, В", "Номинальное напряжение питания цепи управления Us постоянного тока DC, В", "Номинальное напряжение питания цепи управления, В"], "classes": ["50341020"]},
+    {"characteristic": "Напряжение, В", "attributes": ["Напряжение сети, В"], "classes": ["50350510"], "range": "max"},
+    {"characteristic": "Номинальная мощность электродвигателя, КВт", "attributes": ["Максимальная выходная мощность при линейной нагрузке при номин.выход.напряжении, кВт", "Номинальная мощность трехфазного двигателя в номинальном режиме, кВт"], "classes": ["50350510"]},
+    {"characteristic": "Количество фаз", "attributes": ["Количество входных фаз"], "classes": ["50350510"]},
+    {"characteristic": "Номинальный ток (А)", "attributes": ["Номинальный выходной ток, А"], "classes": ["50350510"]},
+    {"characteristic": "Диапазон регулировки", "attributes": ["Диапазон выходной частоты, Гц"], "classes": ["50350510"], "check": true},
+    {"characteristic": "Наличие интерфейса связи", "attributes": ["Функция передачи данных"], "classes": ["50350510"], "check": true}
   ],
   "name_rejects": [
     {"characteristic": "Количество НО контактов", "attributes": ["Количество контактных выводов"]},
