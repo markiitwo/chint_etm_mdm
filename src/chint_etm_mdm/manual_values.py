@@ -8,8 +8,15 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from .atomic_files import atomic_write_json
-from .db import fetch_products
+from .db import ProductRecord, fetch_products
+from .export_templates import DEFAULT_PARTNER, PartnerTemplate, load_partner_template
+from .etm_characteristics import CONFIG_PREFIX, is_characteristics_report, read_report_values
+from .value_matching import canonical, remember_matches, remember_name_aliases
 from .filler import (
+    MATCHES_HEADERS,
+    MATCHES_SHEET,
+    NAMES_HEADERS,
+    NAMES_SHEET,
     class81_index,
     find_article_index,
     is_reportable_header,
@@ -37,6 +44,8 @@ class ManualImportResult:
     report_path: Path
     imported_values: int
     skipped_values: int
+    learned_matches: int = 0
+    learned_names: int = 0
 
 
 def manual_values_path(work_dir: Path) -> Path:
@@ -126,6 +135,26 @@ def write_manual_import_report(path: Path, rows: list[ManualImportRow]) -> None:
     workbook.save(path)
 
 
+def value_match_to_remember(
+    template: PartnerTemplate,
+    product: ProductRecord,
+    header: str,
+    manual_value: str,
+    rules_path: Path | None,
+) -> tuple[str, str, str] | None:
+    """A value the user typed or kept in a closed-list column, paired with the product's own value."""
+    columns = template.attribute_columns_for(header)
+    if columns is None:
+        return None
+    allowed = template.allowed_values_for(header, rules_path)
+    if manual_value not in allowed:
+        return None
+    raw, _ = template.attribute_raw(product, header, columns, rules_path)
+    if not raw or canonical(raw) == canonical(manual_value):
+        return None
+    return header.removeprefix(columns.prefix).strip(), raw, manual_value
+
+
 def import_manual_completions(
     db_path: Path,
     filled_path: Path,
@@ -133,10 +162,14 @@ def import_manual_completions(
     output_dir: Path,
     rules_path: Path | None = None,
 ) -> ManualImportResult:
-    if filled_path.suffix.lower() not in {".xlsx", ".xlsm"}:
-        raise ValueError("Импорт ручных дозаполнений пока поддерживает только XLSX/XLSM.")
     if not filled_path.exists():
         raise FileNotFoundError(f"Файл не найден: {filled_path}")
+    if filled_path.suffix.lower() == ".csv" and is_characteristics_report(filled_path):
+        return import_characteristics_report(db_path, filled_path, values_path, output_dir, rules_path)
+    if filled_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise ValueError("Импорт ручных дозаполнений поддерживает XLSX/XLSM и отчет ЭТМ о недостающих характеристиках (CSV).")
+    if has_matches_sheet(filled_path):
+        return import_value_confirmations(filled_path, values_path, output_dir, rules_path)
     if not db_path.exists():
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
@@ -162,7 +195,9 @@ def import_manual_completions(
             articles.append(normalize_article(row[article_idx].value))
     products = fetch_products(db_path, articles)
 
+    template = load_partner_template(DEFAULT_PARTNER)
     imported: list[ManualImportRow] = []
+    learned_matches: list[tuple[str, str, str]] = []
     skipped = 0
     for row in rows:
         article = normalize_article(row[article_idx].value if article_idx < len(row) else "")
@@ -181,8 +216,12 @@ def import_manual_completions(
                 continue
             db_value = ""
             if product:
-                db_value, _, _ = product_value(product, header, rules_path)
+                db_value, db_status, _ = product_value(product, header, rules_path)
                 db_value = normalize_value(db_value)
+                if db_status in {"value_not_allowed", "suggested"}:
+                    learned_match = value_match_to_remember(template, product, header, manual_value, rules_path)
+                    if learned_match:
+                        learned_matches.append(learned_match)
             if db_value == manual_value:
                 skipped += 1
                 continue
@@ -198,6 +237,8 @@ def import_manual_completions(
     workbook.close()
 
     upsert_manual_values(values_path, imported, filled_path)
+    learned_path = template.learned_matches_path(rules_path)
+    learned_added = remember_matches(learned_path, learned_matches) if learned_path and learned_matches else 0
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"{filled_path.stem}_manual_import_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
     write_manual_import_report(report_path, imported)
@@ -207,6 +248,136 @@ def import_manual_completions(
         report_path=report_path,
         imported_values=len(imported),
         skipped_values=skipped,
+        learned_matches=learned_added,
+    )
+
+
+ACCEPT_WORDS = {"да", "yes", "y", "+", "1", "x", "х", "v", "ок", "ok", "true", "принять"}
+
+
+def has_matches_sheet(path: Path) -> bool:
+    workbook = load_workbook(path, read_only=True)
+    try:
+        return MATCHES_SHEET in workbook.sheetnames or NAMES_SHEET in workbook.sheetnames
+    finally:
+        workbook.close()
+
+
+def import_value_confirmations(
+    report_path: Path,
+    values_path: Path,
+    output_dir: Path,
+    rules_path: Path | None,
+) -> ManualImportResult:
+    """Remember the values the user accepted on the "Сопоставления" sheet of a fill report."""
+    template = load_partner_template(DEFAULT_PARTNER)
+    learned_path = template.learned_matches_path(rules_path)
+    if learned_path is None or template.value_lists(rules_path) is None:
+        raise ValueError("Сначала загрузите справочник характеристик ЭТМ.")
+    workbook = load_workbook(report_path, read_only=True, data_only=True)
+    try:
+        rows = list(workbook[MATCHES_SHEET].iter_rows(values_only=True)) if MATCHES_SHEET in workbook.sheetnames else []
+        name_rows = list(workbook[NAMES_SHEET].iter_rows(values_only=True)) if NAMES_SHEET in workbook.sheetnames else []
+    finally:
+        workbook.close()
+    report_rows: list[ManualImportRow] = []
+    aliases: list[tuple[str, str]] = []
+    if name_rows:
+        names_header = [normalize_value(cell) for cell in name_rows[0]]
+        try:
+            name_idx, source_idx, yes_idx = (names_header.index(NAMES_HEADERS[i]) for i in (0, 2, 5))
+        except ValueError as exc:
+            raise ValueError(f"На листе «{NAMES_SHEET}» не хватает колонок.") from exc
+        for row in name_rows[1:]:
+            cells = [normalize_value(cell) for cell in row]
+            cells += [""] * (max(name_idx, source_idx, yes_idx) + 1 - len(cells))
+            if cells[name_idx] and cells[source_idx] and cells[yes_idx].casefold() in ACCEPT_WORDS:
+                aliases.append((cells[name_idx], cells[source_idx]))
+                report_rows.append(ManualImportRow("", cells[name_idx], cells[source_idx], "", "Характеристика сопоставлена"))
+    aliases_added = remember_name_aliases(learned_path, aliases) if aliases else 0
+    header = [normalize_value(cell) for cell in rows[0]] if rows else []
+    try:
+        field_idx, raw_idx, accept_idx = (header.index(MATCHES_HEADERS[i]) for i in (0, 1, 5)) if rows else (0, 1, 5)
+    except ValueError as exc:
+        raise ValueError(f"На листе «{MATCHES_SHEET}» не хватает колонок.") from exc
+    accepted: list[tuple[str, str, str]] = []
+    skipped = 0
+    for row in rows[1:]:
+        field = normalize_value(row[field_idx]) if field_idx < len(row) else ""
+        raw = normalize_value(row[raw_idx]) if raw_idx < len(row) else ""
+        value = normalize_value(row[accept_idx]) if accept_idx < len(row) else ""
+        columns = template.attribute_columns_for(field)
+        if not (field and raw and value) or columns is None:
+            skipped += 1
+            continue
+        if value not in template.allowed_values_for(field, rules_path):
+            skipped += 1
+            report_rows.append(ManualImportRow("", field, value, raw, "Не сохранено: значения нет в списке допустимых"))
+            continue
+        accepted.append((field.removeprefix(columns.prefix).strip(), raw, value))
+        report_rows.append(ManualImportRow("", field, value, raw, "Сопоставление запомнено"))
+    learned = remember_matches(learned_path, accepted) if accepted else 0
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result_path = output_dir / f"{report_path.stem}_matches_import_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
+    write_manual_import_report(result_path, report_rows)
+    return ManualImportResult(
+        filled_file=report_path,
+        values_path=learned_path,
+        report_path=result_path,
+        imported_values=0,
+        skipped_values=skipped,
+        learned_matches=learned,
+        learned_names=aliases_added,
+    )
+
+
+def import_characteristics_report(
+    db_path: Path,
+    report_path: Path,
+    values_path: Path,
+    output_dir: Path,
+    rules_path: Path | None,
+) -> ManualImportResult:
+    """Read the ETM missing-characteristics report the user filled and remember the values."""
+    if not db_path.exists():
+        raise FileNotFoundError(f"База не найдена: {db_path}")
+    template = load_partner_template(DEFAULT_PARTNER)
+    entries = read_report_values(report_path)
+    products = fetch_products(db_path, [article for article, _, _, _ in entries])
+    imported: list[ManualImportRow] = []
+    learned_matches: list[tuple[str, str, str]] = []
+    skipped = 0
+    for article, etm_class, name, value in entries:
+        header = f"{CONFIG_PREFIX}{name}"
+        manual_value = normalize_value(value)
+        product = products.get(article)
+        db_value = ""
+        if product:
+            if etm_class:
+                product = product_with_template_class(product, etm_class, template)
+            db_value, db_status, _ = product_value(product, header, rules_path)
+            db_value = normalize_value(db_value)
+            if db_status in {"value_not_allowed", "suggested"}:
+                learned_match = value_match_to_remember(template, product, header, manual_value, rules_path)
+                if learned_match:
+                    learned_matches.append(learned_match)
+        if db_value == manual_value:
+            skipped += 1
+            continue
+        imported.append(ManualImportRow(article, header, manual_value, db_value, "Сохранено как ручное дозаполнение"))
+    upsert_manual_values(values_path, imported, report_path)
+    learned_path = template.learned_matches_path(rules_path)
+    learned_added = remember_matches(learned_path, learned_matches) if learned_path and learned_matches else 0
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result_path = output_dir / f"{report_path.stem}_manual_import_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
+    write_manual_import_report(result_path, imported)
+    return ManualImportResult(
+        filled_file=report_path,
+        values_path=values_path,
+        report_path=result_path,
+        imported_values=len(imported),
+        skipped_values=skipped,
+        learned_matches=learned_added,
     )
 
 
@@ -215,6 +386,8 @@ def result_lines(result: ManualImportResult) -> list[str]:
         f"Файл: {result.filled_file}",
         f"Ручных значений сохранено: {result.imported_values}",
         f"Пропущено без изменений: {result.skipped_values}",
+        f"Запомнено новых сопоставлений значений: {result.learned_matches}",
+        f"Запомнено новых сопоставлений характеристик: {result.learned_names}",
         f"Файл ручных значений: {result.values_path}",
         f"Отчет: {result.report_path}",
     ]

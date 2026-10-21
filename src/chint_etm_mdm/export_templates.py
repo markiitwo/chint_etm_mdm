@@ -16,8 +16,11 @@ from typing import Any
 from . import partners
 from .db import ProductRecord
 from .mapping_rules import source_attributes_for
+from .value_matching import ValueLists, same_name_attributes
 
 DEFAULT_PARTNER = "etm"
+NAME_ALIAS_SOURCE_PREFIX = "name_alias:"
+SAME_NAME_SOURCE_PREFIX = "same_name:"
 
 
 def short_wms_name(value: str, limit: int = 60) -> str:
@@ -94,6 +97,27 @@ class FieldSpec:
         return apply_transform(self.raw_value(product), self), "filled", self.source
 
 
+def _file_stamp(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+_VALUE_LISTS_CACHE: dict[tuple[Path, Path], tuple[tuple[object, ...], ValueLists]] = {}
+
+
+def cached_value_lists(reference: Path, learned: Path) -> ValueLists:
+    key = (reference, learned)
+    stamp = (_file_stamp(reference), _file_stamp(learned))
+    cached = _VALUE_LISTS_CACHE.get(key)
+    if cached is None or cached[0] != stamp:
+        cached = (stamp, ValueLists(reference, learned))
+        _VALUE_LISTS_CACHE[key] = cached
+    return cached[1]
+
+
 @dataclass(frozen=True)
 class AttributeColumns:
     prefix: str
@@ -115,6 +139,7 @@ class PartnerTemplate:
     note_prefixes: tuple[tuple[str, str], ...]
     fields: dict[str, FieldSpec]
     attribute_columns: tuple[AttributeColumns, ...]
+    value_list_files: tuple[str, str] | None = None
 
     def attribute_columns_for(self, header: str) -> AttributeColumns | None:
         for columns in self.attribute_columns:
@@ -133,6 +158,33 @@ class PartnerTemplate:
             return self.attribute_value(product, header, columns, rules_path)
         return "", "blank", ""
 
+    def attribute_raw(
+        self,
+        product: ProductRecord,
+        header: str,
+        columns: AttributeColumns,
+        rules_path: Path | None,
+    ) -> tuple[str, str]:
+        attrs = product.attributes or {}
+        attr_name = header.removeprefix(columns.prefix).strip()
+        value = attrs.get(attr_name, "")
+        if value:
+            return value, columns.source
+        class_code = getattr(product, self.class_field)
+        for alias in source_attributes_for(class_code, f"{columns.prefix}{attr_name}", rules_path):
+            value = attrs.get(alias, "")
+            if value:
+                return value, f"{columns.rule_source_prefix}{alias}"
+        lists = self.value_lists(rules_path)
+        for alias in lists.aliases_for(attr_name) if lists else []:
+            value = attrs.get(alias, "")
+            if value:
+                return value, f"{NAME_ALIAS_SOURCE_PREFIX}{alias}"
+        if lists:
+            for attribute in same_name_attributes(attr_name, attrs):
+                return attrs[attribute], f"{SAME_NAME_SOURCE_PREFIX}{attribute}"
+        return "", ""
+
     def attribute_value(
         self,
         product: ProductRecord,
@@ -140,17 +192,59 @@ class PartnerTemplate:
         columns: AttributeColumns,
         rules_path: Path | None,
     ) -> tuple[str, str, str]:
-        attrs = product.attributes or {}
-        attr_name = header.removeprefix(columns.prefix).strip()
-        value = attrs.get(attr_name, "")
-        if value:
-            return value, "filled", columns.source
-        class_code = getattr(product, self.class_field)
-        for alias in source_attributes_for(class_code, f"{columns.prefix}{attr_name}", rules_path):
-            value = attrs.get(alias, "")
-            if value:
-                return value, "filled", f"{columns.rule_source_prefix}{alias}"
-        return "", "blank", ""
+        raw, source = self.attribute_raw(product, header, columns, rules_path)
+        if not raw:
+            return "", "blank", ""
+        lists = self.value_lists(rules_path)
+        match = lists.match(header.removeprefix(columns.prefix).strip(), raw) if lists else None
+        if match is None:
+            return raw, "filled", source
+        if match.confident and not source.startswith(SAME_NAME_SOURCE_PREFIX):
+            return match.value, "filled", source
+        if match.confident or match.kind == "words":
+            return match.value, "suggested", source
+        return raw, "value_not_allowed", source
+
+    def value_lists(self, rules_path: Path | None) -> ValueLists | None:
+        if self.value_list_files is None or rules_path is None:
+            return None
+        reference = rules_path.parent / self.value_list_files[0]
+        if not reference.exists():
+            return None
+        return cached_value_lists(reference, rules_path.parent / self.value_list_files[1])
+
+    def learned_matches_path(self, rules_path: Path | None) -> Path | None:
+        if self.value_list_files is None or rules_path is None:
+            return None
+        return rules_path.parent / self.value_list_files[1]
+
+    def allowed_values_for(self, header: str, rules_path: Path | None) -> list[str]:
+        columns = self.attribute_columns_for(header)
+        lists = self.value_lists(rules_path)
+        if columns is None or lists is None:
+            return []
+        characteristic = lists.characteristic(header.removeprefix(columns.prefix).strip())
+        return list(characteristic.values) if characteristic else []
+
+    def raw_value(self, product: ProductRecord, header: str, rules_path: Path | None) -> str:
+        columns = self.attribute_columns_for(header)
+        if columns is None:
+            return ""
+        return self.attribute_raw(product, header, columns, rules_path)[0]
+
+    def candidates_for(self, header: str, raw: str, rules_path: Path | None) -> tuple[str, ...]:
+        columns = self.attribute_columns_for(header)
+        lists = self.value_lists(rules_path)
+        if columns is None or lists is None:
+            return ()
+        return lists.match(header.removeprefix(columns.prefix).strip(), raw).candidates
+
+    def not_allowed_note(self, header: str, raw: str, rules_path: Path | None) -> str:
+        candidates = self.candidates_for(header, raw, rules_path)
+        note = f"В базе есть значение «{raw}», но его нет в списке допустимых значений {self.name}."
+        if candidates:
+            note += " Похожие допустимые: " + "; ".join(candidates) + "."
+        return note + " Выберите значение на листе «Сопоставления» или впишите вручную, программа его запомнит."
 
     def is_reportable(self, header: str) -> bool:
         return header in self.fields or self.attribute_columns_for(header) is not None
@@ -209,6 +303,7 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
         )
         fields[spec.header] = spec
     classification = data.get("classification") or {}
+    value_lists = data.get("value_lists") or {}
     template = PartnerTemplate(
         code=data["code"],
         name=data.get("name", data["code"]),
@@ -228,6 +323,9 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
                 note=item.get("note", ""),
             )
             for item in data.get("attribute_columns", [])
+        ),
+        value_list_files=(
+            (value_lists["reference"], value_lists["learned"]) if value_lists else None
         ),
     )
     validate_partner_template(template)
@@ -265,3 +363,10 @@ def load_partner_template(code: str = DEFAULT_PARTNER) -> PartnerTemplate:
 def available_partners() -> list[str]:
     folder = resources.files(partners)
     return sorted(item.name.removesuffix(".json") for item in folder.iterdir() if item.name.endswith(".json"))
+
+
+def etm_reference_path(rules_path: Path) -> Path:
+    """Where the imported ETM reference lives: next to the mapping rules file."""
+    template = load_partner_template("etm")
+    assert template.value_list_files is not None
+    return rules_path.parent / template.value_list_files[0]

@@ -12,6 +12,7 @@
   "article_headers": ["Артикул", "Расширенный артикул"],
   "skip_headers": ["Артикул"],
   "classification": {"header": "81 класс", "field": "class81_code"},
+  "value_lists": {"reference": "etm_reference.json", "learned": "etm_value_matches.json"},
   "notes": {
     "default": "В базе нет значения для этого поля.",
     "unit_dimensions": "В базе нет значения для единицы товара. Нужно заполнить именно изделие, не упаковку.",
@@ -28,7 +29,7 @@
     {"prefix": "Упак5", "note": "transport_pack"}
   ],
   "fields": [
-    {"header": "Код производителя", "const": "CHINT", "source": "static"},
+    {"header": "Код производителя", "const": "2019", "source": "static"},
     {"header": "Страна", "const": "CHN", "source": "static"},
     {"header": "Название упаковки", "const": "шт", "source": "static"},
     {"header": "Расширенный артикул", "field": "article", "source": "products.article"},

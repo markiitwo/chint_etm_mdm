@@ -44,7 +44,9 @@ from .etim_importer import (
     restore_database_backup,
     result_lines as etim_result_lines,
 )
+from .export_templates import etm_reference_path
 from .filler import FillResult, fill_template
+from .value_matching import import_etm_reference
 from .mapping_rules import (
     add_approved_class_rule,
     add_rejected_class_rule,
@@ -620,6 +622,13 @@ class MainWindow(QMainWindow):
         actions.addWidget(save_rules)
         actions.addWidget(reject_rules)
         actions.addStretch(1)
+        import_reference = QPushButton("Загрузить справочник характеристик ЭТМ...")
+        import_reference.setToolTip(
+            "Файл «Справочник» из iPRO OneTeam: допустимые значения характеристик. "
+            "После загрузки программа подбирает значения характеристик к этому списку."
+        )
+        import_reference.clicked.connect(self.import_etm_reference_file)
+        actions.addWidget(import_reference)
 
         layout.addWidget(box)
         layout.addWidget(QLabel("Покрытие желтых полей"))
@@ -676,9 +685,9 @@ class MainWindow(QMainWindow):
     def choose_manual_filled_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Выберите дозаполненный _filled.xlsx",
+            "Выберите дозаполненный файл, отчет о заполнении или отчет ЭТМ о характеристиках",
             "",
-            "Filled upload_goods (*.xlsx *.xlsm);;All files (*)",
+            "Заполненные файлы (*.xlsx *.xlsm *.csv);;All files (*)",
         )
         if path:
             self.manual_filled_path_edit.setText(path)
@@ -1455,6 +1464,24 @@ class MainWindow(QMainWindow):
                 }
             )
         return rows
+
+    def import_etm_reference_file(self) -> None:
+        rules_path = self.rules_path_from_work_dir()
+        if rules_path is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите справочник характеристик ЭТМ", "", "Excel (*.xlsx)"
+        )
+        if not path:
+            return
+        try:
+            characteristics, values = import_etm_reference(Path(path), etm_reference_path(rules_path))
+        except Exception as exc:
+            QMessageBox.warning(self, "Справочник не загружен", str(exc))
+            return
+        self.rules_log.append(
+            f"Справочник ЭТМ загружен: {characteristics} характеристик, {values} допустимых значений."
+        )
 
     def rules_path_from_work_dir(self) -> Path | None:
         work_text = self.work_dir_edit.text().strip()
