@@ -326,11 +326,17 @@ class ConnectionLifetimeTests(unittest.TestCase):
             with closing(sqlite3.connect(database)) as setup, setup:
                 setup.execute("CREATE TABLE products(article TEXT PRIMARY KEY)")
                 setup.execute("INSERT INTO products VALUES ('A-1')")
+                etim_importer.ensure_etim_import_tables(setup)
+                setup.execute(
+                    "INSERT INTO product_dimensions_raw (import_id, article, source_kind, dimension_kind, length_mm) "
+                    "VALUES (1, 'A-1', ?, 'length_mm', 123)",
+                    (etim_importer.SOURCE_KIND,),
+                )
             report = root / "decisions.xlsx"
             workbook = Workbook()
             workbook.active.title = "Конфликты"
-            workbook.active.append(["Решение", "Артикул", "Поле", "Пришло из ETIM"])
-            workbook.active.append([etim_importer.ACCEPT_ETIM_DECISION, "A-1", "Длина, мм", 123])
+            workbook.active.append(["Решение", "Артикул", "Поле", "Сейчас в базе", "Пришло из ETIM"])
+            workbook.active.append([etim_importer.ACCEPT_ETIM_DECISION, "A-1", "Длина, мм", "", 123])
             workbook.save(report)
             workbook.close()
 
