@@ -266,3 +266,16 @@ class RejectedNamePairTests(unittest.TestCase):
         rejects = load_partner_template("etm").name_rejects
         filtered = names_to_review({"Импульсный ток Iimp (10/350), кА": attrs}, rejects)
         self.assertEqual([""], [row[2] for row in filtered])
+
+
+class ClassBoundAliasTests(unittest.TestCase):
+    def test_pair_holds_only_for_its_class(self) -> None:
+        from chint_etm_mdm.export_templates import load_partner_template
+
+        template = load_partner_template("etm")
+        columns = template.attribute_columns_for("Конфиг:")
+        attrs = {"Напряжение сети, В": "525-690"}
+        drive = ProductRecord(article="1", class81_code="50350510", attributes=attrs)
+        other = ProductRecord(article="2", class81_code="500410", attributes=attrs)
+        self.assertEqual("690", template.attribute_raw(drive, "Конфиг:Напряжение, В", columns, None)[0])
+        self.assertEqual("", template.attribute_raw(other, "Конфиг:Напряжение, В", columns, None)[0])

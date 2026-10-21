@@ -7,6 +7,7 @@ product field, how the value is formatted, and what to say when it is missing.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from importlib import resources
@@ -16,18 +17,41 @@ from typing import Any
 from . import partners
 from .db import ProductRecord
 from .mapping_rules import source_attributes_for
-from .value_matching import ValueLists, canonical, current_kind_from_text, current_kind_from_value, same_name_attributes
+from .value_matching import (
+    Characteristic,
+    MatchResult,
+    ValueLists,
+    canonical,
+    current_kind_from_text,
+    current_kind_from_value,
+    format_number,
+    match_value,
+    only_number,
+    product_type_from_name,
+    same_name_attributes,
+)
 
 DEFAULT_PARTNER = "etm"
 NAME_ALIAS_SOURCE_PREFIX = "name_alias:"
 SAME_NAME_SOURCE_PREFIX = "same_name:"
 TEMPLATE_ALIAS_SOURCE_PREFIX = "template_alias:"
 CHECK_ALIAS_SOURCE_PREFIX = "template_alias_check:"
+PRODUCT_TYPE_KEY = "тип изделия"
+PRODUCT_TYPE_SOURCE = "product_name_type"
 CURRENT_KIND_ATTRIBUTES = ("Род тока", "Род тока включения", "Род тока катушки управления", "Тип напряжения (тока)")
 
 
+PRODUCT_MARK_RE = re.compile(r"\s*\(R\)")
+
+
+def clean_product_name(value: str) -> str:
+    """Drop the price list's "(R)" marker, which is not part of the product name."""
+    text = PRODUCT_MARK_RE.sub("", value or "")
+    return " ".join(text.split()).strip(" ,")
+
+
 def short_wms_name(value: str, limit: int = 60) -> str:
-    clean = " ".join(value.split())
+    clean = clean_product_name(value)
     return clean[:limit].rstrip()
 
 
@@ -35,6 +59,9 @@ def format_decimal(value: float | int | None, digits: int = 6) -> str:
     if value is None:
         return ""
     text = f"{float(value):.{digits}f}".rstrip("0").rstrip(".")
+    if text in {"0", "-0"} and float(value) != 0 and digits < 6:
+        # A light part (0.0004 kg) must not round to zero.
+        return format_decimal(value, 6)
     return text
 
 
@@ -56,15 +83,34 @@ def format_count(value: float | int | None) -> str:
 def apply_transform(value: Any, spec: "FieldSpec") -> str:
     if spec.transform == "":
         return "" if value is None else value
-    if spec.transform == "decimal":
-        return format_decimal(value, spec.digits)
-    if spec.transform == "mm_to_m":
-        return mm_to_m(value)
-    if spec.transform == "count":
-        return format_count(value)
+    if spec.transform in NUMBER_TRANSFORMS:
+        return NUMBER_TRANSFORMS[spec.transform](value, spec)
+    if spec.transform == "name":
+        return clean_product_name(value or "")
     if spec.transform == "truncate":
         return short_wms_name(value or "", spec.limit)
     raise ValueError(f"Неизвестное преобразование в шаблоне партнёра: {spec.transform}")
+
+
+NUMBER_TRANSFORMS = {
+    "decimal": lambda value, spec: format_decimal(value, spec.digits),
+    "mm_to_m": lambda value, spec: mm_to_m(value),
+    "count": lambda value, spec: format_count(value),
+}
+
+
+def range_max(value: str) -> str:
+    """"525-690" / "525...690" -> "690"; a single value stays as it is."""
+    numbers = re.findall(r"\d+(?:[.,]\d+)?", value)
+    if len(numbers) == 2 and re.fullmatch(r"\s*\d+(?:[.,]\d+)?\s*(?:-|–|…|\.\.\.)\s*\d+(?:[.,]\d+)?\s*\D{0,4}", value):
+        return numbers[1].replace(",", ".")
+    return value
+
+
+def scaled(value: str, factor: float) -> str:
+    """"0.03" with factor 1000 -> "30"; a value that is not one number is dropped."""
+    number = only_number(value)
+    return "" if number is None else format_number(number * factor)
 
 
 def is_present(value: Any) -> bool:
@@ -138,6 +184,12 @@ class NameAlias:
     check: bool = False
     # Only values listed in `values` carry over; any other value of the attribute is skipped.
     only_listed: bool = False
+    # Unit conversion, e.g. 1000 for А -> мА.
+    scale: float | None = None
+    # "max": a range such as "525-690" gives its upper value, for lists of single values.
+    range_pick: str = ""
+    # ETM classes (81 класс) the pair holds for; empty means every class.
+    classes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -154,9 +206,22 @@ class PartnerTemplate:
     fields: dict[str, FieldSpec]
     attribute_columns: tuple[AttributeColumns, ...]
     value_list_files: tuple[str, str] | None = None
-    name_aliases: dict[str, NameAlias] | None = None
+    name_aliases: dict[str, tuple[NameAlias, ...]] | None = None
     # Pairs checked and found wrong: never offered on the "Названия" sheet.
     name_rejects: dict[str, frozenset[str]] | None = None
+    # Drop-down lists of an ETM category template, by canonical characteristic name.
+    dropdowns: dict[str, tuple[str, ...]] | None = None
+
+    def spreadsheet_value(self, header: str, value: str) -> str | int | float:
+        """Weights, sizes and counts go into xlsx as real numbers, so no decimal separator can be misread."""
+        spec = self.fields.get(header)
+        if spec is None or spec.transform not in NUMBER_TRANSFORMS:
+            return value
+        try:
+            number = float(value.replace(",", "."))
+        except ValueError:
+            return value
+        return int(number) if number.is_integer() else number
 
     def attribute_columns_for(self, header: str) -> AttributeColumns | None:
         for columns in self.attribute_columns:
@@ -197,12 +262,17 @@ class PartnerTemplate:
             value = attrs.get(alias, "")
             if value:
                 return value, f"{NAME_ALIAS_SOURCE_PREFIX}{alias}"
-        alias = (self.name_aliases or {}).get(canonical(attr_name))
-        if alias is not None:
+        for alias in (self.name_aliases or {}).get(canonical(attr_name), ()):
+            if alias.classes and class_code not in alias.classes:
+                continue
             for attribute in alias.attributes:
                 value = attrs.get(attribute, "")
                 if alias.only_listed and value not in alias.values:
                     continue
+                if value and alias.range_pick == "max":
+                    value = range_max(value)
+                if value and alias.scale:
+                    value = scaled(value, alias.scale)
                 if value:
                     prefix = CHECK_ALIAS_SOURCE_PREFIX if alias.check else TEMPLATE_ALIAS_SOURCE_PREFIX
                     return alias.values.get(value, value), f"{prefix}{attribute}"
@@ -219,21 +289,35 @@ class PartnerTemplate:
         rules_path: Path | None,
     ) -> tuple[str, str, str]:
         raw, source = self.attribute_raw(product, header, columns, rules_path)
+        attr_name = header.removeprefix(columns.prefix).strip()
+        dropdown = self.dropdown_for(attr_name)
+        if not raw and dropdown and canonical(attr_name) == PRODUCT_TYPE_KEY:
+            raw, source = product_type_from_name(product.full_name or product.name, dropdown), PRODUCT_TYPE_SOURCE
         if not raw:
             return "", "blank", ""
         lists = self.value_lists(rules_path)
-        if lists is None:
+        if lists is None and not dropdown:
             return raw, "filled", source
-        attr_name = header.removeprefix(columns.prefix).strip()
         kind = ""
-        if lists.wants_current_kind(attr_name):
+        if lists is not None and not dropdown and lists.wants_current_kind(attr_name):
             raw, kind, source = self.with_current_kind(product, raw, source)
-        match = lists.match(attr_name, raw, kind)
+        match = self.match_allowed(attr_name, raw, rules_path, kind)
         if match.confident and not source.startswith((SAME_NAME_SOURCE_PREFIX, CHECK_ALIAS_SOURCE_PREFIX)):
             return match.value, "filled", source
         if match.confident or match.kind == "words":
             return match.value, "suggested", source
         return raw, "value_not_allowed", source
+
+    def dropdown_for(self, attr_name: str) -> tuple[str, ...]:
+        return (self.dropdowns or {}).get(canonical(attr_name), ())
+
+    def match_allowed(self, attr_name: str, raw: str, rules_path: Path | None, kind: str = "") -> MatchResult:
+        """Against the category template's drop-down when it has one, else ETM's reference."""
+        dropdown = self.dropdown_for(attr_name)
+        lists = self.value_lists(rules_path)
+        if lists is not None:
+            return lists.match(attr_name, raw, kind, dropdown)
+        return match_value(raw, Characteristic(name=attr_name, values=list(dropdown)))
 
     def with_current_kind(self, product: ProductRecord, raw: str, source: str) -> tuple[str, str, str]:
         """For values like "AC 220": the product name ("... AC/DC230В") wins, else the "Род тока" attributes."""
@@ -278,10 +362,12 @@ class PartnerTemplate:
 
     def candidates_for(self, header: str, raw: str, rules_path: Path | None) -> tuple[str, ...]:
         columns = self.attribute_columns_for(header)
-        lists = self.value_lists(rules_path)
-        if columns is None or lists is None:
+        if columns is None:
             return ()
-        return lists.match(header.removeprefix(columns.prefix).strip(), raw).candidates
+        attr_name = header.removeprefix(columns.prefix).strip()
+        if self.value_lists(rules_path) is None and not self.dropdown_for(attr_name):
+            return ()
+        return self.match_allowed(attr_name, raw, rules_path).candidates
 
     def not_allowed_note(self, header: str, raw: str, rules_path: Path | None) -> str:
         candidates = self.candidates_for(header, raw, rules_path)
@@ -371,15 +457,7 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
         value_list_files=(
             (value_lists["reference"], value_lists["learned"]) if value_lists else None
         ),
-        name_aliases={
-            canonical(item["characteristic"]): NameAlias(
-                attributes=_as_tuple(item.get("attributes")),
-                values=dict(item.get("values") or {}),
-                check=bool(item.get("check", False)),
-                only_listed=bool(item.get("only_listed", False)),
-            )
-            for item in data.get("name_aliases", [])
-        },
+        name_aliases=parse_name_aliases(data.get("name_aliases", [])),
         name_rejects={
             canonical(item["characteristic"]): frozenset(_as_tuple(item.get("attributes")))
             for item in data.get("name_rejects", [])
@@ -387,6 +465,24 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
     )
     validate_partner_template(template)
     return template
+
+
+def parse_name_aliases(items: list[dict[str, Any]]) -> dict[str, tuple[NameAlias, ...]]:
+    """Pairs by characteristic, in file order: the first pair that gives a value wins."""
+    result: dict[str, tuple[NameAlias, ...]] = {}
+    for item in items:
+        alias = NameAlias(
+            attributes=_as_tuple(item.get("attributes")),
+            values=dict(item.get("values") or {}),
+            check=bool(item.get("check", False)),
+            only_listed=bool(item.get("only_listed", False)),
+            scale=float(item["scale"]) if item.get("scale") else None,
+            range_pick=item.get("range", ""),
+            classes=frozenset(str(code) for code in _as_tuple(item.get("classes"))),
+        )
+        key = canonical(item["characteristic"])
+        result[key] = (*result.get(key, ()), alias)
+    return result
 
 
 def validate_partner_template(template: PartnerTemplate) -> None:

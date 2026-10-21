@@ -269,8 +269,11 @@ class ValueLists:
     def aliases_for(self, name: str) -> list[str]:
         return self.name_aliases.get(canonical(name), [])
 
-    def match(self, name: str, raw: str, current_kind: str = "") -> MatchResult:
+    def match(self, name: str, raw: str, current_kind: str = "", values: tuple[str, ...] = ()) -> MatchResult:
+        """`values` is the drop-down list of a category template; it narrows the reference list."""
         characteristic = self.characteristic(name) or Characteristic(name=name)
+        if values:
+            characteristic = Characteristic(name=characteristic.name, code=characteristic.code, values=list(values))
         return match_value(raw, characteristic, self.learned.get(canonical(name)), current_kind)
 
     def wants_current_kind(self, name: str) -> bool:
@@ -533,3 +536,34 @@ def import_etm_reference(source: Path, target: Path) -> tuple[int, int]:
         },
     )
     return len(characteristics), sum(len(item.values) for item in characteristics)
+
+
+# Abbreviations that start CHINT product names, spelled out as in ETM's lists.
+PRODUCT_ABBREVIATIONS = {
+    "авдт": "выключатель автоматический дифференциального тока",
+    "узо": "выключатель дифференциального тока",
+    "пч": "преобразователь частоты",
+    "упп": "устройство плавного пуска",
+    "опн": "ограничитель перенапряжения",
+}
+
+
+def word_stem(word: str) -> str:
+    return word[:5] if len(word) >= 4 else word
+
+
+def product_type_from_name(name: str, allowed: tuple[str, ...]) -> str:
+    """The allowed product type whose every word stands in the name before the series ("Промежуточное реле NJDC-17")."""
+    found = WORD_RE.findall(canonical(name))
+    head: list[str] = []
+    for word in found:
+        if any(ch.isdigit() for ch in word) or re.fullmatch(r"[a-z]+", word):
+            break
+        head.extend(PRODUCT_ABBREVIATIONS.get(word, word).split())
+    head_stems = {word_stem(word) for word in head}
+    best = ""
+    for value in allowed:
+        value_stems = {word_stem(word) for word in WORD_RE.findall(canonical(value))}
+        if value_stems and value_stems <= head_stems and len(value_stems) > len(WORD_RE.findall(canonical(best))):
+            best = value
+    return best

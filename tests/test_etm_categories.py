@@ -1,0 +1,169 @@
+import csv
+import datetime as dt
+import sqlite3
+import tempfile
+import unittest
+from contextlib import closing
+from pathlib import Path
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
+
+from chint_etm_mdm.etm_categories import (
+    category_library,
+    fill_new_products,
+    new_articles_since,
+    read_category_template,
+)
+from chint_etm_mdm.value_matching import canonical
+from test_import_data_integrity import make_database
+
+YELLOW = PatternFill(fill_type="solid", fgColor="FFFFFF00")
+BASE = [
+    "Режим:ОписаниеТоваров", "Код производителя", "Расширенный артикул", "Артикул", "81 класс", "Название",
+    "Полное название", "Страна", "Код ТН ВЭД", "Код ОКПД2", "Название упаковки", "Вес, кг",
+    "Длина, м", "Ширина, м", "Высота, м",
+]
+CONFIG = [
+    "Конфиг:Тип изделия", "Конфиг:Количество силовых полюсов", "Конфиг:Номинальный ток (А)",
+    "Конфиг:Дифференциальный ток (мА)", "Конфиг:Тип срабатывания по диф.току",
+]
+
+
+def make_category_template(path: Path, class_code: int = 500820) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Шаблон"
+    for col, header in enumerate(BASE + CONFIG, start=1):
+        cell = sheet.cell(1, col, header)
+        if header != "Режим:ОписаниеТоваров":
+            cell.fill = YELLOW
+    for row in range(2, 7):
+        sheet.cell(row, 5, class_code)
+    lists = workbook.create_sheet("Списки")
+    columns = {
+        "A": ["Выключатель автоматический дифференциального тока", "Выключатель дифференциального тока"],
+        "B": [1, 2, "1P+N", "2P", "4P"],
+        "C": [10, 30, 100],
+        "D": ["A", "AC", "B"],
+    }
+    for letter, values in columns.items():
+        for row, value in enumerate(values, start=1):
+            lists[f"{letter}{row}"] = value
+    for target, (letter, values) in zip(("P", "Q", "S", "T"), columns.items()):
+        validation = DataValidation(type="list", formula1=f"'Списки'!${letter}$1:${letter}${len(values)}")
+        validation.add(f"{target}2:{target}500")
+        sheet.add_data_validation(validation)
+    workbook.save(path)
+
+
+class CategoryTemplateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.templates = self.root / "шаблоны"
+        self.templates.mkdir()
+        make_category_template(self.templates / "upload_goods_category_template_500820.xlsx")
+        self.db = self.root / "mdm.sqlite"
+        make_database(self.db)
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.executemany(
+                "INSERT INTO products(article, name, series_name, equipment_group) VALUES (?, ?, ?, ?)",
+                [
+                    ("100", "АВДТ NB1L 1P+N C16 30мА тип A", "NB1L", "АВДТ"),
+                    ("586772", "АВДТ NB1L-20 1P+N B6 30мА тип AC 6кА (R)", "NB1L-20", "АВДТ"),
+                    ("625288", "Промежуточное реле NJDC-17/3ZS 10А 24В AC (R)", "NJDC-17", "Реле"),
+                    ("777", "Изделие без серии", "", ""),
+                ],
+            )
+            conn.execute("INSERT INTO ipro_goods(article, name, full_name, class81_code) VALUES ('100', 'x', 'x', '500820')")
+            conn.execute("INSERT INTO ipro_goods(article, name, full_name, class81_code) VALUES ('900', 'y', 'y', '50341020')")
+            conn.execute("INSERT INTO products(article, name, series_name) VALUES ('900', 'Реле NJDC-17/2Z', 'NJDC-17')")
+            conn.executemany(
+                "INSERT INTO new_products(article, name, introduced_at) VALUES (?, ?, ?)",
+                [("586772", "", "29.09.2026"), ("625288", "", "04.09.2026"), ("777", "", "10.10.2026")],
+            )
+            conn.execute(
+                "INSERT INTO product_dimensions_resolved(article, length_mm, width_mm, height_mm, weight_kg) VALUES ('586772', 77, 18, 92.5, 0.158)"
+            )
+            conn.executemany(
+                "INSERT INTO product_attribute_values(article, attribute_name, value_raw, confidence) VALUES (?, ?, ?, 1)",
+                [
+                    ("586772", "Количество полюсов", "1P+N"),
+                    ("586772", "Номинальный ток, А", "6"),
+                    ("586772", "Номинальный ток утечки, А", "0.03"),
+                    ("586772", "Тип по току утечки", "AC"),
+                ],
+            )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_template_reads_class_and_dropdowns(self) -> None:
+        category = read_category_template(self.templates / "upload_goods_category_template_500820.xlsx")
+        self.assertEqual("500820", category.class_code)
+        self.assertEqual(("10", "30", "100"), category.dropdowns[canonical("Дифференциальный ток (мА)")])
+        self.assertEqual({"500820"}, set(category_library(self.templates)))
+
+    def test_split_series_prefers_a_class_with_template(self) -> None:
+        from chint_etm_mdm.db import fetch_products
+        from chint_etm_mdm.etm_categories import suggest_classes
+
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            for idx, code in enumerate(["503599", "503599", "503599", "50350599", "50350599"]):
+                conn.execute("INSERT INTO products(article, name, series_name) VALUES (?, 'Плата', 'NVF Аксессуары')", (f"a{idx}",))
+                conn.execute("INSERT INTO ipro_goods(article, name, full_name, class81_code) VALUES (?, 'x', 'x', ?)", (f"a{idx}", code))
+            conn.execute("INSERT INTO products(article, name, series_name) VALUES ('634412', 'Адаптер Modbus TCP', 'NVF Аксессуары')")
+        products = fetch_products(self.db, ["634412"])
+        self.assertEqual("503599", suggest_classes(self.db, products)["634412"].code)
+        choice = suggest_classes(self.db, products, frozenset({"50350599"}))["634412"]
+        self.assertEqual(("50350599", False), (choice.code, choice.sure))
+
+    def test_new_articles_are_after_the_date(self) -> None:
+        self.assertEqual(["586772", "777"], new_articles_since(self.db, dt.date(2026, 9, 4)))
+
+    def test_cards_are_filled_per_class(self) -> None:
+        codes = self.root / "chz.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Price-list"
+        sheet.append(["PM", None, None])
+        sheet.append(["Part number", "ОКПД 2 \n(9 зн.)", "Tariff code"])
+        sheet.append([586772, "27.12.22.000", 8536201007])
+        workbook.save(codes)
+
+        run = fill_new_products(
+            self.db, ["586772", "625288", "777", "404"], self.templates, self.root / "out", codes_path=codes
+        )
+        self.assertEqual("500820", run.classes["586772"].code)
+        self.assertEqual("50341020", run.classes["625288"].code)
+        self.assertEqual({"50341020": ["625288"]}, run.missing_templates)
+        self.assertEqual(["777"], run.unclassified)
+        self.assertEqual(["404"], run.not_found)
+
+        result, csv_path = run.results["500820"]
+        with csv_path.open(encoding="cp1251", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter=";"))
+        self.assertEqual(1, len(rows))
+        row = rows[0]
+        self.assertEqual("АВДТ NB1L-20 1P+N B6 30мА тип AC 6кА", row["Полное название"])
+        self.assertEqual("8536201007", row["Код ТН ВЭД"])
+        self.assertEqual("27.12.22.000", row["Код ОКПД2"])
+        self.assertEqual("0.158", row["Вес, кг"])
+        self.assertEqual("0.0925", row["Высота, м"])
+        self.assertEqual("Выключатель автоматический дифференциального тока", row["Конфиг:Тип изделия"])
+        self.assertEqual("1P+N", row["Конфиг:Количество силовых полюсов"])
+        self.assertEqual("6", row["Конфиг:Номинальный ток (А)"])
+        self.assertEqual("30", row["Конфиг:Дифференциальный ток (мА)"])
+        self.assertEqual("AC", row["Конфиг:Тип срабатывания по диф.току"])
+        self.assertEqual("500820", row["81 класс"])
+
+        filled = load_workbook(result.output_path)["Шаблон"]
+        self.assertEqual(0.158, filled["L2"].value)
+        summary = load_workbook(run.summary_path).active
+        self.assertEqual(5, summary.max_row)
+
+
+if __name__ == "__main__":
+    unittest.main()
