@@ -3,7 +3,10 @@
 ETM generates this CSV (Win-1251, ";") with one row per product and missing
 characteristic; the value goes into the last column and the same file is sent
 back. The program fills that column from the product's characteristics, matched
-to ETM's allowed values, and keeps every other byte of the file as it was.
+to ETM's allowed values, and keeps every other byte of the rows it writes. Rows
+are split in two files: values safe to upload right away, and values to check
+first (a close match, a range, a contradiction with the product name). Rows the
+program could not fill go to neither file, only to the report.
 """
 from __future__ import annotations
 
@@ -15,8 +18,8 @@ from pathlib import Path
 from .db import fetch_products
 from .export_templates import PartnerTemplate, load_partner_template
 from .value_matching import canonical, name_candidates
-from .filler import FillReportRow, FillResult, normalize_article, write_report
-from .upload_names import report_path_for, series_names, upload_csv_path
+from .filler import FillReportRow, FillResult, check_note, normalize_article, write_report
+from .upload_names import check_path_for, report_path_for, series_names, upload_csv_path
 
 REPORT_TITLE = "ТОВАРЫ НЕДОСТАЮЩИЕ ХАРАКТЕРИСТИКИ"
 ENCODING = "cp1251"
@@ -116,6 +119,8 @@ def fill_characteristics_report(
     details: list[FillReportRow] = []
     without_value: dict[str, list[dict[str, str]]] = {}
     filled = suggested = missing = 0
+    safe_lines: list[int] = []
+    check_lines: list[int] = []
     for line_idx, cells in rows:
         row_number = line_idx + 1
         article = clean_code(cells[cols[ARTICLE_COLUMN]])
@@ -125,6 +130,7 @@ def fill_characteristics_report(
             details.append(
                 FillReportRow(row_number, article, header, "existing_value_preserved", cells[cols[VALUE_COLUMN]].strip(), "template_existing")
             )
+            safe_lines.append(line_idx)
             continue
         product = products.get(article)
         if product is None:
@@ -148,11 +154,19 @@ def fill_characteristics_report(
         if status == "filled" and value:
             cells[cols[VALUE_COLUMN]] = value
             filled += 1
-            details.append(FillReportRow(row_number, article, header, "filled", value, source))
+            note = check_note(template, product, header, value)
+            if note:
+                suggested += 1
+                check_lines.append(line_idx)
+                details.append(FillReportRow(row_number, article, header, "filled_check", value, source, note))
+            else:
+                safe_lines.append(line_idx)
+                details.append(FillReportRow(row_number, article, header, "filled", value, source))
         elif status == "suggested" and value:
             cells[cols[VALUE_COLUMN]] = value
             filled += 1
             suggested += 1
+            check_lines.append(line_idx)
             details.append(
                 FillReportRow(
                     row_number,
@@ -189,7 +203,12 @@ def fill_characteristics_report(
     series = series_names(db_path, articles)
     output_path = upload_csv_path(output_dir, "char", (series.get(article, "") for article in articles))
     details_path = report_path_for(output_path)
-    output_path.write_bytes(report.newline.join(report.lines).encode(ENCODING))
+    head = report.lines[: report.header_index + 1]
+    output_path.write_bytes(report.newline.join(head + [report.lines[idx] for idx in safe_lines]).encode(ENCODING))
+    check_path = None
+    if check_lines:
+        check_path = check_path_for(output_path)
+        check_path.write_bytes(report.newline.join(head + [report.lines[idx] for idx in check_lines]).encode(ENCODING))
     write_report(details_path, details, names_to_review(without_value, template.name_rejects))
     unique = {article for article in articles if article}
     found = len(unique.intersection(products))
@@ -202,6 +221,9 @@ def fill_characteristics_report(
         suggested_cells=suggested,
         missing_cells=missing,
         missing_articles=len(unique) - found,
+        check_path=check_path,
+        check_rows=len(check_lines),
+        safe_rows=len(safe_lines),
     )
 
 

@@ -14,6 +14,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
 from openpyxl.styles import Font, PatternFill
 
+from .data_checks import review_note
 from .db import ProductRecord, fetch_products
 from .export_templates import (
     DEFAULT_PARTNER,
@@ -74,6 +75,12 @@ class FillResult:
     suggested_cells: int
     missing_cells: int
     missing_articles: int
+    # Rows held back for review, in a separate file next to the upload ("..._check.csv").
+    check_path: Path | None = None
+    check_rows: int = 0
+    safe_rows: int = 0
+    # Products with a value to check (close match, range, contradiction with the name).
+    check_articles: frozenset[str] = frozenset()
 
 
 def normalize_header(value: object) -> str:
@@ -124,6 +131,7 @@ def report_status_label(status: str) -> str:
     labels = {
         "filled": "Заполнено",
         "filled_suggested": "Заполнено, нужно проверить",
+        "filled_check": "Заполнено, на проверку",
         "existing_value_preserved": "Существующее значение сохранено",
         "missing_value": "Не заполнено",
         "value_not_allowed": "Значения нет в списке партнёра",
@@ -177,6 +185,14 @@ def source_label(source: str) -> str:
     if "shipment" in source or "gtin" in source or "transport" in source:
         return "Данные упаковки из базы"
     return "База"
+
+
+def check_note(template: PartnerTemplate, product: ProductRecord, header: str, value: str) -> str:
+    """Why a filled characteristic goes to the "to check" part; empty when it is safe."""
+    spec = template.attribute_columns_for(header)
+    if spec is None:
+        return ""
+    return review_note(template.checks, header.removeprefix(spec.prefix), value, product.full_name or product.name)
 
 
 def mark_missing_cell(cell: Cell) -> None:
@@ -392,7 +408,7 @@ def write_report(
         )
         if item.status == "filled":
             bucket["filled"] = int(bucket["filled"]) + 1
-        elif item.status == "filled_suggested":
+        elif item.status in {"filled_suggested", "filled_check"}:
             bucket["suggested"] = int(bucket["suggested"]) + 1
             bucket["status"] = "needs_review"
         elif item.status in {"missing_value", "value_not_allowed"}:
@@ -567,7 +583,11 @@ def fill_csv_template(
             if status == "filled" and value:
                 row[col_idx] = value
                 filled_cells += 1
-                report.append(FillReportRow(row_number, article, header, status, value, source))
+                note = check_note(template, product, header, value)
+                if note:
+                    suggested_cells += 1
+                    status = "filled_check"
+                report.append(FillReportRow(row_number, article, header, status, value, source, note))
             elif status == "suggested" and value:
                 row[col_idx] = value
                 filled_cells += 1
@@ -725,7 +745,11 @@ def fill_xlsx_template(
             if status == "filled" and value:
                 row[col_idx].value = template.spreadsheet_value(header, value)
                 filled_cells += 1
-                report.append(FillReportRow(row_number, article, header, status, value, source))
+                note = check_note(template, product, header, value)
+                if note:
+                    suggested_cells += 1
+                    status = "filled_check"
+                report.append(FillReportRow(row_number, article, header, status, value, source, note))
             elif status == "suggested" and value:
                 row[col_idx].value = template.spreadsheet_value(header, value)
                 filled_cells += 1
@@ -791,4 +815,5 @@ def fill_xlsx_template(
         suggested_cells=suggested_cells,
         missing_cells=missing_cells,
         missing_articles=len(unique_articles) - found,
+        check_articles=frozenset(item.article for item in report if item.status in {"filled_suggested", "filled_check"}),
     )

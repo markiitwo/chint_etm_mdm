@@ -211,6 +211,8 @@ class PartnerTemplate:
     name_rejects: dict[str, frozenset[str]] | None = None
     # Drop-down lists of an ETM category template, by canonical characteristic name.
     dropdowns: dict[str, tuple[str, ...]] | None = None
+    # Checks that hold a filled value back for review (see data_checks).
+    checks: frozenset[str] = frozenset()
 
     def spreadsheet_value(self, header: str, value: str) -> str | int | float:
         """Weights, sizes and counts go into xlsx as real numbers, so no decimal separator can be misread."""
@@ -462,6 +464,7 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
             canonical(item["characteristic"]): frozenset(_as_tuple(item.get("attributes")))
             for item in data.get("name_rejects", [])
         },
+        checks=frozenset(name for name, enabled in (data.get("checks") or {}).items() if enabled),
     )
     validate_partner_template(template)
     return template

@@ -3,7 +3,8 @@
 ETM shows uploaded files by name only, so the name has to say what is inside:
 upload_<kind>_<series>_<YYYY-MM-DD>[_vN].csv, where kind is "new" (new cards),
 "char" (characteristics of existing products) or "fix" (a correction). Series
-come from the products in the file. Latin letters only: ETM's portal is safest
+come from the products in the file. What needs a look before upload goes to
+<name>_check.csv next to it. Latin letters only: ETM's portal is safest
 with them. The working copy and the report sit next to the CSV under the same
 name.
 """
@@ -77,3 +78,8 @@ def upload_csv_path(
 
 def report_path_for(csv_path: Path) -> Path:
     return csv_path.with_name(f"{csv_path.stem}_report.xlsx")
+
+
+def check_path_for(csv_path: Path) -> Path:
+    """Rows or cards held back for review: upload them only after a look."""
+    return csv_path.with_name(f"{csv_path.stem}_check{csv_path.suffix}")

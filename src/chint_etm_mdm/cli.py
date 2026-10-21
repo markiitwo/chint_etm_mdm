@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .analyzer import analyze_template_mapping
 from .db import get_stats
-from .etm_categories import fill_new_products, new_articles_since
+from .etm_categories import fill_new_products, latest_codes_file, new_articles_since
 from .etim_importer import (
     apply_etim_conflict_decisions,
     decision_result_lines,
@@ -65,7 +65,7 @@ def main() -> None:
     )
     parser.add_argument("--articles", help="Comma-separated articles for new ETM cards instead of --new-since")
     parser.add_argument("--category-templates", help="Folder with ETM category templates (upload_goods_category_template_<class>.xlsx)")
-    parser.add_argument("--codes-file", help="Честный знак product list XLSX with ТН ВЭД and ОКПД2 by article")
+    parser.add_argument("--codes-file", help="Честный знак product list XLSX with ТН ВЭД and ОКПД2; a newer one in Downloads wins")
     args = parser.parse_args()
 
     db_path = Path(args.db)
@@ -151,12 +151,18 @@ def main() -> None:
             output_dir,
             rules_path,
             manual_values_file,
-            Path(args.codes_file) if args.codes_file else None,
+            latest_codes_file(
+                [Path.home() / "Downloads", Path.home() / "Загрузки"], Path(args.codes_file) if args.codes_file else None
+            ),
         )
         print(f"articles={len(articles)}")
         print(f"summary={run.summary_path}")
+        print(f"codes_file={run.codes_file or ''}")
         for code, (result, csv_path) in sorted(run.results.items()):
-            print(f"class={code} rows={result.found_articles} filled={result.filled_cells} suggested={result.suggested_cells} missing={result.missing_cells} csv={csv_path}")
+            print(
+                f"class={code} rows={result.found_articles} safe={result.safe_rows} check={result.check_rows} "
+                f"missing={result.missing_cells} csv={csv_path} check_csv={result.check_path or ''}"
+            )
         for code, members in sorted(run.missing_templates.items()):
             print(f"missing_template={code} articles={len(members)}")
         print(f"unclassified={len(run.unclassified)}")

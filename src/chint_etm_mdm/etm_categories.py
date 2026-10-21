@@ -5,8 +5,9 @@ the usual card columns plus the class's required characteristics ("Конфиг:
 most of them with a drop-down list on the "Списки" sheet. The user keeps the
 downloaded templates in one folder. For new products the program picks each
 product's class, fills a copy of that class's template and writes the CSV that
-ETM takes. Classes without a template are listed so the user knows what to
-download.
+ETM takes: cards safe to upload in one file, cards with a value to check in a
+"_check" file next to it. Classes without a template are listed so the user
+knows what to download.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ from openpyxl import Workbook, load_workbook
 from .db import ProductRecord, connect, fetch_products
 from .export_templates import PartnerTemplate, clean_product_name, load_partner_template, partner_template_text
 from .filler import FillResult, fill_xlsx_template, normalize_article, normalize_header
-from .upload_names import report_path_for, series_names, upload_csv_path
+from .upload_names import check_path_for, report_path_for, series_names, upload_csv_path
 from .value_matching import canonical
 
 TEMPLATE_SHEET = "Шаблон"
@@ -61,6 +62,7 @@ class CategoryRun:
     missing_templates: dict[str, list[str]] = field(default_factory=dict)
     unclassified: list[str] = field(default_factory=list)
     not_found: list[str] = field(default_factory=list)
+    codes_file: Path | None = None
 
 
 def cell_text(value: object) -> str:
@@ -198,9 +200,43 @@ def suggest_classes(
     return choices
 
 
+CODES_FILE_RE = re.compile(r"чз|честн", re.IGNORECASE)
+NAME_DATE_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
+
+
+def codes_file_date(path: Path) -> tuple[dt.date, float]:
+    """The date in the name ("..._19.10.2026.xlsx"), else the file's own date; newer sorts higher."""
+    found = NAME_DATE_RE.search(path.stem)
+    mtime = path.stat().st_mtime
+    if found:
+        try:
+            return dt.date(int(found.group(3)), int(found.group(2)), int(found.group(1))), mtime
+        except ValueError:
+            pass
+    return dt.date.fromtimestamp(mtime), mtime
+
+
+def latest_codes_file(folders: list[Path], chosen: Path | None = None) -> Path | None:
+    """The newest "Честный знак" product list among the chosen file and the files in `folders`.
+
+    The product manager sends a new version now and then; the user only saves it
+    to Downloads and the program takes the newest one on the next run.
+    """
+    found = [chosen] if chosen and chosen.is_file() else []
+    for folder in folders:
+        if folder.is_dir():
+            found += [
+                path
+                for path in folder.glob("*.xlsx")
+                if CODES_FILE_RE.search(path.stem) and not path.name.startswith("~$")
+            ]
+    return max(found, key=codes_file_date, default=None)
+
+
 def load_codes_file(path: Path) -> dict[tuple[str, str], str]:
     """ТН ВЭД and ОКПД2 by article from the "Честный знак" product list (sheet "Price-list")."""
-    workbook = load_workbook(path, read_only=True, data_only=True)
+    # keep_links=False: the company file links to another workbook (150 MB), reading it takes a minute.
+    workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
     try:
         sheet = workbook["Price-list"] if "Price-list" in workbook.sheetnames else workbook.worksheets[0]
         rows = sheet.iter_rows(values_only=True)
@@ -319,8 +355,11 @@ def csv_text(value: object) -> str:
     return str(value)
 
 
-def export_upload_csv(xlsx_path: Path, csv_path: Path) -> int:
-    """The "Шаблон" sheet as ETM takes it: Win-1251, ";", a dot in numbers; only rows with an article."""
+def export_upload_csv(xlsx_path: Path, csv_path: Path, articles: frozenset[str] | None = None) -> int:
+    """The "Шаблон" sheet as ETM takes it: Win-1251, ";", a dot in numbers; only rows with an article.
+
+    With `articles`, only those products' rows are written.
+    """
     workbook = load_workbook(xlsx_path, data_only=True)
     sheet = workbook[TEMPLATE_SHEET]
     rows = list(sheet.iter_rows(values_only=True))
@@ -332,10 +371,20 @@ def export_upload_csv(xlsx_path: Path, csv_path: Path) -> int:
         writer = csv.writer(handle, delimiter=";", lineterminator="\r\n")
         writer.writerow(headers[:width])
         for row in rows[1:]:
-            if normalize_article(row[article_idx]):
+            article = normalize_article(row[article_idx])
+            if article and (articles is None or article in articles):
                 writer.writerow([csv_text(value) for value in row[:width]])
                 written += 1
     return written
+
+
+def upload_file_name(made: tuple[FillResult, Path] | None, article: str) -> str:
+    if not made:
+        return ""
+    result, csv_path = made
+    if result.check_path and article in result.check_articles:
+        return result.check_path.name
+    return csv_path.name
 
 
 def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library: dict[str, Path]) -> None:
@@ -356,7 +405,7 @@ def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library:
                 choice.basis if choice else "класс не найден, укажите вручную",
                 "" if choice and choice.sure else "да",
                 library[code].name if code in library else ("нет, скачайте из личного кабинета ЭТМ" if code else ""),
-                made[1].name if made else "",
+                upload_file_name(made, article),
             ]
         )
     for article in run.not_found:
@@ -387,6 +436,7 @@ def fill_new_products(
     run.classes = suggest_classes(db_path, products, frozenset(library))
     run.unclassified = sorted(article for article in products if article not in run.classes)
     codes = load_codes_file(codes_path) if codes_path else {}
+    run.codes_file = codes_path
     defaults = load_series_defaults(template.code)
     series = series_names(db_path, sorted(products))
 
@@ -415,7 +465,13 @@ def fill_new_products(
         xlsx_path = result.output_path.rename(csv_path.with_suffix(result.output_path.suffix))
         report_path = result.report_path.rename(report_path_for(csv_path))
         result = replace(result, output_path=xlsx_path, report_path=report_path)
-        export_upload_csv(result.output_path, csv_path)
+        held = result.check_articles | {article for article in members if not run.classes[article].sure}
+        safe_rows = export_upload_csv(result.output_path, csv_path, frozenset(members) - held)
+        check_path = None
+        if held:
+            check_path = check_path_for(csv_path)
+            export_upload_csv(result.output_path, check_path, held)
+        result = replace(result, check_path=check_path, check_rows=len(held), safe_rows=safe_rows, check_articles=frozenset(held))
         input_path.unlink()
         run.results[code] = (result, csv_path)
     write_summary(run, products, library)
@@ -426,11 +482,11 @@ def run_lines(run: CategoryRun) -> list[str]:
     """What the user needs to know after a run, in plain words."""
     lines = []
     for code, (result, csv_path) in sorted(run.results.items()):
-        line = f"Класс {code}: {result.found_articles} товаров, файл для ЭТМ {csv_path.name}"
+        line = f"Класс {code}: {result.found_articles} товаров, можно грузить сразу {result.safe_rows} — файл {csv_path.name}"
+        if result.check_path:
+            line += f"; на проверку {result.check_rows} — файл {result.check_path.name}"
         if result.missing_cells:
             line += f"; не заполнено полей: {result.missing_cells}"
-        if result.suggested_cells:
-            line += f"; проверить: {result.suggested_cells}"
         lines.append(line)
     for code, members in sorted(run.missing_templates.items()):
         lines.append(
@@ -441,5 +497,9 @@ def run_lines(run: CategoryRun) -> list[str]:
         lines.append(f"Не удалось подобрать класс: {len(run.unclassified)} товаров, список в сводке.")
     if run.not_found:
         lines.append(f"Нет в базе: {len(run.not_found)} артикулов.")
+    if run.codes_file:
+        lines.append(f"Коды ТН ВЭД и ОКПД2 взяты из файла {run.codes_file.name}.")
+    else:
+        lines.append("Файла ЧЗ с кодами не нашлось: сохраните его в «Загрузки», и программа возьмёт самый свежий.")
     lines.append(f"Сводка: {run.summary_path.name}")
     return lines
