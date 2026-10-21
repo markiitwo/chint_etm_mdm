@@ -13,6 +13,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 
 from .db_utils import connect_database, restore_sqlite_backup
+from .number_parsing import parse_number
 from .price_importer import backup_database
 
 
@@ -71,6 +72,8 @@ class EtimDecisionApplyResult:
     backup_path: Path
     accepted_rows: int
     skipped_rows: int
+    already_applied_rows: int = 0
+    rejected: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,81 +97,143 @@ def normalize_text(value: object) -> str:
     return " ".join(text.split())
 
 
-def extract_first_number(value: object) -> float | None:
-    text = normalize_text(value)
-    if not text:
-        return None
-    match = re.search(r"-?\d+(?:[.,]\d+)?", text)
-    if not match:
-        return None
-    try:
-        return float(match.group(0).replace(",", "."))
-    except ValueError:
-        return None
+UNIT_FACTORS_MM = {"мм": 1.0, "mm": 1.0, "см": 10.0, "cm": 10.0, "м": 1000.0, "m": 1000.0}
+UNIT_RE = re.compile(r"(?<![^\W\d_])(мм|mm|см|cm|м|m)(?![^\W\d_])", re.IGNORECASE)
+CHAIN_SEPARATOR = r"\s*[xXхХ×*]\s*"
+ORDER_LETTERS = {
+    "Д": "length_mm", "Г": "length_mm", "L": "length_mm", "D": "length_mm",
+    "Ш": "width_mm", "W": "width_mm",
+    "В": "height_mm", "H": "height_mm",
+}
+ORDER_WORDS = {
+    "длин": "length_mm", "глубин": "length_mm", "length": "length_mm", "depth": "length_mm",
+    "ширин": "width_mm", "width": "width_mm",
+    "высот": "height_mm", "height": "height_mm",
+}
+# Historic files without an order in the header were read as Ш×В×Д; keep that only for 3 numbers.
+LEGACY_CHAIN_ORDER = ("width_mm", "height_mm", "length_mm")
 
 
-def parse_overall_dimensions(value: object) -> dict[str, float]:
-    text = normalize_text(value)
-    if not text:
-        return {}
+def unit_factor(text: str) -> float | None:
+    units = {match.group(1).casefold() for match in UNIT_RE.finditer(text)}
+    factors = {UNIT_FACTORS_MM[unit] for unit in units}
+    if len(factors) != 1:
+        return None
+    return factors.pop()
 
-    chains = re.findall(
-        r"(\d+(?:[.,]\d+)?(?:\s*[xх×*]\s*\d+(?:[.,]\d+)?){1,})",
-        text,
-        flags=re.IGNORECASE,
+
+def parse_dimension_number(value: object, header: object) -> float | None:
+    """A positive size in mm, or None when the cell is not one unambiguous number.
+
+    Units come from the value (``12 см``) or the header (``Длина, см``); with
+    neither, millimetres are assumed. Ranges, limits and words are not guessed.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number, value_unit = parse_number(value), None
+    else:
+        text = normalize_text(value)
+        match = re.fullmatch(r"(.*?)\s*(мм|mm|см|cm|м|m)\.?", text, flags=re.IGNORECASE)
+        number_text, value_unit = (match.group(1), match.group(2).casefold()) if match else (text, None)
+        number = parse_number(number_text)
+    if number is None or number <= 0:
+        return None
+    if value_unit is not None:
+        return number * UNIT_FACTORS_MM[value_unit]
+    header_factor = unit_factor(normalize_text(header))
+    if header_factor is None and UNIT_RE.search(normalize_text(header)):
+        return None
+    return number * (header_factor or 1.0)
+
+
+def chain_order_from_header(header: object) -> tuple[str, ...] | None:
+    text = normalize_text(header)
+    letters = "".join(ORDER_LETTERS)
+    match = re.search(
+        rf"(?<![^\W\d_])([{letters}](?:{CHAIN_SEPARATOR}[{letters}])+)(?![^\W\d_])", text
     )
-    if not chains:
+    if match:
+        keys = [ORDER_LETTERS[char] for char in re.findall(rf"[{letters}]", match.group(1))]
+    else:
+        words = "|".join(ORDER_WORDS)
+        match = re.search(
+            rf"((?:{words})\w*(?:{CHAIN_SEPARATOR}(?:{words})\w*)+)", text, flags=re.IGNORECASE
+        )
+        if not match:
+            return None
+        keys = [
+            next(key for word, key in ORDER_WORDS.items() if part.casefold().startswith(word))
+            for part in re.split(CHAIN_SEPARATOR, match.group(1))
+        ]
+    return tuple(keys) if len(set(keys)) == len(keys) else None
+
+
+def parse_overall_dimensions(value: object, header: object = "") -> dict[str, float]:
+    """Split a ``100x200x300`` cell using the order named in the header.
+
+    Returns {} for anything ambiguous: no recognisable chain, several chains,
+    a count that does not match the header order, non-positive numbers or
+    conflicting units.
+    """
+    text = normalize_text(value)
+    if not text:
+        return {}
+    number = r"\d+(?:[.,]\d+)?"
+    chains = re.findall(rf"{number}(?:{CHAIN_SEPARATOR}{number})+", text)
+    if len(chains) != 1:
+        return {}
+    remainder = text.replace(chains[0], " ", 1).strip(" ,.;")
+    if remainder and not UNIT_RE.fullmatch(remainder.rstrip(".")):
+        return {}
+    values = [parse_number(item) for item in re.split(CHAIN_SEPARATOR, chains[0])]
+    if any(item is None or item <= 0 for item in values):
         return {}
 
-    best_chain = max(chains, key=lambda chain: len(re.findall(r"\d+(?:[.,]\d+)?", chain)))
-    values_mm = [
-        float(value.replace(",", "."))
-        for value in re.findall(r"\d+(?:[.,]\d+)?", best_chain)
-    ]
-    if len(values_mm) >= 4:
-        values_mm = values_mm[-3:]
-    if len(values_mm) < 2:
+    order = chain_order_from_header(header)
+    if order is None and len(values) == len(LEGACY_CHAIN_ORDER):
+        order = LEGACY_CHAIN_ORDER
+    if order is None or len(order) != len(values):
         return {}
 
-    dimensions = {
-        "width_mm": values_mm[0],
-        "height_mm": values_mm[1],
-    }
-    if len(values_mm) >= 3:
-        dimensions["length_mm"] = values_mm[2]
-    return dimensions
+    header_text = normalize_text(header)
+    if remainder:
+        factor = UNIT_FACTORS_MM[remainder.rstrip(".").casefold()]
+    elif UNIT_RE.search(header_text):
+        factor = unit_factor(header_text)
+        if factor is None:
+            return {}
+    else:
+        factor = 1.0
+    return {key: float(item) * factor for key, item in zip(order, values)}
 
 
 def parse_dimension_cell(value: object, header: object, dimension_key: str) -> float | None:
-    number = extract_first_number(value)
-    if number is None:
-        return None
-
     header_text = normalize_text(header).casefold()
     if any(hint in header_text for hint in DIMENSION_EXCLUDE_HINTS.get(dimension_key, ())):
         return None
-    if "мм" in header_text or "mm" in header_text:
-        return number
-    if re.search(r"\bм\b", header_text):
-        return number * 1000.0
-    return number
+    return parse_dimension_number(value, header)
 
 
-def find_dimension_column(headers: list[object], hints: Iterable[str], exclude_hints: Iterable[str]) -> int | None:
+def find_dimension_column(
+    headers: list[object],
+    hints: Iterable[str],
+    exclude_hints: Iterable[str],
+    skip_columns: Iterable[int] = (),
+) -> int | None:
     normalized = [normalize_text(header).casefold() for header in headers]
-    for index, header in enumerate(normalized):
-        if (
-            any(hint in header for hint in hints)
-            and not any(exclude in header for exclude in exclude_hints)
-            and ("мм" in header or "mm" in header)
-        ):
+    skipped = set(skip_columns)
+    candidates = [
+        index
+        for index, header in enumerate(normalized)
+        if index not in skipped
+        and any(hint in header for hint in hints)
+        and not any(exclude in header for exclude in exclude_hints)
+        and chain_order_from_header(headers[index]) is None
+    ]
+    for index in candidates:
+        if UNIT_RE.search(normalized[index]):
             return index
-    for index, header in enumerate(normalized):
-        if (
-            any(hint in header for hint in hints)
-            and not any(exclude in header for exclude in exclude_hints)
-            and any(marker in header for marker in ("габарит", "размер", "dimension"))
-        ):
+    for index in candidates:
+        if any(marker in normalized[index] for marker in ("габарит", "размер", "dimension")):
             return index
     return None
 
@@ -176,10 +241,15 @@ def find_dimension_column(headers: list[object], hints: Iterable[str], exclude_h
 def find_overall_dimension_column(headers: list[object]) -> int | None:
     normalized = [normalize_text(header).casefold() for header in headers]
     for index, header in enumerate(normalized):
-        if OVERALL_DIMENSION_HINT in header and OVERALL_DIMENSION_SECONDARY_HINT in header:
+        if OVERALL_DIMENSION_HINT in header and chain_order_from_header(headers[index]) is not None:
             return index
     for index, header in enumerate(normalized):
-        if OVERALL_DIMENSION_HINT in header:
+        if OVERALL_DIMENSION_HINT in header and OVERALL_DIMENSION_SECONDARY_HINT in header:
+            return index
+    # "Габаритная длина" is a single dimension, not an overall chain.
+    single_hints = [hint for hints in DIMENSION_HINTS.values() for hint in hints]
+    for index, header in enumerate(normalized):
+        if OVERALL_DIMENSION_HINT in header and not any(hint in header for hint in single_hints):
             return index
     return None
 
@@ -235,22 +305,29 @@ def scan_etim_workbook(etim_path: Path, articles: Iterable[str]) -> dict[str, Et
                     dimension_sources: dict[str, str] = {}
 
                     overall_column = find_overall_dimension_column(headers)
-                    if overall_column is not None and overall_column < len(row):
-                        parsed = parse_overall_dimensions(row[overall_column])
-                        for key, value in parsed.items():
-                            dimensions[key] = value
-                            dimension_sources[key] = normalize_text(headers[overall_column])
 
+                    # Separately labelled columns are exact; the overall chain only fills gaps.
                     for key, hints in DIMENSION_HINTS.items():
-                        if key in dimensions:
-                            continue
-                        column = find_dimension_column(headers, hints, DIMENSION_EXCLUDE_HINTS.get(key, ()))
+                        column = find_dimension_column(
+                            headers,
+                            hints,
+                            DIMENSION_EXCLUDE_HINTS.get(key, ()),
+                            skip_columns=() if overall_column is None else (overall_column,),
+                        )
                         if column is None or column >= len(row):
                             continue
                         parsed_value = parse_dimension_cell(row[column], headers[column], key)
                         if parsed_value is not None:
                             dimensions[key] = parsed_value
                             dimension_sources[key] = normalize_text(headers[column])
+
+                    if overall_column is not None and overall_column < len(row):
+                        parsed = parse_overall_dimensions(row[overall_column], headers[overall_column])
+                        for key, value in parsed.items():
+                            if key in dimensions:
+                                continue
+                            dimensions[key] = value
+                            dimension_sources[key] = normalize_text(headers[overall_column])
 
                     found[article] = EtimArticleData(
                         article=article,
@@ -662,16 +739,33 @@ def import_etim_workbook(
 
 
 def parse_float(value: object) -> float | None:
-    text = normalize_text(value).replace(",", ".")
-    if not text:
+    return parse_number(normalize_text(value))
+
+
+def report_import_id(workbook) -> int | None:
+    if "Итог" not in workbook.sheetnames:
         return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    for row in workbook["Итог"].iter_rows(values_only=True):
+        if row and normalize_text(row[0]) == "Импорт id" and len(row) > 1:
+            number = parse_number(row[1])
+            return int(number) if number is not None and number.is_integer() else None
+    return None
+
+
+def same_value(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return abs(float(left) - float(right)) <= 0.001
 
 
 def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecisionApplyResult:
+    """Apply 'Принять ETIM' rows only where the database still holds the reported value.
+
+    A row is rejected (and the field left untouched) when the database changed
+    since the report, the product or the ETIM value is unknown to this
+    database/import, the value is not a positive finite number, or the same
+    field has contradicting decisions.
+    """
     if not report_path.exists():
         raise FileNotFoundError(f"Отчет ETIM не найден: {report_path}")
     if not db_path.exists():
@@ -681,6 +775,7 @@ def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecis
     try:
         if "Конфликты" not in workbook.sheetnames:
             raise ValueError("В отчете нет листа 'Конфликты'.")
+        import_id = report_import_id(workbook)
         sheet = workbook["Конфликты"]
         rows = list(sheet.iter_rows(values_only=True))
     finally:
@@ -689,51 +784,116 @@ def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecis
     if not rows:
         raise ValueError("Лист 'Конфликты' пустой.")
     headers = [normalize_text(value) for value in rows[0]]
-    required = ["Решение", "Артикул", "Поле", "Пришло из ETIM"]
+    required = ["Решение", "Артикул", "Поле", "Сейчас в базе", "Пришло из ETIM"]
     missing = [name for name in required if name not in headers]
     if missing:
-        raise ValueError(f"В листе 'Конфликты' нет колонок: {', '.join(missing)}")
+        raise ValueError(
+            f"В листе 'Конфликты' нет колонок: {', '.join(missing)}. "
+            "Без них нельзя проверить, что отчет относится к текущей базе; пересоздайте отчет импортом ETIM."
+        )
     index = {name: headers.index(name) for name in required}
 
-    accepted: list[tuple[str, str, float]] = []
+    def cell(row: tuple[object, ...], name: str) -> object:
+        return row[index[name]] if index[name] < len(row) else None
+
+    candidates: dict[tuple[str, str], list[tuple[int, float | None, float]]] = {}
+    rejected: list[str] = []
     skipped_rows = 0
-    for row in rows[1:]:
-        decision = normalize_text(row[index["Решение"]] if index["Решение"] < len(row) else "")
+    for row_number, row in enumerate(rows[1:], start=2):
+        if not any(value not in (None, "") for value in row):
+            continue
+        decision = normalize_text(cell(row, "Решение"))
         if decision != ACCEPT_ETIM_DECISION:
             skipped_rows += 1
             continue
-        article = normalize_text(row[index["Артикул"]] if index["Артикул"] < len(row) else "")
-        field = normalize_text(row[index["Поле"]] if index["Поле"] < len(row) else "")
-        value = parse_float(row[index["Пришло из ETIM"]] if index["Пришло из ETIM"] < len(row) else "")
+        article = normalize_text(cell(row, "Артикул"))
+        field = normalize_text(cell(row, "Поле"))
         column = FIELD_TO_COLUMN.get(field)
-        if not article or not column or value is None:
-            skipped_rows += 1
-            continue
-        accepted.append((article, column, value))
+        reported_current_text = normalize_text(cell(row, "Сейчас в базе"))
+        reported_current = parse_float(reported_current_text)
+        value = parse_float(cell(row, "Пришло из ETIM"))
+        if not article or not column:
+            rejected.append(f"строка {row_number}: не указан артикул или неизвестное поле '{field}'")
+        elif value is None or value <= 0:
+            rejected.append(f"строка {row_number}, {article}: значение ETIM не является положительным числом")
+        elif reported_current_text and reported_current is None:
+            rejected.append(f"строка {row_number}, {article}: не читается значение 'Сейчас в базе'")
+        else:
+            candidates.setdefault((article, column), []).append((row_number, reported_current, value))
 
+    accepted = 0
+    already_applied = 0
     backup_path = backup_database(db_path)
     with closing(connect_database(db_path)) as conn, conn:
         ensure_etim_import_tables(conn)
-        for article, column, value in accepted:
-            conn.execute(
-                f"""
-                INSERT INTO product_dimensions_resolved (article, {column}, dimensions_source, last_resolved_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(article) DO UPDATE SET
-                    {column}=excluded.{column},
-                    dimensions_source=?,
-                    last_resolved_at=CURRENT_TIMESTAMP
-                """,
-                (article, value, SOURCE_KIND, SOURCE_KIND),
+        for (article, column), decisions in candidates.items():
+            row_number = decisions[0][0]
+            label = f"строка {row_number}, {article}, {dimension_label(column)}"
+            if len({(current, round(value, 3)) for _row, current, value in decisions}) > 1:
+                rows_text = ", ".join(str(item[0]) for item in decisions)
+                rejected.append(f"строки {rows_text}, {article}: противоречивые решения по одному полю")
+                continue
+            _row, reported_current, value = decisions[0]
+            if conn.execute("SELECT 1 FROM products WHERE article = ?", (article,)).fetchone() is None:
+                rejected.append(f"{label}: товара нет в этой базе")
+                continue
+            source_query = (
+                f"SELECT 1 FROM product_dimensions_raw WHERE article = ? AND source_kind = ? "
+                f"AND dimension_kind = ? AND ABS({column} - ?) <= 0.001"
             )
+            source_params: list[object] = [article, SOURCE_KIND, column, value]
+            if import_id is not None:
+                source_query += " AND import_id = ?"
+                source_params.append(import_id)
+            if conn.execute(source_query, source_params).fetchone() is None:
+                rejected.append(f"{label}: значение {format_mm(value)} не найдено в импорте ETIM этой базы")
+                continue
+            current_row = conn.execute(
+                f"SELECT {column} FROM product_dimensions_resolved WHERE article = ?", (article,)
+            ).fetchone()
+            current = parse_number(current_row[0]) if current_row else None
+            if same_value(current, value):
+                already_applied += 1
+                continue
+            if not same_value(current, reported_current):
+                rejected.append(
+                    f"{label}: в базе уже {format_mm(current) or 'пусто'}, а в отчете "
+                    f"{format_mm(reported_current) or 'пусто'}; база изменилась после отчета"
+                )
+                continue
+            # Compare-and-swap: write only if the field still holds the reported value.
+            cursor = conn.execute(
+                f"""
+                UPDATE product_dimensions_resolved
+                SET {column} = ?, dimensions_source = ?, last_resolved_at = CURRENT_TIMESTAMP
+                WHERE article = ? AND (
+                    ({column} IS NULL AND ? IS NULL) OR ABS({column} - ?) <= 0.001
+                )
+                """,
+                (value, SOURCE_KIND, article, reported_current, reported_current),
+            )
+            if cursor.rowcount == 0 and current_row is None:
+                conn.execute(
+                    f"""
+                    INSERT INTO product_dimensions_resolved (article, {column}, dimensions_source, last_resolved_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (article, value, SOURCE_KIND),
+                )
+            elif cursor.rowcount == 0:
+                rejected.append(f"{label}: база изменилась во время применения")
+                continue
+            accepted += 1
         conn.commit()
 
     return EtimDecisionApplyResult(
         report_path=report_path,
         db_path=db_path,
         backup_path=backup_path,
-        accepted_rows=len(accepted),
+        accepted_rows=accepted,
         skipped_rows=skipped_rows,
+        already_applied_rows=already_applied,
+        rejected=tuple(rejected),
     )
 
 
@@ -765,5 +925,8 @@ def decision_result_lines(result: EtimDecisionApplyResult) -> list[str]:
         f"База: {result.db_path}",
         f"Принято ETIM-значений: {result.accepted_rows}",
         f"Оставлено без изменений: {result.skipped_rows}",
+        f"Уже было применено раньше: {result.already_applied_rows}",
+        f"Отклонено строк: {len(result.rejected)}",
+        *(f"  - {reason}" for reason in result.rejected),
         f"Бэкап базы: {result.backup_path}",
     ]
