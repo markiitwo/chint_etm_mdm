@@ -136,3 +136,41 @@ class ReferenceInFillTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NameCandidateTests(unittest.TestCase):
+    ATTRIBUTES = [
+        {
+            "Номинальное напряжение изоляции, В": "415",
+            "Напряжение питания лампы, В": "220",
+            "Вторичное напряжение 1, В": "24",
+            "Первичное напряжение 1, В": "380",
+            "Количество замыкающих контактов": "1",
+            "Количество размыкающих контактов": "0",
+            "Количество фаз": "3",
+            "Номинальное напряжение питания цепи управления Us перемен. тока АС при 50 Гц, В": "230",
+            "Номинальное напряжение питания цепи управления Us постоянного тока DC, В": "24",
+            "Паспорт устройства": "E-com/NB1L - Паспорт устройства.pdf",
+            "Номинальная реактивная мощность при 400 В, 50 Гц, кВАр": "10",
+        }
+    ]
+
+    def names(self, name: str) -> list[str]:
+        from chint_etm_mdm.value_matching import name_candidates
+
+        return [item[0] for item in name_candidates(name, self.ATTRIBUTES)]
+
+    def test_good_candidates(self) -> None:
+        self.assertEqual(["Напряжение питания лампы, В"], self.names("Напряжение подсветки, В"))
+        self.assertEqual(["Вторичное напряжение 1, В"], self.names("Номинальное напряжение основной вторичной обмотки, В"))
+        self.assertEqual(["Количество размыкающих контактов"], self.names("Количество НЗ контактов"))
+        self.assertEqual(
+            "Номинальное напряжение питания цепи управления Us постоянного тока DC, В",
+            self.names("Номинальное напряжение питания постоянного тока, В")[0],
+        )
+
+    def test_false_friends_are_filtered(self) -> None:
+        self.assertEqual([], self.names("Коммутируемое напряжение, В"))
+        self.assertEqual([], self.names("Количество аналоговых входов"))
+        self.assertEqual([], self.names("Тип устройства"))
+        self.assertEqual([], self.names("Номинальная мощность электродвигателя, кВт"))

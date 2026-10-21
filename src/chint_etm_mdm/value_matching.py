@@ -278,8 +278,22 @@ def remember_name_aliases(path: Path, aliases: list[tuple[str, str]]) -> int:
     return added
 
 
+# Word stems that appear in many characteristic names and say little on their own.
+GENERIC_STEMS = {"колич", "номин", "напря", "тока", "испол", "значе", "рабоч"}
+STEM_SYNONYMS = {"подсв": "ламп", "лампы": "ламп", "лампа": "ламп", "но": "замык", "нз": "размы"}
+# Stems that contradict each other: a name with one never means a name with the other.
+OPPOSITE_STEMS = [("перем", "посто"), ("замык", "размы"), ("перви", "втори"), ("входо", "выход"), ("входн", "выход")]
+
+
 def stems(name: str) -> set[str]:
-    return {word[:5] for word in words(UNIT_SUFFIX_RE.sub("", name)) if len(word) >= 4 and not word.isdigit()}
+    result = set()
+    for word in words(UNIT_SUFFIX_RE.sub("", name)):
+        if word in STEM_SYNONYMS:
+            result.add(STEM_SYNONYMS[word])
+        elif len(word) >= 4 and not word.isdigit():
+            stem = word[:5]
+            result.add(STEM_SYNONYMS.get(stem, stem))
+    return result
 
 
 def name_unit(name: str) -> str:
@@ -287,21 +301,51 @@ def name_unit(name: str) -> str:
     return canonical(suffix.group(0)).strip(" ,()") if suffix else ""
 
 
+def looks_like_file(value: str) -> bool:
+    text = value.casefold()
+    return text.endswith((".pdf", ".zip", ".step", ".stp", ".dwg", ".jpg", ".png")) or "http" in text or "e-com/" in text
+
+
+def same_name_attributes(name: str, attributes: dict[str, str]) -> list[str]:
+    """Our attributes named like `name` up to the unit notation ("Ток (А)" / "Ток, А")."""
+    base = canonical(UNIT_SUFFIX_RE.sub("", name))
+    unit = name_unit(name)
+    result = []
+    for attribute, value in attributes.items():
+        if not value or canonical(UNIT_SUFFIX_RE.sub("", attribute)) != base:
+            continue
+        attribute_unit = name_unit(attribute)
+        if not unit or not attribute_unit or unit == attribute_unit:
+            result.append(attribute)
+    return result
+
+
+def name_score(target: set[str], candidate: set[str]) -> float:
+    for left, right in OPPOSITE_STEMS:
+        if (left in target and right in candidate) or (right in target and left in candidate):
+            return 0.0
+    return sum(0.5 if stem in GENERIC_STEMS else 1.0 for stem in target & candidate)
+
+
 def name_candidates(
     name: str, products_attributes: list[dict[str, str]], limit: int = 3
 ) -> list[tuple[str, int, tuple[str, ...]]]:
     """Our attribute names that may mean the partner's characteristic `name`.
 
-    Ranked by shared word stems, then same unit, then how many of the products have it.
+    A candidate must share at least one specific word stem (not just "номинальный", "напряжение"...),
+    must not contradict the name (AC/DC, primary/secondary, NO/NC...), must have
+    the same unit when both names carry one, and must hold values, not file links.
+    Ranked by score, then by how many of the products have it.
     Returns (attribute name, products with it, up to 3 example values).
     """
     target = stems(name)
     unit = name_unit(name)
+    base = canonical(UNIT_SUFFIX_RE.sub("", name))
     counts: dict[str, int] = {}
     examples: dict[str, list[str]] = {}
     for attributes in products_attributes:
         for attribute, value in attributes.items():
-            if not value:
+            if not value or looks_like_file(value):
                 continue
             counts[attribute] = counts.get(attribute, 0) + 1
             bucket = examples.setdefault(attribute, [])
@@ -309,11 +353,17 @@ def name_candidates(
                 bucket.append(value)
     scored = []
     for attribute, count in counts.items():
-        overlap = len(target & stems(attribute))
-        if not overlap:
+        attribute_unit = name_unit(attribute)
+        if canonical(UNIT_SUFFIX_RE.sub("", attribute)) == base and (not unit or not attribute_unit or unit == attribute_unit):
+            scored.append(((100.0, count), attribute))
             continue
-        same_unit = 1 if unit and unit == name_unit(attribute) else 0
-        scored.append(((overlap, same_unit, count), attribute))
+        candidate = stems(attribute)
+        score = name_score(target, candidate)
+        if score == 0 or not (target & candidate) - GENERIC_STEMS:
+            continue
+        if unit and attribute_unit and unit != attribute_unit:
+            continue
+        scored.append(((score, count), attribute))
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [(attribute, counts[attribute], tuple(examples[attribute])) for _, attribute in scored[:limit]]
 

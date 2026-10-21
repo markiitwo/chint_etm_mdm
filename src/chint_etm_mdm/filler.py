@@ -144,6 +144,8 @@ def source_label(source: str) -> str:
         return "Сформировано программой"
     if source.startswith("approved_class_rule:"):
         return f"Выбранный источник: {source.split(':', 1)[1]}"
+    if source.startswith("same_name:"):
+        return f"Характеристика с похожим названием: {source.split(':', 1)[1]}"
     if source.startswith("name_alias:"):
         return f"Сопоставленная характеристика: {source.split(':', 1)[1]}"
     if source == "manual_completion":

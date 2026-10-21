@@ -16,10 +16,11 @@ from typing import Any
 from . import partners
 from .db import ProductRecord
 from .mapping_rules import source_attributes_for
-from .value_matching import ValueLists
+from .value_matching import ValueLists, same_name_attributes
 
 DEFAULT_PARTNER = "etm"
 NAME_ALIAS_SOURCE_PREFIX = "name_alias:"
+SAME_NAME_SOURCE_PREFIX = "same_name:"
 
 
 def short_wms_name(value: str, limit: int = 60) -> str:
@@ -179,6 +180,9 @@ class PartnerTemplate:
             value = attrs.get(alias, "")
             if value:
                 return value, f"{NAME_ALIAS_SOURCE_PREFIX}{alias}"
+        if lists:
+            for attribute in same_name_attributes(attr_name, attrs):
+                return attrs[attribute], f"{SAME_NAME_SOURCE_PREFIX}{attribute}"
         return "", ""
 
     def attribute_value(
@@ -195,9 +199,9 @@ class PartnerTemplate:
         match = lists.match(header.removeprefix(columns.prefix).strip(), raw) if lists else None
         if match is None:
             return raw, "filled", source
-        if match.confident:
+        if match.confident and not source.startswith(SAME_NAME_SOURCE_PREFIX):
             return match.value, "filled", source
-        if match.kind == "words":
+        if match.confident or match.kind == "words":
             return match.value, "suggested", source
         return raw, "value_not_allowed", source
 
