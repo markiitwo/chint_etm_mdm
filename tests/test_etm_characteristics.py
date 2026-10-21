@@ -131,9 +131,8 @@ class CharacteristicsReportTests(unittest.TestCase):
         manual_path = self.root / "rules" / "manual_values.json"
         with patch("chint_etm_mdm.etm_characteristics.fetch_products", return_value=products):
             first = fill_template(self.root / "db.sqlite", self.report, self.root / "out", self.rules_path, manual_path)
-        # Same name up to the unit notation: filled, but flagged for a check; the shipped
-        # "первичная обмотка" pair fills directly.
-        self.assertEqual((2, 1), (first.filled_cells, first.suggested_cells))
+        # Both "Номинальный ток" and "первичная обмотка" are shipped pairs and fill directly.
+        self.assertEqual((2, 0), (first.filled_cells, first.suggested_cells))
         workbook = load_workbook(first.report_path)
         names = workbook["Названия"]
         self.assertEqual(("Номинальный первичный ток (А)", 1, "Первичный ток, А", 1, "100 А", None), tuple(cell.value for cell in names[2]))

@@ -203,3 +203,22 @@ class NumericCharacteristicTests(unittest.TestCase):
         from chint_etm_mdm.value_matching import clean_open_value
 
         self.assertEqual("380-415", clean_open_value("Номинальное напряжение питания переменного тока 50 Гц, В", "380…415"))
+
+
+class ShippedNameAliasTests(unittest.TestCase):
+    def test_only_listed_values_carry_over(self) -> None:
+        from chint_etm_mdm.export_templates import load_partner_template
+
+        template = load_partner_template("etm")
+        columns = template.attribute_columns_for("Конфиг:")
+        fixed = ProductRecord(article="1", attributes={"Тип подсветки": "LED несменный"})
+        without = ProductRecord(article="2", attributes={"Тип подсветки": "Нет (без)"})
+        self.assertEqual("Нет", template.attribute_raw(fixed, "Конфиг:Сменная лампа", columns, None)[0])
+        # "Нет (без)" means there is no light at all, not a fixed lamp.
+        self.assertEqual("", template.attribute_raw(without, "Конфиг:Сменная лампа", columns, None)[0])
+
+    def test_same_name_up_to_unit_is_found(self) -> None:
+        from chint_etm_mdm.value_matching import same_name_attributes
+
+        attrs = {"Условный тепловой ток, А": "16", "Условный тепловой ток, В": "1"}
+        self.assertEqual(["Условный тепловой ток, А"], same_name_attributes("Условный тепловой ток (А)", attrs))

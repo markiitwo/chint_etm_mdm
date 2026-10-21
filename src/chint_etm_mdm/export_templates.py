@@ -136,6 +136,8 @@ class NameAlias:
     attributes: tuple[str, ...]
     values: dict[str, str]
     check: bool = False
+    # Only values listed in `values` carry over; any other value of the attribute is skipped.
+    only_listed: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,6 +199,8 @@ class PartnerTemplate:
         if alias is not None:
             for attribute in alias.attributes:
                 value = attrs.get(attribute, "")
+                if alias.only_listed and value not in alias.values:
+                    continue
                 if value:
                     prefix = CHECK_ALIAS_SOURCE_PREFIX if alias.check else TEMPLATE_ALIAS_SOURCE_PREFIX
                     return alias.values.get(value, value), f"{prefix}{attribute}"
@@ -369,6 +373,7 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
                 attributes=_as_tuple(item.get("attributes")),
                 values=dict(item.get("values") or {}),
                 check=bool(item.get("check", False)),
+                only_listed=bool(item.get("only_listed", False)),
             )
             for item in data.get("name_aliases", [])
         },
