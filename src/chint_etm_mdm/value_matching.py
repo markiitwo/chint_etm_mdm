@@ -200,9 +200,13 @@ class ValueLists:
         self.learned_path = learned_path
         self.characteristics = load_reference(reference_path)
         self.learned = load_learned(learned_path)
+        self.name_aliases = load_name_aliases(learned_path)
 
     def characteristic(self, name: str) -> Characteristic | None:
         return self.characteristics.get(canonical(name))
+
+    def aliases_for(self, name: str) -> list[str]:
+        return self.name_aliases.get(canonical(name), [])
 
     def match(self, name: str, raw: str) -> MatchResult:
         characteristic = self.characteristic(name) or Characteristic(name=name)
@@ -238,6 +242,80 @@ def load_learned(path: Path) -> dict[str, dict[str, str]]:
         if name and raw and value:
             learned.setdefault(name, {})[raw] = value
     return learned
+
+
+def load_name_aliases(path: Path) -> dict[str, list[str]]:
+    """Partner characteristic name -> our attribute names the user confirmed for it."""
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    aliases: dict[str, list[str]] = {}
+    for item in data.get("name_aliases", []):
+        name = canonical(item.get("characteristic", ""))
+        source = str(item.get("source_attribute", "")).strip()
+        if name and source and source not in aliases.setdefault(name, []):
+            aliases[name].append(source)
+    return aliases
+
+
+def remember_name_aliases(path: Path, aliases: list[tuple[str, str]]) -> int:
+    """Save (partner characteristic, our attribute name) pairs; return how many are new."""
+    data: dict = {"version": 1, "matches": []}
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+    items = data.setdefault("name_aliases", [])
+    known = {(canonical(item.get("characteristic", "")), item.get("source_attribute", "")) for item in items}
+    added = 0
+    for characteristic, source in aliases:
+        key = (canonical(characteristic), source)
+        if not key[0] or not source or key in known:
+            continue
+        items.append({"characteristic": characteristic, "source_attribute": source})
+        known.add(key)
+        added += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, data)
+    return added
+
+
+def stems(name: str) -> set[str]:
+    return {word[:5] for word in words(UNIT_SUFFIX_RE.sub("", name)) if len(word) >= 4 and not word.isdigit()}
+
+
+def name_unit(name: str) -> str:
+    suffix = UNIT_SUFFIX_RE.search(name)
+    return canonical(suffix.group(0)).strip(" ,()") if suffix else ""
+
+
+def name_candidates(
+    name: str, products_attributes: list[dict[str, str]], limit: int = 3
+) -> list[tuple[str, int, tuple[str, ...]]]:
+    """Our attribute names that may mean the partner's characteristic `name`.
+
+    Ranked by shared word stems, then same unit, then how many of the products have it.
+    Returns (attribute name, products with it, up to 3 example values).
+    """
+    target = stems(name)
+    unit = name_unit(name)
+    counts: dict[str, int] = {}
+    examples: dict[str, list[str]] = {}
+    for attributes in products_attributes:
+        for attribute, value in attributes.items():
+            if not value:
+                continue
+            counts[attribute] = counts.get(attribute, 0) + 1
+            bucket = examples.setdefault(attribute, [])
+            if value not in bucket and len(bucket) < 3:
+                bucket.append(value)
+    scored = []
+    for attribute, count in counts.items():
+        overlap = len(target & stems(attribute))
+        if not overlap:
+            continue
+        same_unit = 1 if unit and unit == name_unit(attribute) else 0
+        scored.append(((overlap, same_unit, count), attribute))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [(attribute, counts[attribute], tuple(examples[attribute])) for _, attribute in scored[:limit]]
 
 
 def remember_matches(path: Path, matches: list[tuple[str, str, str]]) -> int:

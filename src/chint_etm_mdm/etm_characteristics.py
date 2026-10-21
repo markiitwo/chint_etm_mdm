@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .db import fetch_products
 from .export_templates import PartnerTemplate, load_partner_template
+from .value_matching import name_candidates
 from .filler import FillReportRow, FillResult, make_output_paths, normalize_article, write_report
 
 REPORT_TITLE = "ТОВАРЫ НЕДОСТАЮЩИЕ ХАРАКТЕРИСТИКИ"
@@ -112,6 +113,7 @@ def fill_characteristics_report(
     manual_values = load_manual_values(manual_values_path)
 
     details: list[FillReportRow] = []
+    without_value: dict[str, list[dict[str, str]]] = {}
     filled = suggested = missing = 0
     for line_idx, cells in rows:
         row_number = line_idx + 1
@@ -179,12 +181,13 @@ def fill_characteristics_report(
             )
         else:
             missing += 1
+            without_value.setdefault(name, []).append(product.attributes or {})
             details.append(FillReportRow(row_number, article, header, "missing_value", "", "", template.missing_note(header)))
         report.lines[line_idx] = join_row(cells)
 
     output_path, details_path = make_output_paths(report_path, output_dir)
     output_path.write_bytes(report.newline.join(report.lines).encode(ENCODING))
-    write_report(details_path, details)
+    write_report(details_path, details, names_to_review(without_value))
     unique = {article for article in articles if article}
     found = len(unique.intersection(products))
     return FillResult(
@@ -197,6 +200,18 @@ def fill_characteristics_report(
         missing_cells=missing,
         missing_articles=len(unique) - found,
     )
+
+
+def names_to_review(without_value: dict[str, list[dict[str, str]]]) -> list[list[object]]:
+    """For each characteristic the program could not fill, our attributes that may mean the same."""
+    rows: list[list[object]] = []
+    for name, attributes in sorted(without_value.items(), key=lambda item: (-len(item[1]), item[0])):
+        candidates = name_candidates(name, attributes)
+        if not candidates:
+            rows.append([name, len(attributes), "", "", "", ""])
+        for attribute, count, examples in candidates:
+            rows.append([name, len(attributes), attribute, count, "; ".join(examples), ""])
+    return rows
 
 
 def read_report_values(path: Path) -> list[tuple[str, str, str, str]]:

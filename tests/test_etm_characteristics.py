@@ -113,5 +113,31 @@ class CharacteristicsReportTests(unittest.TestCase):
         self.assertIn(";Напряжение, В;220", third.output_path.read_bytes().decode("cp1251"))
 
 
+    def test_characteristic_name_mapping_is_learned(self) -> None:
+        products = dict(PRODUCTS)
+        products["A-3"] = ProductRecord(
+            article="A-3", attributes={"Номинальный ток, А": "16 А", "Номинальное напряжение изоляции, В": "690"}
+        )
+        self.report.write_bytes(
+            "\n".join(HEAD + ["'50329025;Катушки;Реле;3;'A-3;'A-3;2019;CHINT;Номинальный ток (А); "]).encode("cp1251")
+        )
+        manual_path = self.root / "rules" / "manual_values.json"
+        with patch("chint_etm_mdm.etm_characteristics.fetch_products", return_value=products):
+            first = fill_template(self.root / "db.sqlite", self.report, self.root / "out", self.rules_path, manual_path)
+        self.assertEqual(0, first.filled_cells)
+        workbook = load_workbook(first.report_path)
+        names = workbook["Названия"]
+        self.assertEqual(("Номинальный ток (А)", 1, "Номинальный ток, А", 1, "16 А", None), tuple(cell.value for cell in names[2]))
+        names["F2"] = "да"
+        workbook.save(first.report_path)
+        workbook.close()
+        imported = import_manual_completions(self.root / "db.sqlite", first.report_path, manual_path, self.root / "out", self.rules_path)
+        self.assertEqual(1, imported.learned_names)
+        with patch("chint_etm_mdm.etm_characteristics.fetch_products", return_value=products):
+            second = fill_template(self.root / "db.sqlite", self.report, self.root / "out", self.rules_path, manual_path)
+        self.assertEqual(1, second.filled_cells)
+        self.assertTrue(second.output_path.read_bytes().decode("cp1251").endswith(";Номинальный ток (А);16"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ from .mapping_rules import source_attributes_for
 from .value_matching import ValueLists
 
 DEFAULT_PARTNER = "etm"
+NAME_ALIAS_SOURCE_PREFIX = "name_alias:"
 
 
 def short_wms_name(value: str, limit: int = 60) -> str:
@@ -173,6 +174,11 @@ class PartnerTemplate:
             value = attrs.get(alias, "")
             if value:
                 return value, f"{columns.rule_source_prefix}{alias}"
+        lists = self.value_lists(rules_path)
+        for alias in lists.aliases_for(attr_name) if lists else []:
+            value = attrs.get(alias, "")
+            if value:
+                return value, f"{NAME_ALIAS_SOURCE_PREFIX}{alias}"
         return "", ""
 
     def attribute_value(

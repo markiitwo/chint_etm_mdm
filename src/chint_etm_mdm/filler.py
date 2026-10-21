@@ -44,6 +44,15 @@ class FillReportRow:
     candidates: tuple[str, ...] = ()
 
 
+NAMES_SHEET = "Названия"
+NAMES_HEADERS = [
+    "Характеристика партнёра",
+    "Товаров без значения",
+    "Характеристика в базе",
+    "Есть у товаров",
+    "Примеры значений",
+    "Принять (да)",
+]
 MATCHES_SHEET = "Сопоставления"
 MATCHES_HEADERS = [
     "Поле",
@@ -135,6 +144,8 @@ def source_label(source: str) -> str:
         return "Сформировано программой"
     if source.startswith("approved_class_rule:"):
         return f"Выбранный источник: {source.split(':', 1)[1]}"
+    if source.startswith("name_alias:"):
+        return f"Сопоставленная характеристика: {source.split(':', 1)[1]}"
     if source == "manual_completion":
         return "Ручное дозаполнение"
     if source == "template_existing":
@@ -332,7 +343,9 @@ def value_matches_to_review(rows: list[FillReportRow]) -> list[list[object]]:
     ]
 
 
-def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
+def write_report(
+    path: Path, rows: Iterable[FillReportRow], name_rows: list[list[object]] | None = None
+) -> None:
     rows = list(rows)
     workbook = Workbook()
     summary = workbook.active
@@ -416,6 +429,12 @@ def write_report(path: Path, rows: Iterable[FillReportRow]) -> None:
         for item in matches:
             review.append(item)
         sheets.append(review)
+    if name_rows:
+        names = workbook.create_sheet(NAMES_SHEET)
+        names.append(NAMES_HEADERS)
+        for item in name_rows:
+            names.append(item)
+        sheets.append(names)
 
     for sheet in sheets:
         sheet.freeze_panes = "A2"

@@ -11,10 +11,12 @@ from .atomic_files import atomic_write_json
 from .db import ProductRecord, fetch_products
 from .export_templates import DEFAULT_PARTNER, PartnerTemplate, load_partner_template
 from .etm_characteristics import CONFIG_PREFIX, is_characteristics_report, read_report_values
-from .value_matching import canonical, remember_matches
+from .value_matching import canonical, remember_matches, remember_name_aliases
 from .filler import (
     MATCHES_HEADERS,
     MATCHES_SHEET,
+    NAMES_HEADERS,
+    NAMES_SHEET,
     class81_index,
     find_article_index,
     is_reportable_header,
@@ -43,6 +45,7 @@ class ManualImportResult:
     imported_values: int
     skipped_values: int
     learned_matches: int = 0
+    learned_names: int = 0
 
 
 def manual_values_path(work_dir: Path) -> Path:
@@ -249,10 +252,13 @@ def import_manual_completions(
     )
 
 
+ACCEPT_WORDS = {"да", "yes", "y", "+", "1", "x", "х", "v", "ок", "ok", "true", "принять"}
+
+
 def has_matches_sheet(path: Path) -> bool:
     workbook = load_workbook(path, read_only=True)
     try:
-        return MATCHES_SHEET in workbook.sheetnames
+        return MATCHES_SHEET in workbook.sheetnames or NAMES_SHEET in workbook.sheetnames
     finally:
         workbook.close()
 
@@ -270,16 +276,31 @@ def import_value_confirmations(
         raise ValueError("Сначала загрузите справочник характеристик ЭТМ.")
     workbook = load_workbook(report_path, read_only=True, data_only=True)
     try:
-        rows = list(workbook[MATCHES_SHEET].iter_rows(values_only=True))
+        rows = list(workbook[MATCHES_SHEET].iter_rows(values_only=True)) if MATCHES_SHEET in workbook.sheetnames else []
+        name_rows = list(workbook[NAMES_SHEET].iter_rows(values_only=True)) if NAMES_SHEET in workbook.sheetnames else []
     finally:
         workbook.close()
+    report_rows: list[ManualImportRow] = []
+    aliases: list[tuple[str, str]] = []
+    if name_rows:
+        names_header = [normalize_value(cell) for cell in name_rows[0]]
+        try:
+            name_idx, source_idx, yes_idx = (names_header.index(NAMES_HEADERS[i]) for i in (0, 2, 5))
+        except ValueError as exc:
+            raise ValueError(f"На листе «{NAMES_SHEET}» не хватает колонок.") from exc
+        for row in name_rows[1:]:
+            cells = [normalize_value(cell) for cell in row]
+            cells += [""] * (max(name_idx, source_idx, yes_idx) + 1 - len(cells))
+            if cells[name_idx] and cells[source_idx] and cells[yes_idx].casefold() in ACCEPT_WORDS:
+                aliases.append((cells[name_idx], cells[source_idx]))
+                report_rows.append(ManualImportRow("", cells[name_idx], cells[source_idx], "", "Характеристика сопоставлена"))
+    aliases_added = remember_name_aliases(learned_path, aliases) if aliases else 0
     header = [normalize_value(cell) for cell in rows[0]] if rows else []
     try:
-        field_idx, raw_idx, accept_idx = (header.index(MATCHES_HEADERS[i]) for i in (0, 1, 5))
+        field_idx, raw_idx, accept_idx = (header.index(MATCHES_HEADERS[i]) for i in (0, 1, 5)) if rows else (0, 1, 5)
     except ValueError as exc:
         raise ValueError(f"На листе «{MATCHES_SHEET}» не хватает колонок.") from exc
     accepted: list[tuple[str, str, str]] = []
-    report_rows: list[ManualImportRow] = []
     skipped = 0
     for row in rows[1:]:
         field = normalize_value(row[field_idx]) if field_idx < len(row) else ""
@@ -306,6 +327,7 @@ def import_value_confirmations(
         imported_values=0,
         skipped_values=skipped,
         learned_matches=learned,
+        learned_names=aliases_added,
     )
 
 
@@ -365,6 +387,7 @@ def result_lines(result: ManualImportResult) -> list[str]:
         f"Ручных значений сохранено: {result.imported_values}",
         f"Пропущено без изменений: {result.skipped_values}",
         f"Запомнено новых сопоставлений значений: {result.learned_matches}",
+        f"Запомнено новых сопоставлений характеристик: {result.learned_names}",
         f"Файл ручных значений: {result.values_path}",
         f"Отчет: {result.report_path}",
     ]
