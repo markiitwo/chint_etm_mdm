@@ -126,8 +126,8 @@ class CategoryTemplateTests(unittest.TestCase):
             CategoryTemplate,
             load_series_defaults,
             series_default_values,
-            series_names,
         )
+        from chint_etm_mdm.upload_names import series_names
 
         with closing(sqlite3.connect(self.db)) as conn, conn:
             conn.execute(
@@ -184,6 +184,9 @@ class CategoryTemplateTests(unittest.TestCase):
         self.assertEqual("30", row["Конфиг:Дифференциальный ток (мА)"])
         self.assertEqual("AC", row["Конфиг:Тип срабатывания по диф.току"])
         self.assertEqual("500820", row["81 класс"])
+        self.assertEqual(f"upload_new_nb1l-20_{dt.date.today().isoformat()}.csv", csv_path.name)
+        self.assertEqual(csv_path.with_suffix(".xlsx"), result.output_path)
+        self.assertEqual(f"{csv_path.stem}_report.xlsx", result.report_path.name)
 
         filled = load_workbook(result.output_path)["Шаблон"]
         self.assertEqual(0.158, filled["L2"].value)

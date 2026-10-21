@@ -15,7 +15,8 @@ from pathlib import Path
 from .db import fetch_products
 from .export_templates import PartnerTemplate, load_partner_template
 from .value_matching import canonical, name_candidates
-from .filler import FillReportRow, FillResult, make_output_paths, normalize_article, write_report
+from .filler import FillReportRow, FillResult, normalize_article, write_report
+from .upload_names import report_path_for, series_names, upload_csv_path
 
 REPORT_TITLE = "ТОВАРЫ НЕДОСТАЮЩИЕ ХАРАКТЕРИСТИКИ"
 ENCODING = "cp1251"
@@ -185,7 +186,9 @@ def fill_characteristics_report(
             details.append(FillReportRow(row_number, article, header, "missing_value", "", "", template.missing_note(header)))
         report.lines[line_idx] = join_row(cells)
 
-    output_path, details_path = make_output_paths(report_path, output_dir)
+    series = series_names(db_path, articles)
+    output_path = upload_csv_path(output_dir, "char", (series.get(article, "") for article in articles))
+    details_path = report_path_for(output_path)
     output_path.write_bytes(report.newline.join(report.lines).encode(ENCODING))
     write_report(details_path, details, names_to_review(without_value, template.name_rejects))
     unique = {article for article in articles if article}

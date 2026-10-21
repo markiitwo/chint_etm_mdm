@@ -26,6 +26,7 @@ from openpyxl import Workbook, load_workbook
 from .db import ProductRecord, connect, fetch_products
 from .export_templates import PartnerTemplate, clean_product_name, load_partner_template, partner_template_text
 from .filler import FillResult, fill_xlsx_template, normalize_article, normalize_header
+from .upload_names import report_path_for, series_names, upload_csv_path
 from .value_matching import canonical
 
 TEMPLATE_SHEET = "Шаблон"
@@ -263,17 +264,6 @@ def load_series_defaults(partner: str = "etm") -> list[SeriesDefault]:
     ]
 
 
-def series_names(db_path: Path, articles: list[str]) -> dict[str, str]:
-    if not articles:
-        return {}
-    placeholders = ",".join("?" for _ in articles)
-    with closing(connect(db_path)) as conn:
-        rows = conn.execute(
-            f"SELECT article, COALESCE(series_name, '') FROM products WHERE article IN ({placeholders})", articles
-        ).fetchall()
-    return {normalize_article(article): series for article, series in rows}
-
-
 def series_default_values(
     defaults: list[SeriesDefault],
     category: CategoryTemplate,
@@ -421,7 +411,10 @@ def fill_new_products(
             template=replace(template, dropdowns=category.dropdowns),
             fallback_values=fallback,
         )
-        csv_path = result.output_path.with_suffix(".csv")
+        csv_path = upload_csv_path(output_dir, "new", (series.get(article, "") for article in members), code)
+        xlsx_path = result.output_path.rename(csv_path.with_suffix(result.output_path.suffix))
+        report_path = result.report_path.rename(report_path_for(csv_path))
+        result = replace(result, output_path=xlsx_path, report_path=report_path)
         export_upload_csv(result.output_path, csv_path)
         input_path.unlink()
         run.results[code] = (result, csv_path)
