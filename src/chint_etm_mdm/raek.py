@@ -144,6 +144,10 @@ class Sources:
     coded: dict[str, dict[str, str]]  # article -> ETIM feature code -> value (ETIM workbook import)
     settings: dict
     learned: dict
+    chz_articles: frozenset[str] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.chz_articles = frozenset(article for article, _ in self.chz)
 
 
 def load_settings() -> dict:
@@ -263,6 +267,33 @@ def certificate_type(number: str) -> str:
     return ""
 
 
+def is_eaeu_document(number: str) -> bool:
+    """A certificate or declaration of the Eurasian union (ЕАЭС/ТС): confirmation is mandatory.
+
+    The ЧЗ file holds other things in the same column too: "не требуется" and the numbers
+    of refusal letters ("ОР-25/06-0035", "30.04.2026-21ССП", "24/12/0140").
+    """
+    latin = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
+    compact = number.upper().translate(latin)
+    return "ЕАЭС" in compact or bool(re.match(r"\s*ТС\b", compact))
+
+
+def mandatory_certification(article: str, sources: Sources) -> Cell:
+    """"Подлежит обязательному подтверждению соответствия" from the ЧЗ file's "Сертификат 1" column."""
+    if not sources.chz:
+        return Cell(EMPTY, note="Нет файла ЧЗ: обязательна ли сертификация, неизвестно")
+    if article not in sources.chz_articles:
+        return Cell(EMPTY, note="Артикула нет в файле ЧЗ: обязательна ли сертификация, неизвестно")
+    document = sources.chz.get((article, "cert_number"), "")
+    if not document:
+        return Cell(EMPTY, note="В файле ЧЗ у артикула не указан сертификат")
+    if is_eaeu_document(document):
+        return Cell(FILLED, "Да")
+    if "не треб" in document.casefold():
+        return Cell(FILLED, "Нет")
+    return Cell(CHECK, "Нет", f"В файле ЧЗ вместо сертификата ЕАЭС документ «{document}», похоже на отказное письмо")
+
+
 def same_certificate(left: str, right: str) -> bool:
     def norm(value: str) -> str:
         return re.sub(r"[^0-9A-ZА-Я]", "", value.upper().replace("C", "С").replace("A", "А").replace("B", "В").replace("H", "Н").replace("P", "Р"))
@@ -311,6 +342,8 @@ def column_value(header: str, article: str, product: ProductRecord, sources: Sou
     if key == canonical("Серия"):
         value = sources.series.get(article) or chz.get((article, "series"), "")
         return Cell(FILLED, value) if value else Cell(EMPTY, note="В базе нет серии")
+    if key == canonical("Подлежит обязательному подтверждению соответствия"):
+        return mandatory_certification(article, sources)
     if key == canonical("Подлежит маркировке Честный Знак"):
         mark = chz.get((article, "honest_sign"), "").casefold()
         if mark in {"yes", "y", "да"}:
@@ -329,11 +362,13 @@ def column_value(header: str, article: str, product: ProductRecord, sources: Sou
 
 def certificate(article: str, product: ProductRecord, sources: Sources) -> dict[str, Cell]:
     attributes = product.attributes or {}
-    from_chz = sources.chz.get((article, "cert_number"), "")
+    in_chz = sources.chz.get((article, "cert_number"), "")
+    from_chz = in_chz if is_eaeu_document(in_chz) else ""
     from_db = next((attributes[name] for name in CERT_NUMBER_ATTRIBUTES if attributes.get(name)), "")
     number = from_chz or from_db
     if not number:
-        missing = Cell(EMPTY, note="Нет номера сертификата ни в файле ЧЗ, ни в базе")
+        reason = f"Сертификата ЕАЭС нет: в файле ЧЗ «{in_chz}»" if in_chz else "Нет номера сертификата ни в файле ЧЗ, ни в базе"
+        missing = Cell(EMPTY, note=reason)
         return {canonical(name): missing for name in ("Тип сертификата", "Номер сертификата", "Сертификат от", "Сертификат до", "Ссылка на реестр")}
     dates_match = not from_chz or not from_db or same_certificate(from_chz, from_db)
     start = as_date(next((attributes[name] for name in CERT_FROM_ATTRIBUTES if attributes.get(name)), "")) if dates_match else None

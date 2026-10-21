@@ -10,7 +10,20 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from chint_etm_mdm.raek import fill_raek_zip, is_raek_zip, latest_raek_zip, remember_name_answers, result_lines
+from chint_etm_mdm.raek import (
+    CHECK,
+    EMPTY,
+    FILLED,
+    Cell,
+    Sources,
+    certificate,
+    fill_raek_zip,
+    is_raek_zip,
+    latest_raek_zip,
+    mandatory_certification,
+    remember_name_answers,
+    result_lines,
+)
 from test_import_data_integrity import make_database
 
 BASE = ["RAEC_ID", "Код поставщика", "Название от поставщика", "Бренд", "Статус поставщика", "ABC Приоритет"]
@@ -77,6 +90,7 @@ def make_zip(path: Path) -> None:
             ["Тип сертификата", "Номер сертификата", "Сертификат от", "Сертификат до", "Файл", "Ссылка на реестр"], [DRIVE, RELAY]
         ),
         "ChINT (CHINT)_required_features.xlsx": features_file(),
+        "ChINT (CHINT)_MANDATORY_CERTIFICATION.xlsx": plain_file("Подлежит обязательному подтверждению соответствия", [DRIVE, RELAY]),
     }
     with zipfile.ZipFile(path, "w") as archive:
         for name, workbook in files.items():
@@ -164,7 +178,8 @@ class RaekTests(unittest.TestCase):
                 [
                     "ChINT (CHINT)_COUNTRY_ID.xlsx", "ChINT (CHINT)_THVED.xlsx", "ChINT (CHINT)_EAN.xlsx",
                     "ChINT (CHINT)_OKPD2_ID.xlsx", "ChINT (CHINT)_SERIES_ID.xlsx", "ChINT (CHINT)_IMAGE.xlsx",
-                    "ChINT (CHINT)_certificate.xlsx", "ChINT (CHINT)_required_features.xlsx", "readme.txt",
+                    "ChINT (CHINT)_certificate.xlsx", "ChINT (CHINT)_required_features.xlsx",
+                    "ChINT (CHINT)_MANDATORY_CERTIFICATION.xlsx", "readme.txt",
                 ],
                 archive.namelist(),
             )
@@ -184,8 +199,15 @@ class RaekTests(unittest.TestCase):
         self.assertEqual(("Декларация ЕАС", "ЕАЭС N RU Д-CN.PA03.B.02078/25", dt.datetime(2025, 3, 21)), cert[2][6:9])
         self.assertIsNone(cert[2][11])  # no registry link without the ЧЗ file
 
+        # From the ЧЗ file: the drive has a declaration ЕАЭС; the relay is not in the file, so no guess.
+        self.assertEqual(["Да", None], [row[6] for row in cells(self.member(result, "ChINT (CHINT)_MANDATORY_CERTIFICATION.xlsx"))[1:]])
+
         report = load_workbook(result.report_path)
         empty = [row for row in report["Нечем заполнить"].iter_rows(min_row=2, values_only=True)]
+        self.assertIn(
+            ("ChINT (CHINT)_MANDATORY_CERTIFICATION.xlsx", "631929"),
+            [(row[0], row[3]) for row in empty if "файле ЧЗ" in row[7]],
+        )
         self.assertIn(("ChINT (CHINT)_THVED.xlsx", "999999", "Артикула нет в базе"), [(row[0], row[3], row[7]) for row in empty])
         self.assertTrue(any(row[5] == "Изображение" and "ensmas" in row[7] for row in empty))
         checks = [row for row in report["Проверить"].iter_rows(min_row=2, values_only=True)]
@@ -260,3 +282,38 @@ class RaekTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MandatoryCertificationTests(unittest.TestCase):
+    def sources(self, document: str | None) -> Sources:
+        chz = {("100", "series"): "NKB1"}
+        if document is not None:
+            chz[("100", "cert_number")] = document
+        return Sources(products={}, chz=chz, series={}, coded={}, settings={}, learned={})
+
+    def test_from_chz_certificate_column(self) -> None:
+        cases = {
+            "ЕАЭС RU С-CN.НВ12.В.00413/23": Cell(FILLED, "Да"),
+            "EAЭС N RU Д-CN.РА06.В.41573/24": Cell(FILLED, "Да"),  # Latin letters mixed in
+            "не требуется ": Cell(FILLED, "Нет"),
+        }
+        for document, expected in cases.items():
+            self.assertEqual(expected, mandatory_certification("100", self.sources(document)), document)
+        letter = mandatory_certification("100", self.sources("ОР-25/06-0035"))
+        self.assertEqual((CHECK, "Нет"), (letter.status, letter.value))
+        self.assertIn("ОР-25/06-0035", letter.note)
+
+    def test_unknown_stays_empty(self) -> None:
+        self.assertEqual(EMPTY, mandatory_certification("100", self.sources(None)).status)
+        self.assertEqual(EMPTY, mandatory_certification("200", self.sources("ЕАЭС RU С-CN.1")).status)
+        no_file = Sources(products={}, chz={}, series={}, coded={}, settings={}, learned={})
+        self.assertEqual(EMPTY, mandatory_certification("100", no_file).status)
+
+    def test_refusal_letter_is_not_a_certificate(self) -> None:
+        from chint_etm_mdm.db import ProductRecord
+
+        product = ProductRecord("100", attributes={})
+        cert = certificate("100", product, self.sources("30.04.2026-21ССП"))
+        number = [cell for key, cell in cert.items() if "номер" in key][0]
+        self.assertEqual(EMPTY, number.status)
+        self.assertIn("30.04.2026-21ССП", number.note)
