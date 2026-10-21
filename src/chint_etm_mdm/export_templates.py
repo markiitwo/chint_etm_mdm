@@ -237,7 +237,8 @@ class PartnerTemplate:
 
     def with_current_kind(self, product: ProductRecord, raw: str, source: str) -> tuple[str, str, str]:
         """For values like "AC 220": the product name ("... AC/DC230В") wins, else the "Род тока" attributes."""
-        for text in (product.name, product.full_name):
+        # The short name is cut at 100 characters ("... AC23"), so the full name goes first.
+        for text in (product.full_name, product.name):
             kind, number = current_kind_from_text(text)
             if kind:
                 return number, kind, "product_name_current"

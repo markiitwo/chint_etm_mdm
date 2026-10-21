@@ -188,6 +188,9 @@ def current_kind_from_text(text: str) -> tuple[str, str]:
     found = NAME_CURRENT_RE.search(text or "")
     if not found:
         return "", ""
+    if found.end() >= len(text.rstrip()) and not found.group(0).rstrip().endswith(("В", "V")):
+        # A number at the very end without "В" may be a name cut short ("... AC23" for AC230В).
+        return "", ""
     low = format_number(float(found.group(2).replace(",", ".")))
     if found.group(4):
         return found.group(1), f"{low}-{format_number(float(found.group(4).replace(',', '.')))}"

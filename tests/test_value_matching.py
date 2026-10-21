@@ -240,6 +240,20 @@ class CurrentKindFromNameTests(unittest.TestCase):
         self.assertEqual(("", ""), current_kind_from_text("Кнопка NP2 зелёная AC23ОВ (LED)"))
         self.assertEqual(("AC", "230"), current_kind_from_text("Кнопка NP2 зелёная AC230В (LED)"))
 
+    def test_cut_short_name_is_not_read(self) -> None:
+        from chint_etm_mdm.export_templates import load_partner_template
+        from chint_etm_mdm.value_matching import current_kind_from_text
+
+        self.assertEqual(("", ""), current_kind_from_text("Переключатель NP2-BK12365 зелёная AC23"))
+        self.assertEqual(("AC", "230"), current_kind_from_text("Лампа ND16 AC230В"))
+        product = ProductRecord(
+            article="265954",
+            name="Переключатель NP2-BK12365 зелёная AC23",
+            full_name="Переключатель NP2-BK12365 зелёная AC230В (LED), IP40 (R)",
+        )
+        template = load_partner_template("etm")
+        self.assertEqual(("230", "AC", "product_name_current"), template.with_current_kind(product, "", "db"))
+
 
 class RejectedNamePairTests(unittest.TestCase):
     def test_rejected_pair_is_not_offered(self) -> None:
