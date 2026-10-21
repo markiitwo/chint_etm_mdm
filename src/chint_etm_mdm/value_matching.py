@@ -45,7 +45,10 @@ UNIT_WORDS = {
 }
 RANGE_RE = re.compile(r"\d+(?:[.,]\d+)?(?:…|\.\.\.|-|–)\d+(?:[.,]\d+)?[^\d]{0,4}")
 CURRENT_PREFIX_RE = re.compile(r"^(AC/DC|AC|DC) \d")
-NAME_CURRENT_RE = re.compile(r"(?<![A-Za-z])(AC/DC|AC|DC)\s*(\d+(?:[.,]\d+)?)(?:\s*[-–/]\s*\d+(?:[.,]\d+)?)?\s*(?:В|V)?(?![\dA-Za-z])")
+NAME_CURRENT_RE = re.compile(
+    r"(?<![A-Za-z])(AC/DC|AC|DC)\s*(\d+(?:[.,]\d+)?)(?:\s*([-–])\s*(\d+(?:[.,]\d+)?)|\s*/\s*\d+(?:[.,]\d+)?)?\s*(?:В|V)?(?![\dA-Za-zА-Яа-я])"
+)
+NUMBER_RANGE_RE = re.compile(r"^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$")
 PATTERN_RE = re.compile(r"^0[0/\-.,]*$")
 UNIT_SUFFIX_RE = re.compile(r"(?:,\s*[^,()]{1,12}|\([^()]{1,12}\))\s*$")
 WORD_RE = re.compile(r"[0-9a-zа-я]+")
@@ -94,7 +97,7 @@ def clean_open_value(name: str, raw: str) -> str:
     text = canonical(raw)
     numbers = NUMBER_RE.findall(text)
     if len(numbers) == 2 and RANGE_RE.fullmatch(text.replace(" ", "")):
-        low, high = (format_number(float(item.replace(",", "."))) for item in numbers)
+        low, high = (format_number(abs(float(item.replace(",", ".")))) for item in numbers)
         return f"{low}-{high}"
     if len(numbers) != 1:
         return raw
@@ -168,6 +171,10 @@ def match_numeric(raw: str, characteristic: Characteristic, current_kind: str = 
     with_kind = [item for item in characteristic.values if CURRENT_PREFIX_RE.match(item)]
     if with_kind and not CURRENT_PREFIX_RE.match(value):
         number = only_number(value)
+        span = NUMBER_RANGE_RE.match(value)
+        if span and current_kind:
+            # "AC 110-230": ETM's examples are single numbers, so a range goes out flagged for a check.
+            return MatchResult(f"{current_kind} {value}", "words", tuple(with_kind[:3]))
         if number is None:
             return MatchResult("", "none", tuple(with_kind[:3]))
         if not current_kind:
@@ -177,11 +184,14 @@ def match_numeric(raw: str, characteristic: Characteristic, current_kind: str = 
 
 
 def current_kind_from_text(text: str) -> tuple[str, str]:
-    """("AC/DC", "230") from a product name like "Кнопка ... AC/DC230В", or ("", "")."""
+    """("AC/DC", "230") from a product name like "Кнопка ... AC/DC230В" ("110-230" for a range), or ("", "")."""
     found = NAME_CURRENT_RE.search(text or "")
     if not found:
         return "", ""
-    return found.group(1), format_number(float(found.group(2).replace(",", ".")))
+    low = format_number(float(found.group(2).replace(",", ".")))
+    if found.group(4):
+        return found.group(1), f"{low}-{format_number(float(found.group(4).replace(',', '.')))}"
+    return found.group(1), low
 
 
 def current_kind_from_value(value: str) -> str:

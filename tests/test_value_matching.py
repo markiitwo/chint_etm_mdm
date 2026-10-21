@@ -222,3 +222,33 @@ class ShippedNameAliasTests(unittest.TestCase):
 
         attrs = {"Условный тепловой ток, А": "16", "Условный тепловой ток, В": "1"}
         self.assertEqual(["Условный тепловой ток, А"], same_name_attributes("Условный тепловой ток (А)", attrs))
+
+
+class CurrentKindFromNameTests(unittest.TestCase):
+    def test_range_in_name_is_kept_and_flagged(self) -> None:
+        from chint_etm_mdm.value_matching import current_kind_from_text
+
+        self.assertEqual(("AC", "110-230"), current_kind_from_text("Кнопка NP8 AC110-230В(LED)"))
+        backlight = NumericCharacteristicTests.BACKLIGHT
+        result = match_value("110-230", backlight, current_kind="AC")
+        self.assertEqual(("AC 110-230", "words"), (result.value, result.kind))
+
+    def test_letter_instead_of_digit_is_not_read(self) -> None:
+        from chint_etm_mdm.value_matching import current_kind_from_text
+
+        # "AC23ОВ" with a Cyrillic "О" in place of zero must not become "AC 23".
+        self.assertEqual(("", ""), current_kind_from_text("Кнопка NP2 зелёная AC23ОВ (LED)"))
+        self.assertEqual(("AC", "230"), current_kind_from_text("Кнопка NP2 зелёная AC230В (LED)"))
+
+
+class RejectedNamePairTests(unittest.TestCase):
+    def test_rejected_pair_is_not_offered(self) -> None:
+        from chint_etm_mdm.etm_characteristics import names_to_review
+        from chint_etm_mdm.export_templates import load_partner_template
+
+        attrs = [{"Номинальный импульсный ток (8/20), кА": "20"}]
+        offered = names_to_review({"Импульсный ток Iimp (10/350), кА": attrs})
+        self.assertIn("Номинальный импульсный ток (8/20), кА", [row[2] for row in offered])
+        rejects = load_partner_template("etm").name_rejects
+        filtered = names_to_review({"Импульсный ток Iimp (10/350), кА": attrs}, rejects)
+        self.assertEqual([""], [row[2] for row in filtered])

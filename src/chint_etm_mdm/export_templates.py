@@ -155,6 +155,8 @@ class PartnerTemplate:
     attribute_columns: tuple[AttributeColumns, ...]
     value_list_files: tuple[str, str] | None = None
     name_aliases: dict[str, NameAlias] | None = None
+    # Pairs checked and found wrong: never offered on the "Названия" sheet.
+    name_rejects: dict[str, frozenset[str]] | None = None
 
     def attribute_columns_for(self, header: str) -> AttributeColumns | None:
         for columns in self.attribute_columns:
@@ -376,6 +378,10 @@ def parse_partner_template(data: dict[str, Any]) -> PartnerTemplate:
                 only_listed=bool(item.get("only_listed", False)),
             )
             for item in data.get("name_aliases", [])
+        },
+        name_rejects={
+            canonical(item["characteristic"]): frozenset(_as_tuple(item.get("attributes")))
+            for item in data.get("name_rejects", [])
         },
     )
     validate_partner_template(template)

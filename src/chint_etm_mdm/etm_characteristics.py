@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .db import fetch_products
 from .export_templates import PartnerTemplate, load_partner_template
-from .value_matching import name_candidates
+from .value_matching import canonical, name_candidates
 from .filler import FillReportRow, FillResult, make_output_paths, normalize_article, write_report
 
 REPORT_TITLE = "ТОВАРЫ НЕДОСТАЮЩИЕ ХАРАКТЕРИСТИКИ"
@@ -187,7 +187,7 @@ def fill_characteristics_report(
 
     output_path, details_path = make_output_paths(report_path, output_dir)
     output_path.write_bytes(report.newline.join(report.lines).encode(ENCODING))
-    write_report(details_path, details, names_to_review(without_value))
+    write_report(details_path, details, names_to_review(without_value, template.name_rejects))
     unique = {article for article in articles if article}
     found = len(unique.intersection(products))
     return FillResult(
@@ -202,11 +202,14 @@ def fill_characteristics_report(
     )
 
 
-def names_to_review(without_value: dict[str, list[dict[str, str]]]) -> list[list[object]]:
+def names_to_review(
+    without_value: dict[str, list[dict[str, str]]], rejects: dict[str, frozenset[str]] | None = None
+) -> list[list[object]]:
     """For each characteristic the program could not fill, our attributes that may mean the same."""
     rows: list[list[object]] = []
     for name, attributes in sorted(without_value.items(), key=lambda item: (-len(item[1]), item[0])):
-        candidates = name_candidates(name, attributes)
+        rejected = (rejects or {}).get(canonical(name), frozenset())
+        candidates = [item for item in name_candidates(name, attributes) if item[0] not in rejected]
         if not candidates:
             rows.append([name, len(attributes), "", "", "", ""])
         for attribute, count, examples in candidates:
