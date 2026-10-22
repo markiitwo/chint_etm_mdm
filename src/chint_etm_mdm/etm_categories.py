@@ -31,7 +31,7 @@ from .atomic_files import atomic_write_json
 from .db import ProductRecord, connect, fetch_products
 from .export_templates import PartnerTemplate, clean_product_name, load_partner_template, partner_template_text
 from .filler import FillReportRow, FillResult, fill_xlsx_template, normalize_article, normalize_header
-from .pm_requests import Need, load_answers
+from .pm_requests import Need, load_answer_attributes, load_answers
 from .upload_names import check_path_for, report_path_for, series_names, upload_csv_path
 from .value_matching import canonical
 
@@ -673,6 +673,7 @@ def fill_new_products(
     codes = load_codes_file(codes_path) if codes_path else {}
     run.codes_file = codes_path
     answers = load_answers(answers_file)
+    answered_features = load_answer_attributes(answers_file)
     defaults = load_series_defaults(template.code)
     series = series_names(db_path, sorted(products))
 
@@ -704,6 +705,7 @@ def fill_new_products(
             manual_values_path,
             template=replace(template, dropdowns=category.dropdowns),
             fallback_values=fallback,
+            extra_attributes={article: answered_features[article] for article in members if article in answered_features},
         )
         # The name is made unique against the working files, which every class keeps.
         name = upload_csv_path(tech_dir, "new", (series.get(article, "") for article in members), code).name

@@ -7,7 +7,7 @@ from copy import copy
 import shutil
 import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -679,6 +679,7 @@ def fill_xlsx_template(
     manual_values_path: Path | None = None,
     template: PartnerTemplate | None = None,
     fallback_values: dict[tuple[str, str], str | tuple[str, str]] | None = None,
+    extra_attributes: dict[str, dict[str, str]] | None = None,
 ) -> FillResult:
     """`fallback_values` ((article, header) -> value or (value, source)) fill what the database leaves empty."""
     from .manual_values import load_manual_values
@@ -708,6 +709,11 @@ def fill_xlsx_template(
             articles.append(normalize_article(row[article_idx].value))
 
     products = fetch_products(db_path, articles)
+    for article, extra in (extra_attributes or {}).items():
+        product = products.get(article)
+        if product is not None and extra:
+            # Known characteristics (e.g. answered by a product manager) where the base has none.
+            products[article] = replace(product, attributes={**extra, **(product.attributes or {})})
     manual_values = load_manual_values(manual_values_path)
     report: list[FillReportRow] = []
     filled_cells = 0
