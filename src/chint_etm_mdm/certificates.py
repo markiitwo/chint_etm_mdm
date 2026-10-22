@@ -7,6 +7,9 @@ document, with the dates it already knows (the ЧЗ file, when it has date
 columns; the database) and empty cells for the user to fill once. On the
 next update the user's dates are kept and new documents are added. Partner
 files take the dates from this table for every product with that document.
+
+Dates filled earlier in another file (for example a partner's certificate form
+with a row per product) are taken over with «Взять даты из файла...».
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ TABLE_NAME = "Сертификаты.xlsx"
 SHEET = "Сертификаты"
 HEADERS = ["Номер документа", "Вид", "Действует с", "Действует до", "Откуда даты", "Товаров", "Серии", "Пример товара", "Ссылка на реестр"]
 NUMBER, KIND, START, END, SOURCE, COUNT, SERIES, EXAMPLE, LINK = range(len(HEADERS))
-FROM_USER, FROM_CHZ, FROM_DB = "вписано вручную", "файл ЧЗ", "база"
+FROM_USER, FROM_CHZ, FROM_DB, FROM_FILE = "вписано вручную", "файл ЧЗ", "база", "взято из файла"
 EXPIRING_DAYS = 90
 LATIN = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
 FILL_EMPTY = PatternFill("solid", fgColor="FFF2CC")
@@ -88,6 +91,7 @@ class TableResult:
     with_dates: int = 0
     without_dates: int = 0
     added: int = 0
+    from_file: int = 0
     expiring: list[tuple[str, dt.date]] = field(default_factory=list)
     expired: list[tuple[str, dt.date]] = field(default_factory=list)
 
@@ -170,6 +174,53 @@ def database_documents(db_path: Path) -> dict[str, tuple[str, dt.date | None, dt
     return result
 
 
+def read_dates_file(path: Path) -> dict[str, Document]:
+    """Documents and dates from any table with a certificate number column and date columns.
+
+    Fits partner forms filled earlier: a row per product with «Номер сертификата», «Начало действия
+    сертификата», «Окончание действия сертификата». Rows of one document give one entry.
+    """
+    workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
+    documents: dict[str, Document] = {}
+    try:
+        for sheet in workbook.worksheets:
+            rows = sheet.iter_rows(values_only=True)
+            columns: dict[str, int] = {}
+            for _, row in zip(range(15), rows):
+                names = [" ".join(str(cell or "").split()).casefold() for cell in row]
+                number = next((i for i, name in enumerate(names) if re.search(r"номер\s+(сертификата|документа|декларации)", name)), None)
+                if number is None:
+                    continue
+                columns = {"number": number}
+                for idx, name in enumerate(names):
+                    if "start" not in columns and re.search(r"начал|выдач|действует с|\bот\b", name) and idx != number:
+                        columns["start"] = idx
+                    elif "end" not in columns and re.search(r"оконч|истеч|действует до|\bдо\b", name) and idx != number:
+                        columns["end"] = idx
+                    elif "article" not in columns and name.startswith("артикул"):
+                        columns["article"] = idx
+                    elif "link" not in columns and "реестр" in name:
+                        columns["link"] = idx
+                break
+            if "start" not in columns and "end" not in columns:
+                continue
+            for row in rows:
+                cells = {key: (row[idx] if idx < len(row) else None) for key, idx in columns.items()}
+                number = str(cells["number"] or "").strip()
+                if not is_eaeu_document(number):
+                    continue
+                doc = documents.setdefault(number_key(number), Document(number, source=FROM_FILE))
+                start, end = as_date(cells.get("start")), as_date(cells.get("end"))
+                if (start or end) and not (doc.start or doc.end):
+                    doc.start, doc.end = start, end
+                if cells.get("article"):
+                    doc.articles.add(normalize_article(cells["article"]))
+                doc.link = doc.link or str(cells.get("link") or "").strip()
+    finally:
+        workbook.close()
+    return {key: doc for key, doc in documents.items() if doc.start or doc.end}
+
+
 def read_table(path: Path) -> dict[str, Document]:
     """Documents of an existing table, with the dates written in it."""
     if not path.exists():
@@ -198,8 +249,13 @@ def table_dates(path: Path | None) -> dict[str, tuple[dt.date | None, dt.date | 
     return {key: (doc.start, doc.end) for key, doc in read_table(path).items() if doc.start or doc.end}
 
 
-def update_table(db_path: Path, codes_path: Path | None, path: Path, today: dt.date | None = None) -> TableResult:
-    """Create or refresh the table. Dates already in the table always win: the user may have typed them."""
+def update_table(
+    db_path: Path, codes_path: Path | None, path: Path, today: dt.date | None = None, dates_file: Path | None = None
+) -> TableResult:
+    """Create or refresh the table. Dates already in the table always win: the user may have typed them.
+
+    With `dates_file`, dates from that file fill the documents the user has not dated by hand.
+    """
     today = today or dt.date.today()
     old = read_table(path)
     documents: dict[str, Document] = {}
@@ -226,8 +282,20 @@ def update_table(db_path: Path, codes_path: Path | None, path: Path, today: dt.d
         doc = documents.setdefault(key, Document(previous.number))
         if not (previous.start or previous.end):
             continue
-        if (previous.start, previous.end) != (doc.start, doc.end) or previous.source == FROM_USER:
+        if previous.source == FROM_FILE:
+            doc.start, doc.end, doc.source = previous.start, previous.end, FROM_FILE
+        elif (previous.start, previous.end) != (doc.start, doc.end) or previous.source == FROM_USER:
             doc.start, doc.end, doc.source = previous.start, previous.end, FROM_USER
+    if dates_file is not None:
+        for key, found in read_dates_file(dates_file).items():
+            doc = documents.setdefault(key, Document(found.number))
+            doc.articles |= found.articles
+            doc.link = doc.link or found.link
+            if doc.source == FROM_USER:
+                continue
+            if (doc.start, doc.end) != (found.start, found.end):
+                result.from_file += 1
+            doc.start, doc.end, doc.source = found.start, found.end, FROM_FILE
     result.added = len(set(documents) - set(old))
     write_table(path, documents, today, result)
     return result
@@ -298,6 +366,8 @@ def table_lines(result: TableResult) -> list[str]:
         f"Таблица сертификатов: {result.documents} документов, с датами {result.with_dates}, без дат {result.without_dates}"
         + (f", новых {result.added}." if result.added else ".")
     ]
+    if result.from_file:
+        lines.append(f"Из выбранного файла взяты даты для {result.from_file} документов. Вписанные вручную даты не тронуты.")
     if result.without_dates:
         lines.append("Впишите даты в жёлтые клетки, сохраните файл: дальше программа поставит их сама.")
     for number, end in sorted(result.expired, key=lambda item: item[1]):

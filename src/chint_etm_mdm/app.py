@@ -122,15 +122,16 @@ class CertificatesWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, codes_file: Path | None, table_path: Path) -> None:
+    def __init__(self, db_path: Path, codes_file: Path | None, table_path: Path, dates_file: Path | None = None) -> None:
         super().__init__()
         self.db_path = db_path
         self.codes_file = codes_file
         self.table_path = table_path
+        self.dates_file = dates_file
 
     def run(self) -> None:
         try:
-            self.done.emit(update_table(self.db_path, self.codes_file, self.table_path))
+            self.done.emit(update_table(self.db_path, self.codes_file, self.table_path, dates_file=self.dates_file))
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -799,6 +800,10 @@ class MainWindow(QMainWindow):
         certificates.setToolTip("Даты сертификатов: вписываются один раз на документ, программа ставит их всем товарам")
         certificates.clicked.connect(self.run_certificates_table)
         self.write_action_buttons.append(certificates)
+        certificate_dates = QPushButton("Взять даты из файла...")
+        certificate_dates.setToolTip("Даты из файла, заполненного раньше (например, форма партнёра со столбцами «Номер сертификата», «Начало/Окончание действия»)")
+        certificate_dates.clicked.connect(lambda: self.run_certificates_table(ask_file=True))
+        self.write_action_buttons.append(certificate_dates)
         self.pm_request_button.setToolTip("Excel-запрос каждому продакту о том, чего нет в базе, и черновик письма с ним")
         self.pm_request_button.clicked.connect(self.write_pm_requests)
         self.pm_request_button.setEnabled(False)
@@ -809,7 +814,7 @@ class MainWindow(QMainWindow):
         self.open_raek_report_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.report_path))
         self.open_raek_dir_button.setEnabled(False)
         self.open_raek_report_button.setEnabled(False)
-        for button in (run_button, self.open_raek_dir_button, self.open_raek_report_button, remember, certificates):
+        for button in (run_button, self.open_raek_dir_button, self.open_raek_report_button, remember, certificates, certificate_dates):
             actions.addWidget(button)
         actions.addStretch(1)
         pm_actions = QHBoxLayout()
@@ -874,7 +879,13 @@ class MainWindow(QMainWindow):
         self.raek_log.append(details)
         QMessageBox.critical(self, "Ошибка", details)
 
-    def run_certificates_table(self) -> None:
+    def run_certificates_table(self, ask_file: bool = False) -> None:
+        dates_file = None
+        if ask_file:
+            path, _ = QFileDialog.getOpenFileName(self, "Файл с датами сертификатов", str(self.incoming()[0]), "Excel (*.xlsx)")
+            if not path:
+                return
+            dates_file = Path(path)
         try:
             self.save_current_config()
             db_path = self.validated_db_path()
@@ -887,7 +898,7 @@ class MainWindow(QMainWindow):
             codes_text = self.codes_file_edit.text().strip()
             codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             self.raek_log.append("Обновляю таблицу сертификатов...")
-            worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE)
+            worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE, dates_file)
             self.start_worker(worker, self.on_certificates_done, self.on_raek_failed)
         except Exception:
             self.on_raek_failed(traceback.format_exc())

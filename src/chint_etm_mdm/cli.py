@@ -75,6 +75,7 @@ def main() -> None:
     parser.add_argument("--raek-site", action="store_true", help="With --raek-zip: first ask ensmas.ru about articles not in the site cache")
     parser.add_argument("--site-cache", help="Site answers cache (default: <work dir>/cache/ensmas_site.json next to --rules)")
     parser.add_argument("--certificates-table", help="Create or update the certificates table (xlsx): dates once per document; ЧЗ codes from --codes-file or Downloads")
+    parser.add_argument("--certificate-dates", help="With --certificates-table: take dates from an earlier filled file (a row per product or per document)")
     parser.add_argument("--pm-requests", action="store_true", help="With --raek-zip and --rules: write an Excel request per product manager for what the database lacks")
     parser.add_argument("--pm-answers", nargs="+", help="Import request files sent back by product managers (needs --rules)")
     parser.add_argument("--raek-answers", help="Remember the да/нет answers from the «Названия» sheet of a RAEK report (needs --rules)")
@@ -101,6 +102,7 @@ def main() -> None:
             db_path,
             latest_codes_file(incoming_folders(load_config().inbox_dir), Path(args.codes_file) if args.codes_file else None),
             Path(args.certificates_table),
+            dates_file=Path(args.certificate_dates) if args.certificate_dates else None,
         )
         for line in certificates_lines(table):
             print(line)
