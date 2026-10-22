@@ -22,6 +22,7 @@ from .manual_values import (
 )
 from .value_matching import import_etm_reference
 from .site_info import default_cache_path as site_cache_path
+from .certificates import TABLE_NAME as CERTIFICATES_TABLE, table_lines as certificates_lines, update_table as update_certificates_table
 from .raek import fill_raek_zip, remember_name_answers, result_lines as raek_result_lines
 from .price_importer import download_price_file, find_latest_price_url, import_price_workbook, result_lines
 
@@ -71,6 +72,7 @@ def main() -> None:
     parser.add_argument("--raek-zip", help="Fill the RAEK manager's archive (zip) with --output-dir; ЧЗ codes from --codes-file or Downloads")
     parser.add_argument("--raek-site", action="store_true", help="With --raek-zip: first ask ensmas.ru about articles not in the site cache")
     parser.add_argument("--site-cache", help="Site answers cache (default: <work dir>/cache/ensmas_site.json next to --rules)")
+    parser.add_argument("--certificates-table", help="Create or update the certificates table (xlsx): dates once per document; ЧЗ codes from --codes-file or Downloads")
     parser.add_argument("--raek-answers", help="Remember the да/нет answers from the «Названия» sheet of a RAEK report (needs --rules)")
     args = parser.parse_args()
 
@@ -88,6 +90,16 @@ def main() -> None:
         print(f"etm_reference={target}")
         print(f"characteristics={characteristics}")
         print(f"allowed_values={values}")
+        return
+
+    if args.certificates_table:
+        table = update_certificates_table(
+            db_path,
+            latest_codes_file([Path.home() / "Downloads", Path.home() / "Загрузки"], Path(args.codes_file) if args.codes_file else None),
+            Path(args.certificates_table),
+        )
+        for line in certificates_lines(table):
+            print(line)
         return
 
     if args.raek_answers:
@@ -116,6 +128,7 @@ def main() -> None:
             site_cache,
             args.raek_site,
             progress=print,
+            certificates_table=site_cache.parent.parent / CERTIFICATES_TABLE if site_cache else None,
         )
         for line in raek_result_lines(result):
             print(line)

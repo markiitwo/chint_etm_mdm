@@ -31,6 +31,7 @@ from openpyxl import Workbook, load_workbook
 
 from . import partners
 from .atomic_files import atomic_write_json
+from .certificates import is_eaeu_document, number_key, table_dates
 from .db import ProductRecord, connect, fetch_products
 from .etm_categories import load_codes_file
 from .filler import normalize_article
@@ -148,6 +149,7 @@ class Sources:
     settings: dict
     learned: dict
     site: dict[str, SiteRecord] = field(default_factory=dict)  # article -> what ensmas.ru answered
+    cert_dates: dict[str, tuple] = field(default_factory=dict)  # document key -> (from, to) from the certificates table
     chz_articles: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -271,17 +273,6 @@ def certificate_type(number: str) -> str:
     return ""
 
 
-def is_eaeu_document(number: str) -> bool:
-    """A certificate or declaration of the Eurasian union (ЕАЭС/ТС): confirmation is mandatory.
-
-    The ЧЗ file holds other things in the same column too: "не требуется" and the numbers
-    of refusal letters ("ОР-25/06-0035", "30.04.2026-21ССП", "24/12/0140").
-    """
-    latin = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
-    compact = number.upper().translate(latin)
-    return "ЕАЭС" in compact or bool(re.match(r"\s*ТС\b", compact))
-
-
 def mandatory_certification(article: str, sources: Sources) -> Cell:
     """"Подлежит обязательному подтверждению соответствия" from the ЧЗ file's "Сертификат 1" column."""
     document = sources.chz.get((article, "cert_number"), "")
@@ -327,6 +318,10 @@ def same_certificate(left: str, right: str) -> bool:
         return re.sub(r"[^0-9A-ZА-Я]", "", value.upper().replace("C", "С").replace("A", "А").replace("B", "В").replace("H", "Н").replace("P", "Р"))
 
     return bool(left and right) and norm(left) == norm(right)
+
+
+def as_datetime(value: dt.date | None) -> dt.datetime | None:
+    return dt.datetime.combine(value, dt.time()) if value else None
 
 
 def as_date(value: str) -> dt.datetime | None:
@@ -404,10 +399,13 @@ def certificate(article: str, product: ProductRecord, sources: Sources) -> dict[
         reason = f"Сертификата ЕАЭС нет: в файле ЧЗ «{in_chz}»" if in_chz else "Нет номера сертификата ни в файле ЧЗ, ни в базе"
         missing = Cell(EMPTY, note=reason)
         return {canonical(name): missing for name in ("Тип сертификата", "Номер сертификата", "Сертификат от", "Сертификат до", "Ссылка на реестр")}
+    table_start, table_end = sources.cert_dates.get(number_key(number), (None, None))
     dates_match = not from_chz or not from_db or same_certificate(from_chz, from_db)
     start = as_date(next((attributes[name] for name in CERT_FROM_ATTRIBUTES if attributes.get(name)), "")) if dates_match else None
     end = as_date(next((attributes[name] for name in CERT_TO_ATTRIBUTES if attributes.get(name)), "")) if dates_match else None
-    no_dates = "Дат нет в базе" if dates_match else "В базе даты другого документа, чем в файле ЧЗ"
+    if table_start or table_end:
+        start, end = as_datetime(table_start), as_datetime(table_end)
+    no_dates = "Дат нет: впишите их один раз в таблицу сертификатов (кнопка «Таблица сертификатов»)"
     link = sources.chz.get((article, "cert_link"), "")
     kind = certificate_type(number)
     return {
@@ -632,6 +630,7 @@ def fill_raek_zip(
     ask_site: bool = False,
     fetch=None,
     progress=None,
+    certificates_table: Path | None = None,
 ) -> RaekResult:
     """Fill the archive. With `ask_site`, ensmas.ru is asked first about articles it has no recent answer for."""
     articles = zip_articles(zip_path)
@@ -648,6 +647,7 @@ def fill_raek_zip(
         settings=load_settings(),
         learned=load_learned(rules_path),
         site=cache.records,
+        cert_dates=table_dates(certificates_table),
     )
     output_path, report_path = output_paths(zip_path, output_dir)
     result = RaekResult(output_path, report_path, products=len(articles), codes_file=codes_path, site=site_result)

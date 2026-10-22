@@ -52,6 +52,7 @@ from .export_templates import etm_reference_path
 from .filler import FillResult, fill_template
 from .raek import RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answers, result_lines as raek_result_lines
 from .site_info import default_cache_path as site_cache_path
+from .certificates import TABLE_NAME as CERTIFICATES_TABLE, TableResult, table_lines, update_table
 from .update_ui import Updates, offer_install
 from .value_matching import import_etm_reference
 from .mapping_rules import (
@@ -113,6 +114,23 @@ class FillWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class CertificatesWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, codes_file: Path | None, table_path: Path) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.codes_file = codes_file
+        self.table_path = table_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(update_table(self.db_path, self.codes_file, self.table_path))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class RaekWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
@@ -127,8 +145,10 @@ class RaekWorker(QThread):
         rules_path: Path | None,
         site_cache: Path | None = None,
         ask_site: bool = False,
+        certificates_table: Path | None = None,
     ) -> None:
         super().__init__()
+        self.certificates_table = certificates_table
         self.db_path = db_path
         self.zip_path = zip_path
         self.output_dir = output_dir
@@ -149,6 +169,7 @@ class RaekWorker(QThread):
                     self.site_cache,
                     self.ask_site,
                     progress=self.progress.emit,
+                    certificates_table=self.certificates_table,
                 )
             )
         except Exception:
@@ -665,11 +686,15 @@ class MainWindow(QMainWindow):
         self.write_action_buttons.append(run_button)
         remember = QPushButton("Запомнить ответы из отчёта...")
         remember.clicked.connect(self.remember_raek_answers)
+        certificates = QPushButton("Таблица сертификатов")
+        certificates.setToolTip("Даты сертификатов: вписываются один раз на документ, программа ставит их всем товарам")
+        certificates.clicked.connect(self.run_certificates_table)
+        self.write_action_buttons.append(certificates)
         self.open_raek_dir_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.output_path.parent))
         self.open_raek_report_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.report_path))
         self.open_raek_dir_button.setEnabled(False)
         self.open_raek_report_button.setEnabled(False)
-        for button in (run_button, self.open_raek_dir_button, self.open_raek_report_button, remember):
+        for button in (run_button, self.open_raek_dir_button, self.open_raek_report_button, remember, certificates):
             actions.addWidget(button)
         actions.addStretch(1)
 
@@ -705,7 +730,8 @@ class MainWindow(QMainWindow):
             if ask_site:
                 self.raek_log.append("Сначала спрошу сайт ensmas.ru о товарах, которых нет в памяти: по 2–3 секунды на товар.")
             site_cache = site_cache_path(Path(work_text)) if work_text else None
-            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site)
+            table = Path(work_text) / CERTIFICATES_TABLE if work_text else None
+            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site, table)
             self.start_worker(worker, self.on_raek_done, self.on_raek_failed)
         except Exception:
             self.on_raek_failed(traceback.format_exc())
@@ -724,6 +750,29 @@ class MainWindow(QMainWindow):
         self.raek_log.append("Ошибка.")
         self.raek_log.append(details)
         QMessageBox.critical(self, "Ошибка", details)
+
+    def run_certificates_table(self) -> None:
+        try:
+            self.save_current_config()
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            work_text = self.work_dir_edit.text().strip()
+            if not work_text:
+                QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
+                return
+            codes_text = self.codes_file_edit.text().strip()
+            codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
+            self.raek_log.append("Обновляю таблицу сертификатов...")
+            worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE)
+            self.start_worker(worker, self.on_certificates_done, self.on_raek_failed)
+        except Exception:
+            self.on_raek_failed(traceback.format_exc())
+
+    def on_certificates_done(self, result: TableResult) -> None:
+        for line in table_lines(result):
+            self.raek_log.append(line)
+        self.open_path(result.path)
 
     def remember_raek_answers(self) -> None:
         work_text = self.work_dir_edit.text().strip()
