@@ -11,7 +11,10 @@ from PySide6.QtCore import QDate, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDateEdit,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -34,7 +37,7 @@ from openpyxl import load_workbook
 
 from . import __version__
 from .analyzer import analyze_template_mapping
-from .config import AppConfig, ensure_work_dirs, first_run_defaults, load_config, save_config
+from .config import AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
 from .db_utils import copy_sqlite_database
 from .etm_categories import CategoryRun, fill_new_products, latest_codes_file, new_articles_since, run_lines
@@ -50,6 +53,10 @@ from .etim_importer import (
 from .export_templates import etm_reference_path
 from .filler import FillResult, fill_template
 from .raek import RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answers, result_lines as raek_result_lines
+from .site_info import default_cache_path as site_cache_path
+from .certificates import TABLE_NAME as CERTIFICATES_TABLE, TableResult, table_lines, update_table
+from .notify import NotifySettings, find_telegram_chat, load_settings as load_notify_settings, save_settings as save_notify_settings, send_summary
+from .pm_requests import answer_lines, answers_path, import_answers, latest_assignment_file, load_assignment, request_lines, write_requests
 from .update_ui import Updates, offer_install
 from .value_matching import import_etm_reference
 from .mapping_rules import (
@@ -111,32 +118,168 @@ class FillWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
-class RaekWorker(QThread):
+class CertificatesWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, zip_path: Path, output_dir: Path, codes_file: Path | None, rules_path: Path | None) -> None:
+    def __init__(self, db_path: Path, codes_file: Path | None, table_path: Path) -> None:
         super().__init__()
+        self.db_path = db_path
+        self.codes_file = codes_file
+        self.table_path = table_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(update_table(self.db_path, self.codes_file, self.table_path))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class RaekWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(
+        self,
+        db_path: Path,
+        zip_path: Path,
+        output_dir: Path,
+        codes_file: Path | None,
+        rules_path: Path | None,
+        site_cache: Path | None = None,
+        ask_site: bool = False,
+        certificates_table: Path | None = None,
+        answers_file: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self.certificates_table = certificates_table
+        self.answers_file = answers_file
         self.db_path = db_path
         self.zip_path = zip_path
         self.output_dir = output_dir
         self.codes_file = codes_file
         self.rules_path = rules_path
+        self.site_cache = site_cache
+        self.ask_site = ask_site
 
     def run(self) -> None:
         try:
-            self.done.emit(fill_raek_zip(self.db_path, self.zip_path, self.output_dir, self.codes_file, self.rules_path))
+            self.done.emit(
+                fill_raek_zip(
+                    self.db_path,
+                    self.zip_path,
+                    self.output_dir,
+                    self.codes_file,
+                    self.rules_path,
+                    self.site_cache,
+                    self.ask_site,
+                    progress=self.progress.emit,
+                    certificates_table=self.certificates_table,
+                    answers_path=self.answers_file,
+                )
+            )
         except Exception:
             self.failed.emit(traceback.format_exc())
 
 
-def download_folders() -> list[Path]:
-    return [Path.home() / "Downloads", Path.home() / "Загрузки"]
+class SummaryWorker(QThread):
+    """Sends a run summary in the background: a slow mail server must not freeze the window."""
+
+    done = Signal(object)
+
+    def __init__(self, settings: NotifySettings, title: str, lines: list[str]) -> None:
+        super().__init__()
+        self.settings = settings
+        self.title = title
+        self.lines = lines
+
+    def run(self) -> None:
+        self.done.emit(send_summary(self.settings, self.title, self.lines))
 
 
-def codes_folders(work_dir: str) -> list[Path]:
-    """Where a new "Честный знак" file usually lands: Downloads and the work folder's input."""
-    folders = download_folders()
+class NotifyDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Сводка на почту и в Telegram")
+        settings = load_notify_settings()
+        self.after_run = QCheckBox("Отправлять сводку после заполнения РАЭК и новинок ЭТМ")
+        self.after_run.setChecked(settings.send_after_run)
+        self.email_to = QLineEdit(settings.email_to)
+        self.smtp_host = QLineEdit(settings.smtp_host)
+        self.smtp_host.setPlaceholderText("например, smtp.yandex.ru или smtp.mail.ru")
+        self.smtp_port = QLineEdit(str(settings.smtp_port))
+        self.smtp_user = QLineEdit(settings.smtp_user)
+        self.smtp_user.setPlaceholderText("почта, с которой отправлять")
+        self.smtp_password = QLineEdit(settings.smtp_password)
+        self.smtp_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.smtp_password.setPlaceholderText("пароль приложения из настроек почты")
+        self.telegram_token = QLineEdit(settings.telegram_token)
+        self.telegram_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.telegram_token.setPlaceholderText("токен бота от @BotFather")
+        self.telegram_chat = QLineEdit(settings.telegram_chat_id)
+        find_chat = QPushButton("Найти чат")
+        find_chat.setToolTip("Сначала напишите боту любое сообщение в Telegram")
+        find_chat.clicked.connect(self.find_chat)
+        test = QPushButton("Отправить пробную сводку")
+        test.clicked.connect(self.send_test)
+
+        form = QFormLayout()
+        form.addRow(self.after_run)
+        form.addRow(QLabel("<b>Почта</b>"))
+        form.addRow("Кому", self.email_to)
+        form.addRow("Почтовый сервер", self.smtp_host)
+        form.addRow("Порт (465 или 587)", self.smtp_port)
+        form.addRow("С какой почты", self.smtp_user)
+        form.addRow("Пароль", self.smtp_password)
+        form.addRow(QLabel("<b>Telegram</b>"))
+        form.addRow("Токен бота", self.telegram_token)
+        chat_row = QHBoxLayout()
+        chat_row.addWidget(self.telegram_chat)
+        chat_row.addWidget(find_chat)
+        form.addRow("Чат", chat_row)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(test)
+        layout.addWidget(buttons)
+
+    def settings(self) -> NotifySettings:
+        port = self.smtp_port.text().strip()
+        return NotifySettings(
+            send_after_run=self.after_run.isChecked(),
+            email_to=self.email_to.text().strip(),
+            smtp_host=self.smtp_host.text().strip(),
+            smtp_port=int(port) if port.isdigit() else 465,
+            smtp_user=self.smtp_user.text().strip(),
+            smtp_password=self.smtp_password.text(),
+            telegram_token=self.telegram_token.text().strip(),
+            telegram_chat_id=self.telegram_chat.text().strip(),
+        )
+
+    def find_chat(self) -> None:
+        try:
+            chat_id, who = find_telegram_chat(self.telegram_token.text())
+        except Exception as exc:
+            QMessageBox.warning(self, "Чат не найден", str(exc))
+            return
+        self.telegram_chat.setText(chat_id)
+        QMessageBox.information(self, "Чат найден", f"Сводки будут приходить в чат: {who or chat_id}")
+
+    def send_test(self) -> None:
+        report = send_summary(self.settings(), "CHINT ETM MDM: пробная сводка", ["Если вы это читаете, сводки настроены."])
+        QMessageBox.information(self, "Пробная сводка", "\n".join(report))
+
+    def save(self) -> None:
+        save_notify_settings(self.settings())
+        self.accept()
+
+
+def codes_folders(work_dir: str, inbox_dir: str = "") -> list[Path]:
+    """Where a new "Честный знак" file usually lands: the inbox folder, Downloads and the work folder's input."""
+    folders = incoming_folders(inbox_dir)
     if work_dir:
         folders.append(Path(work_dir) / "input")
     return folders
@@ -374,6 +517,8 @@ class MainWindow(QMainWindow):
         self.backup_file_edit = QLineEdit()
         self.class_templates_edit = QLineEdit(self.config.class_templates_dir or self.default_class_templates_dir())
         self.codes_file_edit = QLineEdit(self.config.codes_file)
+        self.inbox_dir_edit = QLineEdit(self.config.inbox_dir)
+        self.inbox_dir_edit.setPlaceholderText("например, общая папка RDP; пусто — только «Загрузки»")
         self.new_since_edit = QDateEdit()
         self.new_since_edit.setCalendarPopup(True)
         self.new_since_edit.setDisplayFormat("dd.MM.yyyy")
@@ -386,12 +531,15 @@ class MainWindow(QMainWindow):
         self.open_new_products_dir_button = QPushButton("Открыть папку с файлами")
         self.open_new_products_summary_button = QPushButton("Открыть сводку")
         self.raek_zip_edit = QLineEdit()
-        self.raek_zip_edit.setPlaceholderText("самый свежий архив РАЭК из «Загрузок»")
+        self.raek_zip_edit.setPlaceholderText("самый свежий архив РАЭК из папки входящих или «Загрузок»")
+        self.raek_site_check = QCheckBox("Сначала взять ссылки, картинки и сертификаты с сайта ensmas.ru (нужен интернет)")
+        self.raek_site_check.setChecked(True)
         self.raek_log = QTextEdit()
         self.raek_log.setReadOnly(True)
         self.last_raek_result: RaekResult | None = None
         self.open_raek_dir_button = QPushButton("Открыть папку с архивом")
         self.open_raek_report_button = QPushButton("Открыть отчёт")
+        self.pm_request_button = QPushButton("Запросить у продактов")
         self.coverage_table = QTableWidget(0, 8)
         self.rules_table = QTableWidget(0, 8)
         self.last_output_path: Path | None = None
@@ -447,6 +595,8 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda: self.on_worker_finished(worker))
         worker.done.connect(done_handler)
         worker.failed.connect(failed_handler)
+        if isinstance(worker, RaekWorker):
+            worker.progress.connect(self.raek_log.append)
         if isinstance(worker, PriceImportWorker):
             worker.progress.connect(self.price_log.append)
             worker.downloaded.connect(self.on_price_downloaded)
@@ -491,6 +641,12 @@ class MainWindow(QMainWindow):
         choose_db.clicked.connect(self.choose_db)
         form.addWidget(choose_db, 1, 2)
 
+        form.addWidget(QLabel("Папка входящих"), 3, 0)
+        form.addWidget(self.inbox_dir_edit, 3, 1)
+        choose_inbox = QPushButton("Выбрать...")
+        choose_inbox.clicked.connect(self.choose_inbox_dir)
+        form.addWidget(choose_inbox, 3, 2)
+
         form.addWidget(QLabel("Бэкап для отката"), 2, 0)
         form.addWidget(self.backup_file_edit, 2, 1)
         choose_backup = QPushButton("Выбрать...")
@@ -510,6 +666,9 @@ class MainWindow(QMainWindow):
         buttons.addWidget(backup_button)
         buttons.addWidget(self.restore_button)
         buttons.addWidget(refresh_button)
+        notify_button = QPushButton("Сводка на почту и в Telegram...")
+        notify_button.clicked.connect(lambda: NotifyDialog(self).exec())
+        buttons.addWidget(notify_button)
 
         layout.addWidget(setup_box)
         layout.addLayout(buttons)
@@ -591,7 +750,7 @@ class MainWindow(QMainWindow):
         choose_codes = QPushButton("Выбрать...")
         choose_codes.clicked.connect(self.choose_codes_file)
         codes_row.addWidget(choose_codes)
-        form.addRow("Файл ЧЗ с кодами (самый свежий из «Загрузок» берётся сам)", codes_row)
+        form.addRow("Файл ЧЗ с кодами (самый свежий из папки входящих или «Загрузок» берётся сам)", codes_row)
 
         actions = QHBoxLayout()
         run_button = QPushButton("Сформировать новинки")
@@ -616,7 +775,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.addWidget(
             QLabel(
-                "Сохраните архив от менеджера РАЭК в «Загрузки» и нажмите кнопку. Программа заполнит пустые клетки\n"
+                "Сохраните архив от менеджера РАЭК в папку входящих или в «Загрузки» и нажмите кнопку. Программа заполнит пустые клетки\n"
                 "и положит рядом готовый архив для ответа и отчёт: что проверить и чего нет в базе. Заполненное РАЭК не трогает."
             )
         )
@@ -628,6 +787,7 @@ class MainWindow(QMainWindow):
         choose.clicked.connect(self.choose_raek_zip)
         zip_row.addWidget(choose)
         form.addRow("Архив РАЭК", zip_row)
+        form.addRow("", self.raek_site_check)
 
         actions = QHBoxLayout()
         run_button = QPushButton("Заполнить архив РАЭК")
@@ -635,22 +795,37 @@ class MainWindow(QMainWindow):
         self.write_action_buttons.append(run_button)
         remember = QPushButton("Запомнить ответы из отчёта...")
         remember.clicked.connect(self.remember_raek_answers)
+        certificates = QPushButton("Таблица сертификатов")
+        certificates.setToolTip("Даты сертификатов: вписываются один раз на документ, программа ставит их всем товарам")
+        certificates.clicked.connect(self.run_certificates_table)
+        self.write_action_buttons.append(certificates)
+        self.pm_request_button.setToolTip("Excel-запрос каждому продакту о том, чего нет в базе, и черновик письма с ним")
+        self.pm_request_button.clicked.connect(self.write_pm_requests)
+        self.pm_request_button.setEnabled(False)
+        pm_answers = QPushButton("Принять ответы продактов...")
+        pm_answers.setToolTip("Файлы-запросы, которые продакты прислали обратно: ответы сразу идут в заполнение")
+        pm_answers.clicked.connect(self.import_pm_answers)
         self.open_raek_dir_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.output_path.parent))
         self.open_raek_report_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.report_path))
         self.open_raek_dir_button.setEnabled(False)
         self.open_raek_report_button.setEnabled(False)
-        for button in (run_button, self.open_raek_dir_button, self.open_raek_report_button, remember):
+        for button in (run_button, self.open_raek_dir_button, self.open_raek_report_button, remember, certificates):
             actions.addWidget(button)
         actions.addStretch(1)
+        pm_actions = QHBoxLayout()
+        for button in (self.pm_request_button, pm_answers):
+            pm_actions.addWidget(button)
+        pm_actions.addStretch(1)
 
         layout.addWidget(box)
         layout.addLayout(actions)
+        layout.addLayout(pm_actions)
         layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.raek_log, stretch=1)
         return root
 
     def choose_raek_zip(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Архив от менеджера РАЭК", str(Path.home() / "Downloads"), "ZIP (*.zip)")
+        path, _ = QFileDialog.getOpenFileName(self, "Архив от менеджера РАЭК", str(self.incoming()[0]), "ZIP (*.zip)")
         if path:
             self.raek_zip_edit.setText(path)
 
@@ -661,17 +836,23 @@ class MainWindow(QMainWindow):
             if db_path is None:
                 return
             zip_text = self.raek_zip_edit.text().strip()
-            zip_path = Path(zip_text) if zip_text else latest_raek_zip(download_folders())
+            zip_path = Path(zip_text) if zip_text else latest_raek_zip(self.incoming())
             if zip_path is None or not zip_path.is_file():
-                QMessageBox.warning(self, "Нет архива", "Сохраните архив РАЭК в «Загрузки» или выберите его кнопкой «Выбрать...».")
+                QMessageBox.warning(self, "Нет архива", "Сохраните архив РАЭК в папку входящих или в «Загрузки», или выберите его кнопкой «Выбрать...».")
                 return
             work_text = self.work_dir_edit.text().strip()
             output_dir = (Path(work_text) / "output" if work_text else zip_path.parent) / f"раэк_{dt.date.today().isoformat()}"
             rules_path = ensure_default_rules(Path(work_text)) if work_text else None
             codes_text = self.codes_file_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
+            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
+            ask_site = self.raek_site_check.isChecked()
             self.raek_log.append(f"Заполняю {zip_path.name}...")
-            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path)
+            if ask_site:
+                self.raek_log.append("Сначала спрошу сайт ensmas.ru о товарах, которых нет в памяти: по 2–3 секунды на товар.")
+            site_cache = site_cache_path(Path(work_text)) if work_text else None
+            table = Path(work_text) / CERTIFICATES_TABLE if work_text else None
+            answers = answers_path(Path(work_text)) if work_text else None
+            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site, table, answers)
             self.start_worker(worker, self.on_raek_done, self.on_raek_failed)
         except Exception:
             self.on_raek_failed(traceback.format_exc())
@@ -680,16 +861,94 @@ class MainWindow(QMainWindow):
         self.last_raek_result = result
         self.open_raek_dir_button.setEnabled(True)
         self.open_raek_report_button.setEnabled(True)
+        self.pm_request_button.setEnabled(bool(result.needs))
         lines = raek_result_lines(result)
         self.raek_log.append("Готово.")
         for line in lines:
             self.raek_log.append(line)
+        self.send_run_summary("CHINT: архив РАЭК заполнен", lines, self.raek_log)
         QMessageBox.information(self, "Архив РАЭК готов", "\n".join(lines))
 
     def on_raek_failed(self, details: str) -> None:
         self.raek_log.append("Ошибка.")
         self.raek_log.append(details)
         QMessageBox.critical(self, "Ошибка", details)
+
+    def run_certificates_table(self) -> None:
+        try:
+            self.save_current_config()
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            work_text = self.work_dir_edit.text().strip()
+            if not work_text:
+                QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
+                return
+            codes_text = self.codes_file_edit.text().strip()
+            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
+            self.raek_log.append("Обновляю таблицу сертификатов...")
+            worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE)
+            self.start_worker(worker, self.on_certificates_done, self.on_raek_failed)
+        except Exception:
+            self.on_raek_failed(traceback.format_exc())
+
+    def on_certificates_done(self, result: TableResult) -> None:
+        for line in table_lines(result):
+            self.raek_log.append(line)
+        self.open_path(result.path)
+
+    def write_pm_requests(self) -> None:
+        result = self.last_raek_result
+        work_text = self.work_dir_edit.text().strip()
+        if result is None or not work_text:
+            return
+        work = Path(work_text)
+        try:
+            assignment_file = latest_assignment_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()) + [work])
+            if assignment_file is None:
+                QMessageBox.warning(
+                    self,
+                    "Нет файла закрепления",
+                    "Положите «Закрепление ПМ.xlsx» в папку входящих, «Загрузки» или в рабочую папку: по нему программа решает, кому из продактов писать.",
+                )
+                return
+            output = work / "output" / f"запросы_продактам_{dt.date.today().isoformat()}"
+            requests = write_requests(
+                result.needs, load_assignment(assignment_file), work, output, f"Заполняем данные для РАЭК ({result.output_path.stem})"
+            )
+        except Exception:
+            self.on_raek_failed(traceback.format_exc())
+            return
+        lines = request_lines(requests) or ["Новых вопросов нет."]
+        if requests.files:
+            lines.append("Откройте черновики писем (.eml) в папке и отправьте. Ответы примите кнопкой «Принять ответы продактов».")
+        for line in lines:
+            self.raek_log.append(line)
+        if requests.files:
+            self.open_path(output)
+        QMessageBox.information(self, "Запросы продактам", "\n".join(lines))
+
+    def import_pm_answers(self) -> None:
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Файлы-запросы с ответами продактов", str(self.incoming()[0]), "Excel (*.xlsx)")
+        if not paths:
+            return
+        lines = []
+        for path in paths:
+            try:
+                lines += answer_lines(import_answers(Path(path), Path(work_text)))
+            except ValueError as error:
+                lines.append(str(error))
+            except Exception:
+                self.on_raek_failed(traceback.format_exc())
+                return
+        lines.append("Ответы будут использованы при следующем заполнении архива РАЭК.")
+        for line in lines:
+            self.raek_log.append(line)
+        QMessageBox.information(self, "Ответы продактов", "\n".join(lines))
 
     def remember_raek_answers(self) -> None:
         work_text = self.work_dir_edit.text().strip()
@@ -932,7 +1191,7 @@ class MainWindow(QMainWindow):
                 return
             codes_text = self.codes_file_edit.text().strip()
             work_text = self.work_dir_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
+            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             base = Path(work_text) / "output" if work_text else Path(templates_text).parent
             since = self.new_since_edit.date().toPython()
             output_dir = base / f"новинки_{dt.date.today().isoformat()}"
@@ -965,6 +1224,7 @@ class MainWindow(QMainWindow):
         self.new_products_log.append("Готово.")
         for line in lines:
             self.new_products_log.append(line)
+        self.send_run_summary("CHINT: новинки ЭТМ готовы", lines, self.new_products_log)
         QMessageBox.information(self, "Новинки готовы", "\n".join(lines))
 
     def on_new_products_failed(self, details: str) -> None:
@@ -1125,6 +1385,23 @@ class MainWindow(QMainWindow):
             self.mapping_review_path_edit.setText(path)
             self.load_mapping_review()
 
+    def send_run_summary(self, title: str, lines: list[str], log: QTextEdit) -> None:
+        settings = load_notify_settings()
+        if not settings.send_after_run:
+            return
+        self.summary_worker = SummaryWorker(settings, title, lines)
+        self.summary_worker.done.connect(lambda report: [log.append(line) for line in report])
+        self.summary_worker.start()
+
+    def incoming(self) -> list[Path]:
+        return incoming_folders(self.inbox_dir_edit.text().strip())
+
+    def choose_inbox_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Папка, куда приходят файлы (ЧЗ, архивы РАЭК, ответы продактов)", self.inbox_dir_edit.text())
+        if path:
+            self.inbox_dir_edit.setText(path)
+            self.save_current_config()
+
     def save_current_config(self) -> None:
         self.config = AppConfig(
             work_dir=self.work_dir_edit.text().strip(),
@@ -1132,6 +1409,7 @@ class MainWindow(QMainWindow):
             class_templates_dir=self.class_templates_edit.text().strip(),
             codes_file=self.codes_file_edit.text().strip(),
             last_new_since=self.config.last_new_since,
+            inbox_dir=self.inbox_dir_edit.text().strip(),
         )
         if self.config.work_path:
             ensure_work_dirs(self.config.work_path)

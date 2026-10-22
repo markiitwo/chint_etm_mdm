@@ -25,5 +25,21 @@ class FirstRunDefaultsTests(unittest.TestCase):
             self.assertEqual("", first_run_defaults(AppConfig(), Path(tmp)).db_path)
 
 
+
+
+class InboxFolderTests(unittest.TestCase):
+    def test_inbox_first_then_downloads(self) -> None:
+        from chint_etm_mdm.config import incoming_folders
+
+        home = Path("/home/u")
+        self.assertEqual([home / "Downloads", home / "Загрузки"], incoming_folders("", home))
+        self.assertEqual([Path("/mnt/rdp"), home / "Downloads", home / "Загрузки"], incoming_folders("/mnt/rdp", home))
+
+    def test_inbox_kept_by_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = first_run_defaults(AppConfig(inbox_dir="/mnt/rdp"), Path(tmp))
+        self.assertEqual("/mnt/rdp", config.inbox_dir)
+
+
 if __name__ == "__main__":
     unittest.main()

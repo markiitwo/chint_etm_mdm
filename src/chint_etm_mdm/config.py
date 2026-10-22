@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 
 from .atomic_files import atomic_write_json
@@ -18,6 +18,7 @@ class AppConfig:
     class_templates_dir: str = ""
     codes_file: str = ""
     last_new_since: str = ""
+    inbox_dir: str = ""  # where incoming files land: the RDP shared folder now, the company share later
 
     @property
     def work_path(self) -> Path | None:
@@ -48,6 +49,7 @@ def load_config() -> AppConfig:
         class_templates_dir=str(raw.get("class_templates_dir") or ""),
         codes_file=str(raw.get("codes_file") or ""),
         last_new_since=str(raw.get("last_new_since") or ""),
+        inbox_dir=str(raw.get("inbox_dir") or ""),
     )
 
 
@@ -65,7 +67,14 @@ def first_run_defaults(config: AppConfig, home: Path | None = None) -> AppConfig
             home / folder / DB_FILE_NAME for folder in ("Downloads", "Загрузки", "Documents", "Документы", "")
         ]
         db_path = next((str(path) for path in candidates if path.is_file()), "")
-    return AppConfig(work_dir, db_path, config.class_templates_dir, config.codes_file, config.last_new_since)
+    return replace(config, work_dir=work_dir, db_path=db_path)
+
+
+def incoming_folders(inbox_dir: str = "", home: Path | None = None) -> list[Path]:
+    """Where new files from colleagues and partners are looked for: the inbox folder first, then Downloads."""
+    home = home or Path.home()
+    folders = [Path(inbox_dir)] if inbox_dir else []
+    return folders + [home / "Downloads", home / "Загрузки"]
 
 
 def save_config(config: AppConfig) -> None:

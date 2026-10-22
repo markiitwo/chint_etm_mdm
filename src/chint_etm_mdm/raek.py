@@ -31,9 +31,13 @@ from openpyxl import Workbook, load_workbook
 
 from . import partners
 from .atomic_files import atomic_write_json
+from .certificates import is_eaeu_document, number_key, table_dates
 from .db import ProductRecord, connect, fetch_products
 from .etm_categories import load_codes_file
 from .filler import normalize_article
+from .pm_requests import NAME_QUESTION, Need, load_answers
+from .site_info import FOUND as SITE_FOUND
+from .site_info import SiteCache, SiteRecord, SiteResult, site_lines, update_site_cache
 from .upload_names import series_names
 from .value_matching import (
     LOGICAL_NO,
@@ -126,6 +130,8 @@ class RaekResult:
     names: list[list[object]] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)
     codes_file: Path | None = None
+    site: SiteResult | None = None
+    needs: list[Need] = field(default_factory=list)  # what to ask product managers
 
 
 @dataclass(frozen=True)
@@ -144,6 +150,9 @@ class Sources:
     coded: dict[str, dict[str, str]]  # article -> ETIM feature code -> value (ETIM workbook import)
     settings: dict
     learned: dict
+    site: dict[str, SiteRecord] = field(default_factory=dict)  # article -> what ensmas.ru answered
+    cert_dates: dict[str, tuple] = field(default_factory=dict)  # document key -> (from, to) from the certificates table
+    answers: dict[tuple[str, str], str] = field(default_factory=dict)  # (article, feature code or column) -> manager's answer
     chz_articles: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -267,24 +276,17 @@ def certificate_type(number: str) -> str:
     return ""
 
 
-def is_eaeu_document(number: str) -> bool:
-    """A certificate or declaration of the Eurasian union (ЕАЭС/ТС): confirmation is mandatory.
-
-    The ЧЗ file holds other things in the same column too: "не требуется" and the numbers
-    of refusal letters ("ОР-25/06-0035", "30.04.2026-21ССП", "24/12/0140").
-    """
-    latin = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
-    compact = number.upper().translate(latin)
-    return "ЕАЭС" in compact or bool(re.match(r"\s*ТС\b", compact))
-
-
 def mandatory_certification(article: str, sources: Sources) -> Cell:
     """"Подлежит обязательному подтверждению соответствия" from the ЧЗ file's "Сертификат 1" column."""
+    document = sources.chz.get((article, "cert_number"), "")
+    if not document:
+        site = site_record(article, sources)
+        if site and is_eaeu_document(site.cert_number):
+            return Cell(CHECK, "Да", f"В файле ЧЗ данных нет, на сайте ensmas.ru у товара {site.cert_number}")
     if not sources.chz:
         return Cell(EMPTY, note="Нет файла ЧЗ: обязательна ли сертификация, неизвестно")
     if article not in sources.chz_articles:
         return Cell(EMPTY, note="Артикула нет в файле ЧЗ: обязательна ли сертификация, неизвестно")
-    document = sources.chz.get((article, "cert_number"), "")
     if not document:
         return Cell(EMPTY, note="В файле ЧЗ у артикула не указан сертификат")
     if is_eaeu_document(document):
@@ -294,11 +296,35 @@ def mandatory_certification(article: str, sources: Sources) -> Cell:
     return Cell(CHECK, "Нет", f"В файле ЧЗ вместо сертификата ЕАЭС документ «{document}», похоже на отказное письмо")
 
 
+def site_record(article: str, sources: Sources) -> SiteRecord | None:
+    record = sources.site.get(article)
+    return record if record and record.status == SITE_FOUND else None
+
+
+def site_missing_note(article: str, sources: Sources, what: str) -> str:
+    record = sources.site.get(article)
+    if record is None:
+        return f"{what}: сайт ensmas.ru по этому товару ещё не проверялся"
+    if record.status != SITE_FOUND:
+        return f"{what}: {record.note or 'товара нет на сайте ensmas.ru'}"
+    return f"{what}: на странице товара на ensmas.ru этого нет"
+
+
+def site_column(article: str, sources: Sources, attribute: str, what: str) -> Cell:
+    record = site_record(article, sources)
+    value = getattr(record, attribute) if record else ""
+    return Cell(FILLED, value) if value else Cell(EMPTY, note=site_missing_note(article, sources, what))
+
+
 def same_certificate(left: str, right: str) -> bool:
     def norm(value: str) -> str:
         return re.sub(r"[^0-9A-ZА-Я]", "", value.upper().replace("C", "С").replace("A", "А").replace("B", "В").replace("H", "Н").replace("P", "Р"))
 
     return bool(left and right) and norm(left) == norm(right)
+
+
+def as_datetime(value: dt.date | None) -> dt.datetime | None:
+    return dt.datetime.combine(value, dt.time()) if value else None
 
 
 def as_date(value: str) -> dt.datetime | None:
@@ -322,6 +348,10 @@ def ean13(product: ProductRecord, chz_value: str) -> Cell:
     return Cell(EMPTY, note="Нет штрих-кода ни в файле ЧЗ, ни в базе")
 
 
+ASKED_COLUMNS = {canonical(name) for name in ("Штрих-код EAN", "Код ТН ВЭД", "Код ОКПД2", "Серия")}
+NO_VALUE = "В базе нет значения"
+
+
 def column_value(header: str, article: str, product: ProductRecord, sources: Sources) -> Cell | None:
     """Plain (non-ETIM) columns. None for a column the program does not know."""
     chz = sources.chz
@@ -331,6 +361,9 @@ def column_value(header: str, article: str, product: ProductRecord, sources: Sou
         return Cell(FILLED, constants[key])
     if key in {canonical(name) for name in sources.settings.get("leave_empty", [])}:
         return Cell(FILLED, None)
+    answer = sources.answers.get((article, key), "")
+    if key in ASKED_COLUMNS and answer:
+        return Cell(FILLED, answer, "Ответ продакта")
     if key == canonical("Штрих-код EAN"):
         return ean13(product, chz.get((article, "ean"), ""))
     if key == canonical("Код ТН ВЭД"):
@@ -351,6 +384,10 @@ def column_value(header: str, article: str, product: ProductRecord, sources: Sou
         if mark in {"no", "n", "нет"}:
             return Cell(FILLED, "Нет")
         return Cell(EMPTY, note="В файле ЧЗ нет отметки о маркировке")
+    if key == canonical("Изображение"):
+        return site_column(article, sources, "image_url", "Нет картинки")
+    if key == canonical("Ссылка на сайте поставщика"):
+        return site_column(article, sources, "url", "Нет ссылки")
     cert = certificate(article, product, sources)
     if key in cert:
         return cert[key]
@@ -365,15 +402,20 @@ def certificate(article: str, product: ProductRecord, sources: Sources) -> dict[
     in_chz = sources.chz.get((article, "cert_number"), "")
     from_chz = in_chz if is_eaeu_document(in_chz) else ""
     from_db = next((attributes[name] for name in CERT_NUMBER_ATTRIBUTES if attributes.get(name)), "")
-    number = from_chz or from_db
+    site = site_record(article, sources)
+    from_site = site.cert_number if site and is_eaeu_document(site.cert_number) and not in_chz else ""
+    number = from_chz or from_db or from_site
     if not number:
         reason = f"Сертификата ЕАЭС нет: в файле ЧЗ «{in_chz}»" if in_chz else "Нет номера сертификата ни в файле ЧЗ, ни в базе"
         missing = Cell(EMPTY, note=reason)
         return {canonical(name): missing for name in ("Тип сертификата", "Номер сертификата", "Сертификат от", "Сертификат до", "Ссылка на реестр")}
+    table_start, table_end = sources.cert_dates.get(number_key(number), (None, None))
     dates_match = not from_chz or not from_db or same_certificate(from_chz, from_db)
     start = as_date(next((attributes[name] for name in CERT_FROM_ATTRIBUTES if attributes.get(name)), "")) if dates_match else None
     end = as_date(next((attributes[name] for name in CERT_TO_ATTRIBUTES if attributes.get(name)), "")) if dates_match else None
-    no_dates = "Дат нет в базе" if dates_match else "В базе даты другого документа, чем в файле ЧЗ"
+    if table_start or table_end:
+        start, end = as_datetime(table_start), as_datetime(table_end)
+    no_dates = "Дат нет: впишите их один раз в таблицу сертификатов (кнопка «Таблица сертификатов»)"
     link = sources.chz.get((article, "cert_link"), "")
     kind = certificate_type(number)
     return {
@@ -435,7 +477,11 @@ def feature_value(feature: Feature, product: ProductRecord, sources: Sources, ma
         if own and kind_needed not in own.split("/"):
             return Cell(FILLED, "-...-")
     if not raw or looks_like_file(raw):
-        return Cell(EMPTY, note="В базе нет значения" + (f" (искали «{source}»)" if source else ""))
+        answer = sources.answers.get((article, feature.code), "")
+        if not answer:
+            return Cell(EMPTY, note=NO_VALUE + (f" (искали «{source}»)" if source else ""))
+        cell = format_feature(feature, answer, sources)
+        return Cell(cell.status, cell.value, "Ответ продакта" + (f"; {cell.note}" if cell.note else ""))
     cell = format_feature(feature, raw, sources)
     if cell.status == FILLED and not sure:
         return Cell(CHECK, cell.value, f"Взято из «{source}» по похожему названию")
@@ -531,6 +577,10 @@ def fill_sheet(file_name: str, sheet, sources: Sources, result: RaekResult) -> b
                 if isinstance(cell.value, dt.datetime):
                     target.number_format = "DD.MM.YYYY"
             setattr(result, cell.status, getattr(result, cell.status) + 1)
+            if product is not None and cell.status == EMPTY:
+                need = manager_need(article, text(sheet.cell(row, name_col).value), header, features.get(col), cell, sources)
+                if need:
+                    result.needs.append(need)
             if cell.status != FILLED or cell.note:
                 result.rows.append(
                     RaekRow(
@@ -551,7 +601,32 @@ def fill_sheet(file_name: str, sheet, sources: Sources, result: RaekResult) -> b
             users = sum(1 for product in products if (product.attributes or {}).get(attribute))
             examples = sorted({(product.attributes or {}).get(attribute, "") for product in products} - {""})[:3]
             result.names.append([sheet.title, feature.code, feature.name, attribute, users, "; ".join(examples), ""])
+            series = Counter(series_of(product.article, sources) for product in products if (product.attributes or {}).get(attribute))
+            result.needs.append(
+                Need(
+                    "",
+                    f"Характеристика РАЭК «{feature.name}» — в базе «{attribute}», примеры: {'; '.join(examples)}",
+                    series.most_common(1)[0][0] if series else "",
+                    f"{NAME_QUESTION}{feature.code}:{attribute}",
+                    "Это одна и та же характеристика?",
+                )
+            )
     return True
+
+
+def series_of(article: str, sources: Sources) -> str:
+    return sources.series.get(article) or sources.chz.get((article, "series"), "")
+
+
+def manager_need(article: str, name: str, header: str, feature: Feature | None, cell: Cell, sources: Sources) -> Need | None:
+    """An empty cell a product manager can answer: a feature the database lacks, or a code nobody has."""
+    if feature is not None:
+        if not cell.note.startswith(NO_VALUE):
+            return None
+        return Need(article, name, series_of(article, sources), feature.code, feature.name, feature.kind, feature.allowed)
+    if canonical(header) not in ASKED_COLUMNS:
+        return None
+    return Need(article, name, series_of(article, sources), canonical(header), header)
 
 
 def zip_articles(path: Path) -> list[str]:
@@ -594,8 +669,20 @@ def fill_raek_zip(
     output_dir: Path,
     codes_path: Path | None = None,
     rules_path: Path | None = None,
+    site_cache: Path | None = None,
+    ask_site: bool = False,
+    fetch=None,
+    progress=None,
+    certificates_table: Path | None = None,
+    answers_path: Path | None = None,
 ) -> RaekResult:
+    """Fill the archive. With `ask_site`, ensmas.ru is asked first about articles it has no recent answer for."""
     articles = zip_articles(zip_path)
+    cache = SiteCache(site_cache)
+    site_result = None
+    if ask_site:
+        options = {"fetch": fetch} if fetch else {}
+        site_result = update_site_cache(cache, articles, progress=progress, **options)
     sources = Sources(
         products=fetch_products(db_path, articles),
         chz=load_codes_file(codes_path, CHZ_HEADERS) if codes_path else {},
@@ -603,9 +690,12 @@ def fill_raek_zip(
         coded=coded_attributes(db_path, articles),
         settings=load_settings(),
         learned=load_learned(rules_path),
+        site=cache.records,
+        cert_dates=table_dates(certificates_table),
+        answers=load_answers(answers_path),
     )
     output_path, report_path = output_paths(zip_path, output_dir)
-    result = RaekResult(output_path, report_path, products=len(articles), codes_file=codes_path)
+    result = RaekResult(output_path, report_path, products=len(articles), codes_file=codes_path, site=site_result)
     with zipfile.ZipFile(zip_path) as source, zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as target:
         for info in source.infolist():
             data = source.read(info)
@@ -732,8 +822,12 @@ def result_lines(result: RaekResult) -> list[str]:
         lines.append(f"  нечем заполнить {count}: {note}")
     if result.names:
         lines.append(f"Проверьте лист «Названия» в отчёте ({len(result.names)} строк): да/нет, и программа запомнит.")
+    if result.needs:
+        lines.append(f"Можно спросить у продактов: {len(result.needs)} поз. (кнопка «Запросить у продактов»).")
     if result.codes_file:
         lines.append(f"Коды и штрих-коды взяты из файла {result.codes_file.name}.")
+    if result.site:
+        lines.extend(site_lines(result.site))
     lines.append(f"Архив для РАЭК: {result.output_path.name}")
     lines.append(f"Отчёт: {result.report_path.name}")
     return lines
