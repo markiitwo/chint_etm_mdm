@@ -1879,7 +1879,10 @@ class MainWindow(QMainWindow):
         for line in etim_result_lines(result):
             self.price_log.append(line)
         self.refresh_database_status()
-        QMessageBox.information(self, "ETIM импортирован", "\n".join(etim_result_lines(result)))
+        if result.found_articles == 0 or result.report_warning:
+            QMessageBox.warning(self, "ETIM импортирован с замечаниями", "\n".join(etim_result_lines(result)))
+        else:
+            QMessageBox.information(self, "ETIM импортирован", "\n".join(etim_result_lines(result)))
 
     def on_etim_decisions_done(self, result: EtimDecisionApplyResult) -> None:
         self.last_etim_report_path = result.report_path

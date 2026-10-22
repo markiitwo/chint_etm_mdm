@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -18,6 +19,8 @@ from .price_importer import backup_database
 
 
 ARTICLE_HINT = "артикул"
+# "Артикул аналога", "Заменяет артикул" and the like name another product, not the row's own one.
+OTHER_ARTICLE_HINTS = ("аналог", "замен", "совмест", "старый", "предыдущ", "комплект", "аксессуар")
 DIMENSION_HINTS = {
     "length_mm": ("глубин", "длин"),
     "width_mm": ("ширин",),
@@ -48,6 +51,27 @@ class EtimArticleData:
     dimensions: dict[str, float]
     dimension_sources: dict[str, str]
     attributes: dict[str, str]
+    # Where each value came from when a product is spread over several sheets.
+    dimension_sheets: dict[str, str] = field(default_factory=dict)
+    attribute_sheets: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FileConflict:
+    """One product with different values for the same field in the ETIM file itself."""
+
+    article: str
+    field: str
+    values: tuple[tuple[str, str, int], ...]  # (value, sheet, row)
+    kept: str  # what went to the base, empty when nothing did
+
+
+@dataclass
+class ScanNotes:
+    """What the scan saw besides the products' data: shown in the report, never written to the base."""
+
+    conflicts: list[FileConflict] = field(default_factory=list)
+    unknown_articles: dict[str, str] = field(default_factory=dict)  # article -> first sheet
 
 
 @dataclass(frozen=True)
@@ -63,6 +87,10 @@ class EtimImportResult:
     dimension_values_written: int
     dimension_conflicts: int
     attributes_written: int
+    file_conflicts: int = 0
+    unknown_articles: int = 0
+    # Set when the base was updated but the report could not take its final name.
+    report_warning: str = ""
 
 
 @dataclass(frozen=True)
@@ -254,11 +282,13 @@ def find_overall_dimension_column(headers: list[object]) -> int | None:
     return None
 
 
-def find_header_row(rows: list[tuple[object, ...]], row_index: int, column_index: int) -> int | None:
-    for index in range(row_index - 1, -1, -1):
-        if column_index < len(rows[index]) and ARTICLE_HINT in normalize_text(rows[index][column_index]).casefold():
-            return index
-    return None
+def is_article_header(value: object) -> bool:
+    return ARTICLE_HINT in normalize_text(value).casefold()
+
+
+def is_own_article_header(value: object) -> bool:
+    text = normalize_text(value).casefold()
+    return ARTICLE_HINT in text and not any(hint in text for hint in OTHER_ARTICLE_HINTS)
 
 
 def collect_attributes(headers: list[object], row: tuple[object, ...], article_column: int) -> dict[str, str]:
@@ -275,71 +305,147 @@ def collect_attributes(headers: list[object], row: tuple[object, ...], article_c
     return attrs
 
 
-def scan_etim_workbook(etim_path: Path, articles: Iterable[str]) -> dict[str, EtimArticleData]:
+def read_row_dimensions(headers: list[object], row: tuple[object, ...]) -> tuple[dict[str, float], dict[str, str]]:
+    dimensions: dict[str, float] = {}
+    dimension_sources: dict[str, str] = {}
+    overall_column = find_overall_dimension_column(headers)
+
+    # Separately labelled columns are exact; the overall chain only fills gaps.
+    for key, hints in DIMENSION_HINTS.items():
+        column = find_dimension_column(
+            headers,
+            hints,
+            DIMENSION_EXCLUDE_HINTS.get(key, ()),
+            skip_columns=() if overall_column is None else (overall_column,),
+        )
+        if column is None or column >= len(row):
+            continue
+        parsed_value = parse_dimension_cell(row[column], headers[column], key)
+        if parsed_value is not None:
+            dimensions[key] = parsed_value
+            dimension_sources[key] = normalize_text(headers[column])
+
+    if overall_column is not None and overall_column < len(row):
+        parsed = parse_overall_dimensions(row[overall_column], headers[overall_column])
+        for key, value in parsed.items():
+            if key in dimensions:
+                continue
+            dimensions[key] = value
+            dimension_sources[key] = normalize_text(headers[overall_column])
+    return dimensions, dimension_sources
+
+
+class _ArticleCollector:
+    """Gathers one product's data from every row and sheet it appears on."""
+
+    def __init__(self, article: str, sheet: str, row_number: int) -> None:
+        self.article = article
+        self.sheet = sheet
+        self.row_number = row_number
+        self.dimensions: dict[str, float] = {}
+        self.dimension_sources: dict[str, str] = {}
+        self.dimension_sheets: dict[str, str] = {}
+        self.dimension_seen: dict[str, list[tuple[str, str, int]]] = {}
+        self.attributes: dict[str, str] = {}
+        self.attribute_sheets: dict[str, str] = {}
+        self.attribute_seen: dict[str, list[tuple[str, str, int]]] = {}
+        self.dimension_columns: set[str] = set()
+
+    def add(self, sheet: str, row_number: int, dimensions, sources, attributes) -> None:
+        self.dimension_columns.update(sources.values())
+        for key, value in dimensions.items():
+            seen = self.dimension_seen.setdefault(key, [])
+            if not any(abs(float(old) - value) <= 0.001 for old, _sheet, _row in seen):
+                seen.append((format_mm(value), sheet, row_number))
+            if key not in self.dimensions:
+                self.dimensions[key] = value
+                self.dimension_sources[key] = sources.get(key, "")
+                self.dimension_sheets[key] = sheet
+        for name, value in attributes.items():
+            seen = self.attribute_seen.setdefault(name, [])
+            if not any(old == value for old, _sheet, _row in seen):
+                seen.append((value, sheet, row_number))
+            if name not in self.attributes:
+                self.attributes[name] = value
+                self.attribute_sheets[name] = sheet
+
+    def finish(self, notes: ScanNotes) -> EtimArticleData:
+        dimensions = dict(self.dimensions)
+        for key, seen in self.dimension_seen.items():
+            if len(seen) > 1:
+                # Two different sizes for one product: do not pick one silently, leave the base as it is.
+                dimensions.pop(key, None)
+                notes.conflicts.append(FileConflict(self.article, dimension_label(key), tuple(seen), ""))
+        attributes = dict(self.attributes)
+        for name, seen in self.attribute_seen.items():
+            if len(seen) <= 1:
+                continue
+            if name in self.dimension_columns:
+                # A size column: already reported as a size, and its text must not contradict the base either.
+                attributes.pop(name, None)
+                continue
+            notes.conflicts.append(FileConflict(self.article, name, tuple(seen), self.attributes[name]))
+        return EtimArticleData(
+            article=self.article,
+            sheet_name=self.sheet,
+            row_number=self.row_number,
+            dimensions=dimensions,
+            dimension_sources={key: self.dimension_sources[key] for key in dimensions},
+            attributes=attributes,
+            dimension_sheets={key: self.dimension_sheets[key] for key in dimensions},
+            attribute_sheets={name: self.attribute_sheets[name] for name in attributes},
+        )
+
+
+def scan_etim_workbook(
+    etim_path: Path, articles: Iterable[str], notes: ScanNotes | None = None
+) -> dict[str, EtimArticleData]:
+    """Read every sheet: a product found on a short sheet still gets the data from a detailed one."""
     if etim_path.suffix.lower() not in {".xlsx", ".xlsm"}:
         raise ValueError("ETIM-файл должен быть XLSX/XLSM.")
 
+    notes = notes if notes is not None else ScanNotes()
     articles_to_find = {normalize_text(article) for article in articles if normalize_text(article)}
     if not articles_to_find:
         return {}
 
     workbook = load_workbook(etim_path, read_only=True, data_only=True)
-    found: dict[str, EtimArticleData] = {}
+    collected: dict[str, _ArticleCollector] = {}
     try:
         for sheet in workbook.worksheets:
             rows = list(sheet.iter_rows(values_only=True))
-            if not rows:
-                continue
+            # Column -> row of its current "Артикул" header; None under another product's article.
+            article_headers: dict[int, int | None] = {}
             for row_index, row in enumerate(rows):
-                if len(found) == len(articles_to_find):
-                    return found
-                for column_index, cell_value in enumerate(row):
-                    article = normalize_text(cell_value)
-                    if article not in articles_to_find or article in found:
+                header_columns = [index for index, value in enumerate(row) if is_article_header(value)]
+                for column_index in header_columns:
+                    article_headers[column_index] = (
+                        row_index if is_own_article_header(row[column_index]) else None
+                    )
+                for column_index, header_row_index in article_headers.items():
+                    if header_row_index is None or column_index in header_columns or column_index >= len(row):
                         continue
-                    header_row_index = find_header_row(rows, row_index, column_index)
-                    if header_row_index is None:
+                    article = normalize_text(row[column_index])
+                    if not article:
+                        continue
+                    if article not in articles_to_find:
+                        notes.unknown_articles.setdefault(article, sheet.title)
                         continue
                     headers = list(rows[header_row_index])
-                    dimensions: dict[str, float] = {}
-                    dimension_sources: dict[str, str] = {}
-
-                    overall_column = find_overall_dimension_column(headers)
-
-                    # Separately labelled columns are exact; the overall chain only fills gaps.
-                    for key, hints in DIMENSION_HINTS.items():
-                        column = find_dimension_column(
-                            headers,
-                            hints,
-                            DIMENSION_EXCLUDE_HINTS.get(key, ()),
-                            skip_columns=() if overall_column is None else (overall_column,),
-                        )
-                        if column is None or column >= len(row):
-                            continue
-                        parsed_value = parse_dimension_cell(row[column], headers[column], key)
-                        if parsed_value is not None:
-                            dimensions[key] = parsed_value
-                            dimension_sources[key] = normalize_text(headers[column])
-
-                    if overall_column is not None and overall_column < len(row):
-                        parsed = parse_overall_dimensions(row[overall_column], headers[overall_column])
-                        for key, value in parsed.items():
-                            if key in dimensions:
-                                continue
-                            dimensions[key] = value
-                            dimension_sources[key] = normalize_text(headers[overall_column])
-
-                    found[article] = EtimArticleData(
-                        article=article,
-                        sheet_name=sheet.title,
-                        row_number=row_index + 1,
-                        dimensions=dimensions,
-                        dimension_sources=dimension_sources,
-                        attributes=collect_attributes(headers, row, column_index),
+                    dimensions, sources = read_row_dimensions(headers, row)
+                    collector = collected.get(article)
+                    if collector is None:
+                        collector = collected[article] = _ArticleCollector(article, sheet.title, row_index + 1)
+                    collector.add(
+                        sheet.title,
+                        row_index + 1,
+                        dimensions,
+                        sources,
+                        collect_attributes(headers, row, column_index),
                     )
     finally:
         workbook.close()
-    return found
+    return {article: collector.finish(notes) for article, collector in collected.items()}
 
 
 def ensure_etim_import_tables(conn: sqlite3.Connection) -> None:
@@ -472,7 +578,7 @@ def build_dimension_report_rows(
                         field=dimension_label(key),
                         current_value="",
                         etim_value=format_mm(value),
-                        source_sheet=data.sheet_name,
+                        source_sheet=data.dimension_sheets.get(key, data.sheet_name),
                         source_field=source_field,
                         action="Будет записано в базу",
                     )
@@ -486,7 +592,7 @@ def build_dimension_report_rows(
                         field=dimension_label(key),
                         current_value=format_mm(current),
                         etim_value=format_mm(value),
-                        source_sheet=data.sheet_name,
+                        source_sheet=data.dimension_sheets.get(key, data.sheet_name),
                         source_field=source_field,
                         action="Проверить вручную: база не перезаписана",
                     )
@@ -499,7 +605,9 @@ def write_etim_report(
     result: EtimImportResult,
     new_rows: list[DimensionReportRow],
     conflict_rows: list[DimensionReportRow],
+    notes: ScanNotes | None = None,
 ) -> None:
+    notes = notes or ScanNotes()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     summary = workbook.active
@@ -514,6 +622,8 @@ def write_etim_report(
     summary.append(["Новых габаритных значений записано", result.dimension_values_written])
     summary.append(["Конфликтов с уже заполненными габаритами", result.dimension_conflicts])
     summary.append(["Характеристик записано", result.attributes_written])
+    summary.append(["Разные значения в самом файле", result.file_conflicts])
+    summary.append(["Артикулов в файле, которых нет в базе", result.unknown_articles])
     summary.append(["Бэкап базы", str(result.backup_path or "")])
 
     instruction = workbook.create_sheet("Как разобрать")
@@ -557,6 +667,18 @@ def write_etim_report(
             ]
         )
 
+    differences = workbook.create_sheet("Разное в файле")
+    differences.append(["Артикул", "Поле", "Значение", "Лист ETIM", "Строка", "В базу"])
+    for conflict in notes.conflicts:
+        for value, sheet_name, row_number in conflict.values:
+            kept = "не записано" if not conflict.kept else ("записано" if value == conflict.kept else "")
+            differences.append([conflict.article, conflict.field, value, sheet_name, row_number, kept])
+
+    unknown = workbook.create_sheet("Нет в базе")
+    unknown.append(["Артикул из файла", "Лист ETIM"])
+    for article, sheet_name in sorted(notes.unknown_articles.items()):
+        unknown.append([article, sheet_name])
+
     decision_validation = DataValidation(
         type="list",
         formula1=f'"{KEEP_DB_DECISION},{ACCEPT_ETIM_DECISION}"',
@@ -576,7 +698,7 @@ def write_etim_report(
         conflicts.cell(row_index, 1).fill = keep_fill
         conflicts.cell(row_index, 5).fill = accept_fill
 
-    for sheet in (summary, instruction, new_sheet, conflicts):
+    for sheet in (summary, instruction, new_sheet, conflicts, differences, unknown):
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for column_cells in sheet.columns:
@@ -617,7 +739,7 @@ def insert_etim_data(
                     length_mm,
                     width_mm,
                     height_mm,
-                    data.sheet_name,
+                    data.dimension_sheets.get(key, data.sheet_name),
                     source_field,
                     str(value),
                     0.95,
@@ -661,7 +783,7 @@ def insert_etim_data(
                 (
                     data.article,
                     attribute_name,
-                    data.sheet_name,
+                    data.attribute_sheets.get(attribute_name, data.sheet_name),
                     value,
                     value,
                     SOURCE_KIND,
@@ -679,62 +801,90 @@ def import_etim_workbook(
     make_backup: bool = True,
     report_dir: Path | None = None,
 ) -> EtimImportResult:
+    """Read and check the file first, write the report before the commit, then publish it.
+
+    So a bad file or a report that cannot be saved (open in Excel, full disk) leaves the base as it
+    was, and a finished import always has its report.
+    """
     if not etim_path.exists():
         raise FileNotFoundError(f"ETIM-файл не найден: {etim_path}")
     if not db_path.exists():
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
-    backup_path = backup_database(db_path) if make_backup else None
-    with closing(connect_database(db_path)) as conn, conn:
-        ensure_etim_import_tables(conn)
+    with closing(connect_database(db_path)) as conn:
         articles = fetch_all_articles(conn)
-        scanned_articles = len(articles)
-
-    article_data = scan_etim_workbook(etim_path, articles)
-
-    with closing(connect_database(db_path)) as conn, conn:
-        ensure_etim_import_tables(conn)
-        (
-            dimension_values_written,
-            dimension_conflicts,
-            new_dimension_rows,
-            conflict_rows,
-        ) = build_dimension_report_rows(conn, article_data)
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO dimension_imports (source_kind, local_file, workbook_name, notes)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                SOURCE_KIND,
-                str(etim_path),
-                etim_path.name,
-                f"ETIM import {dt.datetime.now().isoformat(timespec='seconds')}",
-            ),
-        )
-        import_id = int(cur.lastrowid)
-        dimension_values_found, attributes_written = insert_etim_data(
-            conn, import_id, article_data, etim_path.name
-        )
-        conn.commit()
+    scanned_articles = len(articles)
+    notes = ScanNotes()
+    article_data = scan_etim_workbook(etim_path, articles, notes)
 
     report_dir = report_dir or db_path.parent / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"etim_import_report_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
-    result = EtimImportResult(
-        etim_file=etim_path,
-        db_path=db_path,
-        report_path=report_path,
-        backup_path=backup_path,
-        import_id=import_id,
-        scanned_articles=scanned_articles,
-        found_articles=len(article_data),
-        dimension_values_found=dimension_values_found,
-        dimension_values_written=dimension_values_written,
-        dimension_conflicts=dimension_conflicts,
-        attributes_written=attributes_written,
-    )
-    write_etim_report(report_path, result, new_dimension_rows, conflict_rows)
+    saving_path = report_path.with_name(report_path.stem + ".saving.xlsx")
+
+    backup_path = backup_database(db_path) if make_backup else None
+    try:
+        with closing(connect_database(db_path)) as conn, conn:
+            ensure_etim_import_tables(conn)
+            (
+                dimension_values_written,
+                dimension_conflicts,
+                new_dimension_rows,
+                conflict_rows,
+            ) = build_dimension_report_rows(conn, article_data)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO dimension_imports (source_kind, local_file, workbook_name, notes)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    SOURCE_KIND,
+                    str(etim_path),
+                    etim_path.name,
+                    f"ETIM import {dt.datetime.now().isoformat(timespec='seconds')}",
+                ),
+            )
+            import_id = int(cur.lastrowid)
+            dimension_values_found, attributes_written = insert_etim_data(
+                conn, import_id, article_data, etim_path.name
+            )
+            result = EtimImportResult(
+                etim_file=etim_path,
+                db_path=db_path,
+                report_path=report_path,
+                backup_path=backup_path,
+                import_id=import_id,
+                scanned_articles=scanned_articles,
+                found_articles=len(article_data),
+                dimension_values_found=dimension_values_found,
+                dimension_values_written=dimension_values_written,
+                dimension_conflicts=dimension_conflicts,
+                attributes_written=attributes_written,
+                file_conflicts=len(notes.conflicts),
+                unknown_articles=len(notes.unknown_articles),
+            )
+            try:
+                write_etim_report(saving_path, result, new_dimension_rows, conflict_rows, notes)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Не удалось сохранить отчёт ETIM в {report_dir}: {exc}\n"
+                    "База не изменена. Проверьте, что папка доступна и на диске есть место, и повторите импорт."
+                ) from exc
+            conn.commit()
+    except BaseException:
+        saving_path.unlink(missing_ok=True)
+        raise
+
+    try:
+        os.replace(saving_path, report_path)
+    except OSError as exc:
+        # The data is in the base already; the report is complete, only under its working name.
+        return replace(
+            result,
+            report_path=saving_path,
+            report_warning=f"Отчёт сохранён под временным именем {saving_path.name} ({exc}).",
+        )
     return result
 
 
@@ -914,6 +1064,21 @@ def result_lines(result: EtimImportResult) -> list[str]:
         f"Характеристик записано: {result.attributes_written}",
         f"Отчет ETIM: {result.report_path}",
     ]
+    if result.found_articles == 0:
+        lines.insert(
+            0,
+            "Внимание: в файле не найдено ни одного артикула из базы. Проверьте, тот ли это файл "
+            "и есть ли в нём колонка «Артикул».",
+        )
+    if result.file_conflicts:
+        lines.append(
+            f"Разные значения в самом файле: {result.file_conflicts} (лист «Разное в файле»; "
+            "разные габариты одного товара в базу не записаны)"
+        )
+    if result.unknown_articles:
+        lines.append(f"Артикулов в файле, которых нет в базе: {result.unknown_articles} (лист «Нет в базе»)")
+    if result.report_warning:
+        lines.append(f"Внимание: {result.report_warning}")
     if result.backup_path:
         lines.append(f"Бэкап базы: {result.backup_path}")
     return lines
