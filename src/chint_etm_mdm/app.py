@@ -41,7 +41,7 @@ from . import __version__
 from .analyzer import analyze_template_mapping
 from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
-from .db_utils import BackupRejected, copy_sqlite_database
+from .db_utils import BackupRejected, base_problem, copy_sqlite_database
 from .etm_materials import (
     DESCRIPTIONS_TABLE,
     MaterialsResult,
@@ -1996,6 +1996,10 @@ class MainWindow(QMainWindow):
         if not db_path.exists():
             self.status_text.setPlainText(f"База не найдена:\n{db_path}")
             return
+        problem = base_problem(db_path)
+        if problem:
+            self.status_text.setPlainText(f"{problem}\n{db_path}")
+            return
         try:
             stats = get_stats(db_path)
         except Exception as exc:
@@ -2118,7 +2122,14 @@ class MainWindow(QMainWindow):
 
     def validated_db_path(self) -> Path | None:
         self.save_current_config()
-        return self.chosen_file(self.db_path_edit.text(), "База", "SQLite базу")
+        path = self.chosen_file(self.db_path_edit.text(), "База", "SQLite базу")
+        if path is None:
+            return None
+        problem = base_problem(path)
+        if problem:
+            QMessageBox.warning(self, "База не подходит", f"{problem}\n\n{path}\n\nВыберите chint_mdm.sqlite на вкладке «База».")
+            return None
+        return path
 
     def chosen_file(self, text: str, title: str, what: str) -> Path | None:
         """The chosen file, or None after a plain message: an empty field is not "the current folder"."""

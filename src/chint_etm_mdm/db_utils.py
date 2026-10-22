@@ -44,6 +44,24 @@ class BackupRejected(ValueError):
     """The backup was refused before anything was touched: the base is as it was."""
 
 
+def missing_tables(db_path: Path, required: Iterable[str] = CHINT_TABLES) -> list[str]:
+    """The program's tables a SQLite file lacks; raises sqlite3.DatabaseError for a file that is not SQLite."""
+    with closing(connect_database(db_path, readonly=True)) as conn:
+        tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    return [name for name in required if name not in tables]
+
+
+def base_problem(db_path: Path) -> str:
+    """Why this file cannot be the program's base, in plain words; "" when it can."""
+    try:
+        missing = missing_tables(db_path)
+    except sqlite3.DatabaseError:
+        return "Файл не похож на базу SQLite или повреждён."
+    if missing:
+        return "Это не база программы: в ней нет таблиц " + ", ".join(missing) + "."
+    return ""
+
+
 def check_backup_file(backup_path: Path, db_path: Path, required_tables: Iterable[str] = ()) -> None:
     """Refuse a backup that would break the base: the base itself, not SQLite, damaged or not this program's."""
     try:

@@ -118,13 +118,24 @@ class CloseDuringOperationTests(unittest.TestCase):
         self.env.start()
         self.home = mock.patch("pathlib.Path.home", return_value=home)
         self.home.start()
+        from PySide6.QtWidgets import QMessageBox
+
         from chint_etm_mdm.app import MainWindow
 
+        # A dialog nobody answers would hang the test run: by default every dialog returns at once.
+        self.dialogs = [
+            mock.patch.object(QMessageBox, name, return_value=QMessageBox.StandardButton.No)
+            for name in ("warning", "information", "critical", "question")
+        ]
+        for dialog in self.dialogs:
+            dialog.start()
         self.window = MainWindow()
 
     def tearDown(self) -> None:
         self.window.worker = None
         self.window.close()
+        for dialog in self.dialogs:
+            dialog.stop()
         self.home.stop()
         self.env.stop()
         self.temp_dir.cleanup()
@@ -226,7 +237,7 @@ class ChosenPathsTests(CloseDuringOperationTests):
 
     def test_apply_etim_always_offers_a_choice(self) -> None:
         base = Path(self.temp_dir.name) / "base.sqlite"
-        base.write_bytes(b"")
+        make_base(base, "x")
         self.window.db_path_edit.setText(str(base))
         last = Path(self.temp_dir.name) / "last.xlsx"
         last.write_bytes(b"")
@@ -257,7 +268,7 @@ class RulesDuringOperationTests(CloseDuringOperationTests):
 class EtmTabTests(CloseDuringOperationTests):
     def test_typed_articles_and_again(self) -> None:
         base = Path(self.temp_dir.name) / "base.sqlite"
-        base.write_bytes(b"")
+        make_base(base, "x")
         self.window.db_path_edit.setText(str(base))
         self.window.class_templates_edit.setText(str(Path(self.temp_dir.name) / "templates"))
         self.window.etm_articles_edit.setPlainText("586772, 625288")
@@ -305,3 +316,20 @@ class WriteButtonsTests(CloseDuringOperationTests):
         self.window.worker = FakeRunningWorker()
         self.window.update_write_action_buttons()
         self.assertFalse(any(button.isEnabled() for button in self.window.write_action_buttons))
+
+
+class BaseProblemTests(unittest.TestCase):
+    def test_plain_reasons(self) -> None:
+        from chint_etm_mdm.db_utils import base_problem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            good = root / "good.sqlite"
+            make_base(good, "x")
+            self.assertEqual("", base_problem(good))
+            empty = root / "empty.sqlite"
+            empty.write_bytes(b"")
+            self.assertIn("не база программы", base_problem(empty))
+            text = root / "price.sqlite"
+            text.write_bytes(b"PK\x03\x04 not sqlite" * 50)
+            self.assertIn("не похож на базу SQLite", base_problem(text))
