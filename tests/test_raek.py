@@ -188,7 +188,7 @@ class RaekTests(unittest.TestCase):
         self.assertEqual(["9032890000", None], [row[6] for row in cells(self.member(result, "ChINT (CHINT)_THVED.xlsx"))[1:]])
         ean = cells(self.member(result, "ChINT (CHINT)_EAN.xlsx"))
         self.assertEqual("6941498900011", ean[1][6])
-        self.assertEqual("6941498941595", ean[2][6])  # from the inner pack GTIN-14, flagged for a check
+        self.assertIsNone(ean[2][6])  # a pack barcode is a different code: never used for the product
         self.assertEqual(("26.51.70.190", None), cells(self.member(result, "ChINT (CHINT)_OKPD2_ID.xlsx"))[1][6:8])
         self.assertEqual("NVF7", cells(self.member(result, "ChINT (CHINT)_SERIES_ID.xlsx"))[1][6])
         cert = cells(self.member(result, "ChINT (CHINT)_certificate.xlsx"))
@@ -211,7 +211,16 @@ class RaekTests(unittest.TestCase):
         self.assertIn(("ChINT (CHINT)_THVED.xlsx", "999999", "Артикула нет в базе"), [(row[0], row[3], row[7]) for row in empty])
         self.assertTrue(any(row[5] == "Изображение" and "ensmas" in row[7] for row in empty))
         checks = [row for row in report["Проверить"].iter_rows(min_row=2, values_only=True)]
-        self.assertTrue(any(row[5] == "Штрих-код EAN" and row[3] == "631929" for row in checks))
+        self.assertTrue(any(row[5] == "Штрих-код EAN" and row[3] == "631929" for row in empty))
+        self.assertFalse(any(row[5] == "Штрих-код EAN" for row in checks))
+
+        # The summary speaks of products and their data, not of cells.
+        summary = list(report["Итог"].iter_rows(values_only=True))
+        self.assertEqual(("Товаров в архиве", 3), summary[0][:2])
+        self.assertIn(("Штрих-код EAN", 1, "Нет штрих-кода товара в файле ЧЗ"), [row[:3] for row in summary])
+        lines = "\n".join(result_lines(result))
+        self.assertIn("Товаров в архиве: 3.", lines)
+        self.assertNotIn("ячеек", lines)
 
     def test_features(self) -> None:
         result = self.fill()
