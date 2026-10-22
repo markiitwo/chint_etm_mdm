@@ -252,3 +252,28 @@ class RulesDuringOperationTests(CloseDuringOperationTests):
         approve.assert_not_called()
         reject.assert_not_called()
         self.assertEqual(4, warning.call_count)
+
+
+class EtmTabTests(CloseDuringOperationTests):
+    def test_typed_articles_and_again(self) -> None:
+        base = Path(self.temp_dir.name) / "base.sqlite"
+        base.write_bytes(b"")
+        self.window.db_path_edit.setText(str(base))
+        self.window.class_templates_edit.setText(str(Path(self.temp_dir.name) / "templates"))
+        self.window.etm_articles_edit.setPlainText("586772, 625288")
+        self.assertTrue(self.window.etm_list_mode.isChecked())
+        with mock.patch.object(self.window, "start_worker") as start:
+            self.window.run_new_products()
+        worker = start.call_args[0][0]
+        self.assertEqual(["586772", "625288"], worker.articles)
+        self.assertEqual("ЭТМ", self.window.tabs.tabText(1))
+
+        self.window.config.last_etm_articles = "111 222"
+        with mock.patch.object(self.window, "start_worker") as start:
+            self.window.run_etm_again()
+        self.assertEqual(["111", "222"], start.call_args[0][0].articles)
+
+        self.window.etm_new_mode.setChecked(True)
+        with mock.patch.object(self.window, "start_worker") as start:
+            self.window.etm_run_button.click()  # through the button, as the user does
+        self.assertIsNone(start.call_args[0][0].articles)

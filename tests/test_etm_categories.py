@@ -169,10 +169,11 @@ class CategoryTemplateTests(unittest.TestCase):
         self.assertEqual(["404"], run.not_found)
 
         result, csv_path = run.results["500820"]
-        with csv_path.open(encoding="cp1251", newline="") as handle:
-            self.assertEqual([], list(csv.DictReader(handle, delimiter=";")))
-        # The pole count is a match to check, so the card waits in the "to check" file.
-        self.assertEqual(csv_path.with_name(f"{csv_path.stem}_check.csv"), result.check_path)
+        # Nothing is ready to upload as is, so there is no empty upload file to send by mistake.
+        self.assertEqual("Загрузить в ЭТМ", csv_path.parent.name)
+        self.assertFalse(csv_path.exists())
+        # The pole count is a match to check, so the card waits in the "to check" folder.
+        self.assertEqual(run.output_dir / "На проверку" / f"{csv_path.stem}_check.csv", result.check_path)
         self.assertEqual((0, 1), (result.safe_rows, result.check_rows))
         with result.check_path.open(encoding="cp1251", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter=";"))
@@ -190,13 +191,21 @@ class CategoryTemplateTests(unittest.TestCase):
         self.assertEqual("AC", row["Конфиг:Тип срабатывания по диф.току"])
         self.assertEqual("500820", row["81 класс"])
         self.assertEqual(f"upload_new_nb1l-20_{dt.date.today().isoformat()}.csv", csv_path.name)
-        self.assertEqual(csv_path.with_suffix(".xlsx"), result.output_path)
+        self.assertEqual(run.output_dir / "Служебное" / f"{csv_path.stem}.xlsx", result.output_path)
         self.assertEqual(f"{csv_path.stem}_report.xlsx", result.report_path.name)
+        self.assertEqual("Служебное", result.report_path.parent.name)
 
         filled = load_workbook(result.output_path)["Шаблон"]
         self.assertEqual(0.158, filled["L2"].value)
-        summary = load_workbook(run.summary_path).active
-        self.assertEqual(5, summary.max_row)
+        self.assertEqual("Итог.xlsx", run.summary_path.name)
+        summary = load_workbook(run.summary_path)
+        self.assertEqual(["Что делать", "Товары", "Дозаполнить", "Проверить", "Нет шаблона"], summary.sheetnames)
+        self.assertEqual(5, summary["Товары"].max_row)
+        states = {row[0]: row[4] for row in summary["Товары"].iter_rows(min_row=2, values_only=True)}
+        self.assertTrue(states["586772"].startswith("Проверить перед загрузкой"))
+        self.assertEqual("Нет шаблона класса: скачайте его", states["625288"])
+        self.assertEqual("Артикула нет в базе", states["404"])
+        self.assertEqual(["50341020"], [row[0] for row in summary["Нет шаблона"].iter_rows(min_row=2, values_only=True)])
 
     def test_app_worker_finds_and_fills_new_products(self) -> None:
         from chint_etm_mdm.app import NewProductsWorker
@@ -210,7 +219,7 @@ class CategoryTemplateTests(unittest.TestCase):
         run = results[0]
         self.assertEqual({"500820"}, set(run.results))
         lines = run_lines(run)
-        self.assertTrue(lines[0].startswith("Класс 500820: 1 товаров, можно грузить сразу 0 — файл upload_new_nb1l-20_"))
+        self.assertTrue(lines[0].startswith("Класс 500820: 1 товаров, можно грузить сразу 0; на проверку 1"))
         self.assertIn("на проверку 1 — файл upload_new_nb1l-20_", lines[0])
         self.assertIn("Не удалось подобрать класс: 1", "\n".join(lines))
 
@@ -223,3 +232,100 @@ class CategoryTemplateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CardsForManagersTests(CategoryTemplateTests):
+    """Empty fields go to «Дозаполнить», become questions for managers, and answers fill the next run."""
+
+    def test_empty_fields_are_listed_and_asked(self) -> None:
+        from chint_etm_mdm.etm_categories import fill_new_products
+
+        run = fill_new_products(self.db, ["586772"], self.templates, self.root / "out")
+        self.assertEqual({"Код ТН ВЭД", "Код ОКПД2"}, {row.column for row in run.missing_rows})
+        self.assertEqual({("586772", "Код ТН ВЭД"), ("586772", "Код ОКПД2")}, {(n.article, n.key) for n in run.needs})
+        self.assertEqual("NB1L-20", run.needs[0].series)
+        empty = load_workbook(run.summary_path)["Дозаполнить"]
+        self.assertEqual({"Код ТН ВЭД", "Код ОКПД2"}, {row[3] for row in empty.iter_rows(min_row=2, values_only=True)})
+        todo = [row[0] for row in load_workbook(run.summary_path)["Что делать"].iter_rows(values_only=True)]
+        self.assertTrue(any("Запросить у продактов" in (line or "") for line in todo))
+
+    def test_answers_from_managers_fill_the_cards(self) -> None:
+        import json
+
+        from chint_etm_mdm.etm_categories import fill_new_products
+
+        answers = self.root / "answers.json"
+        answers.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "answers": [
+                        {"article": "586772", "key": "Код ТН ВЭД", "value": "8536201007"},
+                        {"article": "586772", "key": "Код ОКПД2", "value": "27.12.22.000"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        run = fill_new_products(self.db, ["586772"], self.templates, self.root / "out", answers_file=answers)
+        self.assertEqual([], run.missing_rows)
+        self.assertEqual([], run.needs)
+        result, _csv = run.results["500820"]
+        with result.check_path.open(encoding="cp1251", newline="") as handle:
+            row = next(csv.DictReader(handle, delimiter=";"))
+        self.assertEqual(("8536201007", "27.12.22.000"), (row["Код ТН ВЭД"], row["Код ОКПД2"]))
+        sources = {r.column: r.source for r in result.rows if r.column in {"Код ТН ВЭД", "Код ОКПД2"}}
+        self.assertEqual({"pm_answer"}, set(sources.values()))
+
+    def test_downloaded_templates_are_picked_up(self) -> None:
+        import os
+
+        from chint_etm_mdm.etm_categories import collect_templates
+
+        downloads = self.root / "Загрузки"
+        downloads.mkdir()
+        make_category_template(downloads / "upload_goods_category_template_50341020.xlsx")
+        (downloads / "другой файл.xlsx").write_bytes(b"")
+        copied = collect_templates([downloads, self.root / "нет такой папки"], self.templates)
+        self.assertEqual(["upload_goods_category_template_50341020.xlsx"], [path.name for path in copied])
+        self.assertEqual([], collect_templates([downloads], self.templates))  # the same file is not copied again
+        newer = downloads / "upload_goods_category_template_500820.xlsx"
+        make_category_template(newer)
+        old = self.templates / newer.name
+        os.utime(old, (1, 1))
+        self.assertEqual([old], collect_templates([downloads], self.templates))
+
+
+class ManagersRoundTripTests(CategoryTemplateTests):
+    def test_request_answer_and_next_run(self) -> None:
+        from chint_etm_mdm.etm_categories import fill_new_products, parse_articles
+        from chint_etm_mdm.pm_requests import ANSWER, HEADER_ROW, KEY, answers_path, import_answers, write_requests
+
+        self.assertEqual(["100", "586772", "A-1"], parse_articles(" 100, 586772;\n'A-1 100 "))
+        work = self.root / "work"
+        run = fill_new_products(self.db, ["100"], self.templates, self.root / "out1")
+        asked = {need.key: need for need in run.needs}
+        poles = asked["Конфиг:Количество силовых полюсов"]
+        self.assertEqual("A", poles.kind)
+        self.assertIn("1P+N", poles.allowed)
+
+        requests = write_requests(run.needs, [], work, self.root / "requests", "Карточки ЭТМ")
+        request = requests.files[0].path
+        workbook = load_workbook(request)
+        sheet = workbook["Запрос"]
+        for row in sheet.iter_rows(min_row=HEADER_ROW + 1):
+            if row[KEY - 1].value == "Конфиг:Количество силовых полюсов":
+                row[ANSWER - 1].value = "1p+n"  # written loosely; the program matches it to ETM's list
+            if row[KEY - 1].value == "Код ТН ВЭД":
+                row[ANSWER - 1].value = "8536 2010 07"
+        workbook.save(request)
+        answers = import_answers(request, work)
+        self.assertEqual(2, answers.accepted)
+
+        again = fill_new_products(self.db, ["100"], self.templates, self.root / "out2", answers_file=answers_path(work))
+        left = {row.column for row in again.missing_rows}
+        self.assertNotIn("Конфиг:Количество силовых полюсов", left)
+        self.assertNotIn("Код ТН ВЭД", left)
+        result, _csv = again.results["500820"]
+        filled = {row.column: row.value for row in result.rows if row.source == "pm_answer"}
+        self.assertEqual({"Конфиг:Количество силовых полюсов": "1P+N", "Код ТН ВЭД": "8536201007"}, filled)

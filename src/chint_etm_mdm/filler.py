@@ -82,6 +82,8 @@ class FillResult:
     safe_rows: int = 0
     # Products with a value to check (close match, range, contradiction with the name).
     check_articles: frozenset[str] = frozenset()
+    # Every report row: what was filled, held back or left empty, cell by cell.
+    rows: tuple[FillReportRow, ...] = ()
 
 
 def normalize_header(value: object) -> str:
@@ -165,6 +167,8 @@ def source_label(source: str) -> str:
         return "Ручное дозаполнение"
     if source == "codes_file":
         return "Файл кодов (ЧЗ)"
+    if source == "pm_answer":
+        return "Ответ продакта"
     if source.startswith("series_default:"):
         return f"Значение для серии: {source.split(':', 1)[1]}"
     if source == "product_name_type":
@@ -663,6 +667,7 @@ def fill_csv_template(
         suggested_cells,
         missing_cells,
         len(unique_articles) - found,
+        rows=tuple(report),
     )
 
 
@@ -840,4 +845,5 @@ def fill_xlsx_template(
         missing_cells=missing_cells,
         missing_articles=len(unique_articles) - found,
         check_articles=frozenset(item.article for item in report if item.status in {"filled_suggested", "filled_check"}),
+        rows=tuple(report),
     )
