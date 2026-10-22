@@ -42,6 +42,15 @@ from .analyzer import analyze_template_mapping
 from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
 from .db_utils import BackupRejected, copy_sqlite_database
+from .etm_materials import (
+    DESCRIPTIONS_TABLE,
+    MaterialsResult,
+    import_description_file,
+    make_materials,
+    materials_lines,
+    update_descriptions_table,
+)
+from .upload_names import series_names
 from .dimension_audit import AuditResult, ClearResult, audit_dimensions, audit_lines, clear_lines, clear_wrong_dimensions
 from .etm_categories import (
     CategoryRun,
@@ -510,6 +519,32 @@ class EtimDecisionWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class MaterialsWorker(QThread):
+    """Photos, documents, certificates and descriptions for ETM cards: asks the site, downloads files."""
+
+    done = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, db_path: Path, articles: list[str], work_dir: Path, output_dir: Path, codes_path: Path | None) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.articles = articles
+        self.work_dir = work_dir
+        self.output_dir = output_dir
+        self.codes_path = codes_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(
+                make_materials(
+                    self.db_path, self.articles, self.work_dir, self.output_dir, self.codes_path, progress=self.progress.emit
+                )
+            )
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class DimensionAuditWorker(QThread):
     """Reads the base and lists sizes earlier ETIM imports wrote from wrong columns."""
 
@@ -585,6 +620,7 @@ class MainWindow(QMainWindow):
             | EtimDecisionWorker
             | RestoreWorker
             | DimensionAuditWorker
+            | MaterialsWorker
             | DimensionClearWorker
             | None
         ) = None
@@ -701,6 +737,8 @@ class MainWindow(QMainWindow):
             worker.progress.connect(self.raek_log.append)
         if isinstance(worker, PriceImportWorker):
             worker.progress.connect(self.price_log.append)
+        if isinstance(worker, MaterialsWorker):
+            worker.progress.connect(self.fill_log.append)
             worker.downloaded.connect(self.on_price_downloaded)
         self.update_write_action_buttons()
         worker.start()
@@ -810,6 +848,104 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Статус базы"))
         layout.addWidget(self.status_text, stretch=1)
         return root
+
+    def build_materials_box(self) -> QGroupBox:
+        """After the cards: photos, technical information, certificates and descriptions for the same products."""
+        box = QGroupBox("Материалы для карточек: фото, документы, сертификаты, описания")
+        row = QHBoxLayout(box)
+        make = QPushButton("Сделать материалы")
+        make.setToolTip("Для товаров последних карточек (или вписанных артикулов): четыре формы ЭТМ и файлы к ним")
+        make.clicked.connect(lambda: self.run_materials())
+        self.write_action_buttons.append(make)
+        descriptions = QPushButton("Описания серий")
+        descriptions.setToolTip("Таблица с описанием каждой серии: впишите тексты из каталогов один раз")
+        descriptions.clicked.connect(self.open_descriptions_table)
+        import_old = QPushButton("Взять описания из файла ЭТМ...")
+        import_old.setToolTip("Файл описаний, который уже загружали в ЭТМ: тексты попадут в таблицу серий")
+        import_old.clicked.connect(self.import_old_descriptions)
+        for button in (make, descriptions, import_old):
+            row.addWidget(button)
+        row.addStretch(1)
+        return box
+
+    def materials_articles(self) -> list[str]:
+        if self.etm_list_mode.isChecked():
+            typed = parse_articles(self.etm_articles_edit.toPlainText())
+            if typed:
+                return typed
+        return parse_articles(self.config.last_etm_articles)
+
+    def run_materials(self) -> None:
+        try:
+            self.save_current_config()
+            db_path = self.validated_db_path()
+            if db_path is None:
+                return
+            work_text = self.work_dir_edit.text().strip()
+            if not work_text:
+                QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
+                return
+            articles = self.materials_articles()
+            if not articles:
+                QMessageBox.information(self, "Нет товаров", "Сначала сделайте карточки или впишите артикулы в поле «Эти артикулы».")
+                return
+            codes_text = self.codes_file_edit.text().strip()
+            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
+            output = Path(work_text) / "output" / f"ЭТМ материалы {dt.datetime.now().strftime('%Y-%m-%d %H-%M')}"
+            self.fill_log.append(f"Готовлю материалы для {len(articles)} товаров...")
+            worker = MaterialsWorker(db_path, articles, Path(work_text), output, codes_path)
+            self.start_worker(worker, self.on_materials_done, self.on_fill_failed)
+        except Exception:
+            self.on_fill_failed(traceback.format_exc())
+
+    def on_materials_done(self, result: MaterialsResult) -> None:
+        lines = materials_lines(result)
+        for line in lines:
+            self.fill_log.append(line)
+        self.last_new_products_dir = result.output_dir
+        self.open_new_products_dir_button.setEnabled(True)
+        self.open_path(result.summary_path)
+        QMessageBox.information(
+            self, "Материалы готовы", "\n".join(lines + ["", "Что делать дальше — на первом листе Итог.xlsx (он уже открыт)."])
+        )
+
+    def open_descriptions_table(self) -> None:
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
+            return
+        db_path = self.validated_db_path()
+        if db_path is None:
+            return
+        table = Path(work_text) / DESCRIPTIONS_TABLE
+        articles = self.materials_articles()
+        try:
+            update_descriptions_table(table, series_names(db_path, articles), {})
+        except PermissionError:
+            QMessageBox.warning(self, "Файл открыт", f"Закройте «{table.name}» в Excel и нажмите ещё раз.")
+            return
+        self.open_path(table)
+
+    def import_old_descriptions(self) -> None:
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
+            return
+        db_path = self.validated_db_path()
+        if db_path is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Файл описаний, загруженный в ЭТМ", str(self.incoming()[0]), "CSV (*.csv)")
+        if not path:
+            return
+        table = Path(work_text) / DESCRIPTIONS_TABLE
+        try:
+            taken = import_description_file(Path(path), table, lambda articles: series_names(db_path, articles))
+        except (ValueError, PermissionError) as error:
+            QMessageBox.warning(self, "Описания", str(error))
+            return
+        text = f"Взято описаний серий: {taken}. Таблица: {table.name} (вписанные раньше тексты не менялись)."
+        self.fill_log.append(text)
+        QMessageBox.information(self, "Описания", text)
 
     def build_own_template_box(self) -> QGroupBox:
         """Filling a template the user picked by hand: a class the program did not choose, or any other file."""
@@ -923,6 +1059,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(box)
         layout.addLayout(actions)
         layout.addLayout(pm_actions)
+        layout.addWidget(self.build_materials_box())
         layout.addWidget(self.build_own_template_box())
         layout.addWidget(self.build_manual_import_box())
         layout.addWidget(QLabel("Журнал"))
@@ -1271,7 +1408,8 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.apply_etim_report_button)
         actions.addStretch(1)
         form.addRow("Действия", actions)
-        self.write_action_buttons = [
+        # Added to, not replaced: other tabs put their buttons in this list too.
+        self.write_action_buttons += [
             self.restore_button,
             self.audit_dimensions_button,
             self.import_price_file_button,
