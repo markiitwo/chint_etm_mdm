@@ -272,7 +272,7 @@ class ConnectionLifetimeTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "etim.xlsx"
             database = root / "db.sqlite"
-            source.touch()
+            Workbook().save(source)
             with closing(sqlite3.connect(database)) as setup, setup:
                 setup.execute("CREATE TABLE marker(value TEXT)")
 
@@ -312,7 +312,7 @@ class ConnectionLifetimeTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "etim.xlsx"
             database = root / "db.sqlite"
-            source.touch()
+            Workbook().save(source)
             database.touch()
             with (
                 patch("chint_etm_mdm.etim_importer.connect_database", side_effect=connect),

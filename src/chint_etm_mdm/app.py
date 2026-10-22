@@ -1368,7 +1368,7 @@ class MainWindow(QMainWindow):
             self,
             "Выберите ETIM XLSX",
             "",
-            "ETIM workbook (*.xlsx *.xlsm);;All files (*)",
+            "ETIM workbook (*.xlsx *.xlsm *.xls);;All files (*)",
         )
         if path:
             self.etim_file_edit.setText(path)
