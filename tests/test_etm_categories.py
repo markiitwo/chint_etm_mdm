@@ -401,3 +401,41 @@ class ReferenceListsForManagersTests(CategoryTemplateTests):
     def test_numeric_from_reference(self) -> None:
         needs, _run = self.run_with_reference([["5", "Номинальный ток (А)", "Числовая", "000", None, None]])
         self.assertEqual(("N", ()), (needs["Конфиг:Номинальный ток (А)"].kind, needs["Конфиг:Номинальный ток (А)"].allowed))
+
+
+class RaekAnswersInEtmTests(CategoryTemplateTests):
+    def test_codes_answered_for_raek_fill_etm_cards(self) -> None:
+        import json
+
+        from chint_etm_mdm.etm_categories import fill_new_products, shared_answers
+        from chint_etm_mdm.value_matching import canonical
+
+        answers = self.root / "answers.json"
+        answers.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "answers": [
+                        # As RAEK's request files key them: the column name in canonical form, ETIM codes.
+                        {"article": "586772", "key": canonical("Код ТН ВЭД"), "value": "8536201007"},
+                        {"article": "586772", "key": canonical("Код ОКПД2"), "value": "27.12.22.000"},
+                        {"article": "586772", "key": "EF003961", "value": "Разъемное (штепсельное) соединение"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        run = fill_new_products(self.db, ["586772"], self.templates, self.root / "out", answers_file=answers)
+        self.assertEqual(set(), {row.column for row in run.missing_rows} & {"Код ТН ВЭД", "Код ОКПД2"})
+        result, _csv = run.results["500820"]
+        with result.check_path.open(encoding="cp1251", newline="") as handle:
+            row = next(csv.DictReader(handle, delimiter=";"))
+        self.assertEqual(("8536201007", "27.12.22.000"), (row["Код ТН ВЭД"], row["Код ОКПД2"]))
+
+        # A barcode asked for RAEK goes to ETM's barcode column whatever it is called; characteristics stay.
+        found = shared_answers(
+            {("1", canonical("Штрих-код EAN")): "4600000000001", ("1", "EF001538"): "Да"},
+            {"1"},
+            ("Штрихкод", "Конфиг:С блоком управления"),
+        )
+        self.assertEqual({("1", "Штрихкод"): ("4600000000001", "pm_answer")}, found)

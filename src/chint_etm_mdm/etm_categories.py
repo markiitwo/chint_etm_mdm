@@ -49,6 +49,7 @@ class CategoryTemplate:
     class_code: str
     path: Path
     dropdowns: dict[str, tuple[str, ...]]
+    headers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,7 +114,7 @@ def read_category_template(path: Path) -> CategoryTemplate:
             header = headers.get(re.sub(r"\d", "", str(cell_range).split(":")[0]), "")
             if header.startswith(CONFIG_PREFIX) and values:
                 dropdowns[canonical(header.removeprefix(CONFIG_PREFIX))] = values
-    return CategoryTemplate(class_code, path, dropdowns)
+    return CategoryTemplate(class_code, path, dropdowns, tuple(name for name in headers.values() if name))
 
 
 def category_library(folder: Path) -> dict[str, Path]:
@@ -621,6 +622,31 @@ def needs_for_managers(run: CategoryRun, products: dict[str, ProductRecord], ser
     return needs
 
 
+# Plain fields asked for any partner: a manager's answer given for RAEK fills ETM's column too.
+BARCODE_NAMES = {canonical(name) for name in ("Штрих-код EAN", "Штрих-код", "Штрихкод", "EAN", "EAN-13", "GTIN")}
+
+
+def same_field(header: str) -> str:
+    key = canonical(header)
+    return canonical("Штрих-код EAN") if key in BARCODE_NAMES else key
+
+
+def shared_answers(
+    answers: dict[tuple[str, str], str], articles: set[str], headers: tuple[str, ...]
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """Codes and barcodes answered for another partner (RAEK keys them by its column name), under this
+    template's own column. Characteristics are not carried over: their names and lists differ."""
+    by_field = {header: same_field(header) for header in headers if not header.startswith(CONFIG_PREFIX)}
+    found: dict[tuple[str, str], tuple[str, str]] = {}
+    for (article, key), value in answers.items():
+        if article not in articles or key.startswith(CONFIG_PREFIX):
+            continue
+        for header, field_key in by_field.items():
+            if same_field(key) == field_key:
+                found[(article, header)] = (value, "pm_answer")
+    return found
+
+
 def fill_new_products(
     db_path: Path,
     articles: list[str],
@@ -665,9 +691,10 @@ def fill_new_products(
         input_path = tech_dir / f"новинки_{code}.xlsx"
         prepare_input(category, members, input_path)
         member_set = set(members)
-        given = {
-            (article, key): (value, "pm_answer") for (article, key), value in answers.items() if article in member_set
-        }
+        given = shared_answers(answers, member_set, category.headers)
+        given.update(
+            {(article, key): (value, "pm_answer") for (article, key), value in answers.items() if article in member_set}
+        )
         fallback = {**series_default_values(defaults, category, members, products, series), **codes, **given}
         result = fill_xlsx_template(
             db_path,
