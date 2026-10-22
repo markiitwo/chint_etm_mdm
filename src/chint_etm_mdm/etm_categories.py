@@ -3,11 +3,13 @@
 ETM's OneTeam cabinet gives one upload template per product class ("81 класс"):
 the usual card columns plus the class's required characteristics ("Конфиг:..."),
 most of them with a drop-down list on the "Списки" sheet. The user keeps the
-downloaded templates in one folder. For new products the program picks each
-product's class, fills a copy of that class's template and writes the CSV that
-ETM takes: cards safe to upload in one file, cards with a value to check in a
-"_check" file next to it. Classes without a template are listed so the user
-knows what to download.
+downloaded templates in one folder (templates saved to the inbox or "Загрузки"
+are picked up from there). For the products the program picks each product's
+class, fills a copy of that class's template and writes the CSV that ETM takes.
+A run is one folder: Итог.xlsx (what to do, every product's state, the empty
+fields, the values to check, the classes whose template is missing), the files
+ready to upload, the cards to check first and the working files. The empty
+fields become questions for the product managers; their answers fill the next run.
 """
 from __future__ import annotations
 
@@ -15,18 +17,21 @@ import csv
 import datetime as dt
 import json
 import re
+import shutil
 import sqlite3
 from collections import Counter
 from contextlib import closing
 from copy import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
+from .atomic_files import atomic_write_json
 from .db import ProductRecord, connect, fetch_products
 from .export_templates import PartnerTemplate, clean_product_name, load_partner_template, partner_template_text
-from .filler import FillResult, fill_xlsx_template, normalize_article, normalize_header
+from .filler import FillReportRow, FillResult, fill_xlsx_template, normalize_article, normalize_header
+from .pm_requests import Need, load_answers
 from .upload_names import check_path_for, report_path_for, series_names, upload_csv_path
 from .value_matching import canonical
 
@@ -63,6 +68,13 @@ class CategoryRun:
     unclassified: list[str] = field(default_factory=list)
     not_found: list[str] = field(default_factory=list)
     codes_file: Path | None = None
+    articles: list[str] = field(default_factory=list)
+    missing_rows: list[FillReportRow] = field(default_factory=list)
+    check_rows: list[FillReportRow] = field(default_factory=list)
+    # (class, canonical field) -> ETM's closed list of values for it
+    allowed: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+    needs: list[Need] = field(default_factory=list)
+    copied_templates: list[Path] = field(default_factory=list)
 
 
 def cell_text(value: object) -> str:
@@ -381,42 +393,208 @@ def export_upload_csv(xlsx_path: Path, csv_path: Path, articles: frozenset[str] 
     return written
 
 
+UPLOAD_DIR = "Загрузить в ЭТМ"
+CHECK_DIR = "На проверку"
+TECH_DIR = "Служебное"
+SUMMARY_NAME = "Итог.xlsx"
+MISSING_STATUSES = {"missing_value", "value_not_allowed"}
+CHECK_STATUSES = {"filled_suggested", "filled_check"}
+TEMPLATE_FILE_GLOB = "upload_goods_category_template_*.xlsx"
+
+
+def parse_articles(text: str) -> list[str]:
+    """Articles typed or pasted by the user: spaces, commas, semicolons or new lines between them."""
+    seen: dict[str, None] = {}
+    for part in re.split(r"[\s,;]+", text or ""):
+        article = normalize_article(part.strip("'\""))  # "'586772" as Excel copies a text cell
+        if article:
+            seen.setdefault(article, None)
+    return list(seen)
+
+
+def collect_templates(folders: list[Path], templates_dir: Path) -> list[Path]:
+    """Copy class templates the user downloaded (to the inbox or "Загрузки") into the templates folder.
+
+    A file already there is replaced only by a newer download. Returns the copied files.
+    """
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for folder in folders:
+        if not folder.is_dir() or folder.resolve() == templates_dir.resolve():
+            continue
+        for path in sorted(folder.glob(TEMPLATE_FILE_GLOB)):
+            if path.name.startswith("~$"):
+                continue
+            target = templates_dir / path.name
+            try:
+                if target.exists() and target.stat().st_mtime >= path.stat().st_mtime:
+                    continue
+                shutil.copy2(path, target)
+            except OSError:
+                continue
+            copied.append(target)
+    return copied
+
+
 def upload_file_name(made: tuple[FillResult, Path] | None, article: str) -> str:
     if not made:
         return ""
     result, csv_path = made
     if result.check_path and article in result.check_articles:
-        return result.check_path.name
-    return csv_path.name
+        return f"{CHECK_DIR}/{result.check_path.name}"
+    return f"{UPLOAD_DIR}/{csv_path.name}"
+
+
+def field_label(header: str) -> str:
+    return header.removeprefix(CONFIG_PREFIX).strip()
+
+
+def card_status(run: CategoryRun, article: str, missing: int) -> str:
+    choice = run.classes.get(article)
+    if choice is None:
+        return "Класс не подобран: укажите класс вручную"
+    made = run.results.get(choice.code)
+    if made is None:
+        return "Нет шаблона класса: скачайте его"
+    result, _csv = made
+    if result.check_path and article in result.check_articles:
+        status = "Проверить перед загрузкой (лист «Проверить»)"
+    else:
+        status = "Можно загружать"
+    if missing:
+        status += f"; не заполнено полей: {missing} (лист «Дозаполнить»)"
+    return status
 
 
 def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library: dict[str, Path]) -> None:
+    """One workbook to look at: what to do, every product's state, empty fields, values to check."""
+    missing_by_article = Counter(row.article for row in run.missing_rows)
     workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Новинки"
-    sheet.append(["Артикул", "Название", "81 класс", "Как выбран класс", "Проверить класс", "Шаблон", "Файл для загрузки"])
+    todo = workbook.active
+    todo.title = "Что делать"
+    for line in todo_lines(run):
+        todo.append([line])
+    todo.column_dimensions["A"].width = 120
+
+    sheet = workbook.create_sheet("Товары")
+    sheet.append(["Артикул", "Название", "81 класс", "Как выбран класс", "Состояние", "Файл для загрузки"])
     for article in sorted(products):
         product = products[article]
         choice = run.classes.get(article)
         code = choice.code if choice else ""
-        made = run.results.get(code)
+        basis = choice.basis if choice else "класс не найден, укажите вручную"
+        if choice and not choice.sure:
+            basis += " — проверьте класс"
         sheet.append(
             [
                 article,
                 clean_product_name(product.full_name or product.name),
                 code,
-                choice.basis if choice else "класс не найден, укажите вручную",
-                "" if choice and choice.sure else "да",
-                library[code].name if code in library else ("нет, скачайте из личного кабинета ЭТМ" if code else ""),
-                upload_file_name(made, article),
+                basis,
+                card_status(run, article, missing_by_article[article]),
+                upload_file_name(run.results.get(code), article),
             ]
         )
+    for row in sheet.iter_rows(min_row=2, min_col=6, max_col=6):
+        cell = row[0]
+        if cell.value:
+            cell.hyperlink = str(cell.value)  # relative to Итог.xlsx: a click opens the file
+            cell.style = "Hyperlink"
     for article in run.not_found:
-        sheet.append([article, "", "", "артикула нет в базе", "", "", ""])
-    widths = {"A": 14, "B": 70, "C": 12, "D": 40, "E": 16, "F": 48, "G": 48}
-    for letter, width in widths.items():
-        sheet.column_dimensions[letter].width = width
+        sheet.append([article, "", "", "", "Артикула нет в базе", ""])
+
+    empty = workbook.create_sheet("Дозаполнить")
+    empty.append(["Артикул", "Название", "81 класс", "Поле", "Почему пусто", "Допустимые значения"])
+    for row in run.missing_rows:
+        product = products.get(row.article)
+        choice = run.classes.get(row.article)
+        allowed = run.allowed.get((choice.code if choice else "", canonical(field_label(row.column))), ())
+        empty.append(
+            [
+                row.article,
+                clean_product_name(product.full_name or product.name) if product else "",
+                choice.code if choice else "",
+                field_label(row.column),
+                row.note,
+                ", ".join(allowed[:15]) + (" …" if len(allowed) > 15 else ""),
+            ]
+        )
+
+    check = workbook.create_sheet("Проверить")
+    check.append(["Артикул", "Название", "81 класс", "Поле", "Значение", "Почему проверить"])
+    for row in run.check_rows:
+        product = products.get(row.article)
+        choice = run.classes.get(row.article)
+        check.append(
+            [
+                row.article,
+                clean_product_name(product.full_name or product.name) if product else "",
+                choice.code if choice else "",
+                field_label(row.column),
+                row.value,
+                row.note,
+            ]
+        )
+    for article, choice in sorted(run.classes.items()):
+        if not choice.sure and choice.code in run.results:
+            product = products.get(article)
+            check.append(
+                [
+                    article,
+                    clean_product_name(product.full_name or product.name) if product else "",
+                    choice.code,
+                    "81 класс",
+                    choice.code,
+                    f"класс подобран неуверенно ({choice.basis})",
+                ]
+            )
+
+    templates = workbook.create_sheet("Нет шаблона")
+    templates.append(["81 класс", "Товаров", "Например", "Что сделать"])
+    for code, members in sorted(run.missing_templates.items()):
+        examples = "; ".join(
+            clean_product_name(products[article].full_name or products[article].name) for article in members[:3]
+        )
+        templates.append(
+            [
+                code,
+                len(members),
+                examples,
+                f"Скачайте в личном кабинете ЭТМ шаблон класса {code} (upload_goods_category_template_{code}.xlsx) "
+                "в «Загрузки» или папку входящих и нажмите «Ещё раз для тех же товаров»",
+            ]
+        )
+
+    widths = {"A": 14, "B": 60, "C": 12, "D": 36, "E": 40, "F": 60}
+    for page in (sheet, empty, check):
+        page.freeze_panes = "A2"
+        page.auto_filter.ref = page.dimensions
+        for letter, width in widths.items():
+            page.column_dimensions[letter].width = width
+    for letter, width in {"A": 12, "B": 10, "C": 70, "D": 90}.items():
+        templates.column_dimensions[letter].width = width
     workbook.save(run.summary_path)
+
+
+def needs_for_managers(run: CategoryRun, products: dict[str, ProductRecord], series: dict[str, str]) -> list[Need]:
+    """The empty fields as questions for the product managers, with ETM's list where it has one."""
+    needs = []
+    for row in run.missing_rows:
+        product = products.get(row.article)
+        choice = run.classes.get(row.article)
+        allowed = run.allowed.get((choice.code if choice else "", canonical(field_label(row.column))), ())
+        needs.append(
+            Need(
+                article=row.article,
+                name=clean_product_name(product.full_name or product.name) if product else "",
+                series=series.get(row.article, ""),
+                key=row.column,
+                label=field_label(row.column),
+                kind="A" if allowed else "",
+                allowed=allowed,
+            )
+        )
+    return needs
 
 
 def fill_new_products(
@@ -428,18 +606,23 @@ def fill_new_products(
     manual_values_path: Path | None = None,
     codes_path: Path | None = None,
     template: PartnerTemplate | None = None,
+    answers_file: Path | None = None,
 ) -> CategoryRun:
+    """Cards for the products: one folder with Итог.xlsx, the files to upload, the ones to check first
+    and the working files. Answers product managers sent back fill what the base lacks."""
     template = template or load_partner_template("etm")
     products = fetch_products(db_path, articles)
     output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run = CategoryRun(output_dir=output_dir, summary_path=output_dir / f"новинки_сводка_{stamp}.xlsx")
+    upload_dir, check_dir, tech_dir = (output_dir / name for name in (UPLOAD_DIR, CHECK_DIR, TECH_DIR))
+    run = CategoryRun(output_dir=output_dir, summary_path=output_dir / SUMMARY_NAME)
+    run.articles = list(articles)
     run.not_found = sorted(set(articles) - set(products))
     library = category_library(templates_dir)
     run.classes = suggest_classes(db_path, products, frozenset(library))
     run.unclassified = sorted(article for article in products if article not in run.classes)
     codes = load_codes_file(codes_path) if codes_path else {}
     run.codes_file = codes_path
+    answers = load_answers(answers_file)
     defaults = load_series_defaults(template.code)
     series = series_names(db_path, sorted(products))
 
@@ -452,40 +635,160 @@ def fill_new_products(
             run.missing_templates[code] = members
             continue
         category = read_category_template(library[code])
-        input_path = output_dir / f"новинки_{code}.xlsx"
+        for header_key, values in category.dropdowns.items():
+            run.allowed[(code, header_key)] = values
+        tech_dir.mkdir(parents=True, exist_ok=True)
+        input_path = tech_dir / f"новинки_{code}.xlsx"
         prepare_input(category, members, input_path)
-        fallback = {**series_default_values(defaults, category, members, products, series), **codes}
+        member_set = set(members)
+        given = {
+            (article, key): (value, "pm_answer") for (article, key), value in answers.items() if article in member_set
+        }
+        fallback = {**series_default_values(defaults, category, members, products, series), **codes, **given}
         result = fill_xlsx_template(
             db_path,
             input_path,
-            output_dir,
+            tech_dir,
             rules_path,
             manual_values_path,
             template=replace(template, dropdowns=category.dropdowns),
             fallback_values=fallback,
         )
-        csv_path = upload_csv_path(output_dir, "new", (series.get(article, "") for article in members), code)
-        xlsx_path = result.output_path.rename(csv_path.with_suffix(result.output_path.suffix))
-        report_path = result.report_path.rename(report_path_for(csv_path))
+        # The name is made unique against the working files, which every class keeps.
+        name = upload_csv_path(tech_dir, "new", (series.get(article, "") for article in members), code).name
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = upload_dir / name
+        xlsx_path = result.output_path.rename(tech_dir / f"{csv_path.stem}{result.output_path.suffix}")
+        report_path = result.report_path.rename(report_path_for(tech_dir / csv_path.name))
         result = replace(result, output_path=xlsx_path, report_path=report_path)
         held = result.check_articles | {article for article in members if not run.classes[article].sure}
         safe_rows = export_upload_csv(result.output_path, csv_path, frozenset(members) - held)
+        if not safe_rows:
+            csv_path.unlink()  # nothing ready: no empty file to upload by mistake
         check_path = None
         if held:
-            check_path = check_path_for(csv_path)
+            check_dir.mkdir(parents=True, exist_ok=True)
+            check_path = check_path_for(check_dir / csv_path.name)
             export_upload_csv(result.output_path, check_path, held)
         result = replace(result, check_path=check_path, check_rows=len(held), safe_rows=safe_rows, check_articles=frozenset(held))
         input_path.unlink()
         run.results[code] = (result, csv_path)
+        run.missing_rows.extend(row for row in result.rows if row.status in MISSING_STATUSES and row.column)
+        run.check_rows.extend(row for row in result.rows if row.status in CHECK_STATUSES and row.column)
+    run.needs = needs_for_managers(run, products, series)
     write_summary(run, products, library)
+    save_needs(run)
     return run
+
+
+NEEDS_FILE = "запросы_продактам.json"
+RUN_FOLDER_PREFIX = "ЭТМ карточки "
+
+
+def save_needs(run: CategoryRun) -> None:
+    """The empty fields of the run, so the managers can be asked after the program was closed."""
+    path = run.output_dir / TECH_DIR / NEEDS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    items = [{**asdict(need), "allowed": list(need.allowed)} for need in run.needs]
+    atomic_write_json(path, {"version": 1, "needs": items})
+
+
+def last_run_needs(output_dir: Path) -> tuple[Path, list[Need]] | None:
+    """The newest cards run in the output folder and its empty fields, or None."""
+    runs = sorted(
+        (folder for folder in output_dir.glob(f"{RUN_FOLDER_PREFIX}*") if (folder / TECH_DIR / NEEDS_FILE).is_file()),
+        key=lambda folder: folder.stat().st_mtime,
+    )
+    if not runs:
+        return None
+    try:
+        data = json.loads((runs[-1] / TECH_DIR / NEEDS_FILE).read_text(encoding="utf-8"))
+        needs = [Need(**{**item, "allowed": tuple(item.get("allowed", ()))}) for item in data.get("needs", [])]
+    except (OSError, ValueError, TypeError):
+        return None
+    return runs[-1], needs
+
+
+def short_lines(run: CategoryRun) -> list[str]:
+    """The few numbers for the message after a run; the details are in Итог.xlsx."""
+    ready = sum(result.safe_rows for result, _ in run.results.values())
+    held = sum(result.check_rows for result, _ in run.results.values())
+    lines = [f"Товаров: {len(run.articles)}", f"Можно загружать сразу: {ready}"]
+    if held:
+        lines.append(f"Посмотреть перед загрузкой: {held}")
+    if run.missing_rows:
+        lines.append(f"Пустых полей: {len(run.missing_rows)} у {len({row.article for row in run.missing_rows})} товаров")
+    waiting = sum(len(members) for members in run.missing_templates.values())
+    if waiting:
+        lines.append(f"Ждут шаблона класса: {waiting} (классов: {len(run.missing_templates)})")
+    if run.unclassified:
+        lines.append(f"Класс не подобран: {len(run.unclassified)}")
+    if run.not_found:
+        lines.append(f"Нет в базе: {len(run.not_found)}")
+    lines.append("")
+    lines.append("Что делать дальше — на первом листе Итог.xlsx (он уже открыт).")
+    return lines
+
+
+def todo_lines(run: CategoryRun) -> list[str]:
+    """The "Что делать" sheet: the steps in order, only those that apply."""
+    ready = [(result, path) for result, path in run.results.values() if result.safe_rows]
+    held = sum(result.check_rows for result, _ in run.results.values())
+    lines = []
+    step = 1
+    if ready:
+        lines.append(
+            f"{step}. Загрузите в ЭТМ файлы из папки «{UPLOAD_DIR}»: {len(ready)} файлов, "
+            f"{sum(result.safe_rows for result, _ in ready)} карточек. Один файл — один класс ЭТМ."
+        )
+        step += 1
+    if held:
+        lines.append(
+            f"{step}. {held} карточек в папке «{CHECK_DIR}»: посмотрите лист «Проверить» (что и почему). "
+            "Если всё верно, загрузите и эти файлы."
+        )
+        step += 1
+    if run.missing_templates:
+        codes = ", ".join(sorted(run.missing_templates))
+        count = sum(len(members) for members in run.missing_templates.values())
+        lines.append(
+            f"{step}. Для {count} товаров нет шаблона класса ({codes}): скачайте шаблоны в личном кабинете ЭТМ "
+            "в «Загрузки» или папку входящих (лист «Нет шаблона») и нажмите «Ещё раз для тех же товаров» — "
+            "программа сама заберёт их в папку шаблонов."
+        )
+        step += 1
+    if run.missing_rows:
+        products = len({row.article for row in run.missing_rows})
+        lines.append(
+            f"{step}. Пустых полей: {len(run.missing_rows)} у {products} товаров (лист «Дозаполнить»). "
+            "Нажмите «Запросить у продактов»: каждому продакту уйдёт Excel с этими полями. Когда ответы вернутся, "
+            "примите их и нажмите «Ещё раз для тех же товаров» — карточки соберутся с ответами."
+        )
+        step += 1
+    if run.unclassified:
+        lines.append(f"{step}. Класс не подобран у {len(run.unclassified)} товаров (лист «Товары»): укажите класс вручную.")
+        step += 1
+    if run.not_found:
+        lines.append(f"{step}. Нет в базе: {len(run.not_found)} артикулов. Обновите базу из прайса или проверьте артикулы.")
+        step += 1
+    if not lines:
+        lines.append("Делать ничего не нужно.")
+    lines.append("")
+    lines.append(f"Папка «{TECH_DIR}» — рабочие копии и подробные отчёты, обычно туда смотреть не нужно.")
+    if run.codes_file:
+        lines.append(f"Коды ТН ВЭД и ОКПД2 взяты из файла {run.codes_file.name}.")
+    else:
+        lines.append("Файла ЧЗ с кодами не нашлось: сохраните его в «Загрузки», и программа возьмёт самый свежий.")
+    return lines
 
 
 def run_lines(run: CategoryRun) -> list[str]:
     """What the user needs to know after a run, in plain words."""
     lines = []
     for code, (result, csv_path) in sorted(run.results.items()):
-        line = f"Класс {code}: {result.found_articles} товаров, можно грузить сразу {result.safe_rows} — файл {csv_path.name}"
+        line = f"Класс {code}: {result.found_articles} товаров, можно грузить сразу {result.safe_rows}"
+        if result.safe_rows:
+            line += f" — файл {csv_path.name}"
         if result.check_path:
             line += f"; на проверку {result.check_rows} — файл {result.check_path.name}"
         if result.missing_cells:
@@ -493,16 +796,18 @@ def run_lines(run: CategoryRun) -> list[str]:
         lines.append(line)
     for code, members in sorted(run.missing_templates.items()):
         lines.append(
-            f"Нет шаблона класса {code} ({len(members)} товаров): скачайте его в личном кабинете ЭТМ, "
-            "положите в папку шаблонов и запустите ещё раз."
+            f"Нет шаблона класса {code} ({len(members)} товаров): скачайте его в личном кабинете ЭТМ "
+            "в «Загрузки» и нажмите «Ещё раз для тех же товаров»."
         )
     if run.unclassified:
-        lines.append(f"Не удалось подобрать класс: {len(run.unclassified)} товаров, список в сводке.")
+        lines.append(f"Не удалось подобрать класс: {len(run.unclassified)} товаров, список в итоге.")
     if run.not_found:
         lines.append(f"Нет в базе: {len(run.not_found)} артикулов.")
+    if run.missing_rows:
+        lines.append(f"Пустых полей: {len(run.missing_rows)} — можно спросить у продактов (кнопка «Запросить у продактов»).")
     if run.codes_file:
         lines.append(f"Коды ТН ВЭД и ОКПД2 взяты из файла {run.codes_file.name}.")
     else:
         lines.append("Файла ЧЗ с кодами не нашлось: сохраните его в «Загрузки», и программа возьмёт самый свежий.")
-    lines.append(f"Сводка: {run.summary_path.name}")
+    lines.append(f"Главный файл: {run.summary_path.name} в папке {run.output_dir.name}")
     return lines

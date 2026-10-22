@@ -25,7 +25,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -41,7 +43,17 @@ from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, ensure_wor
 from .db import get_stats
 from .db_utils import BackupRejected, copy_sqlite_database
 from .dimension_audit import AuditResult, ClearResult, audit_dimensions, audit_lines, clear_lines, clear_wrong_dimensions
-from .etm_categories import CategoryRun, fill_new_products, latest_codes_file, new_articles_since, run_lines
+from .etm_categories import (
+    CategoryRun,
+    collect_templates,
+    fill_new_products,
+    latest_codes_file,
+    new_articles_since,
+    last_run_needs,
+    parse_articles,
+    run_lines,
+    short_lines,
+)
 from .etim_importer import (
     EtimDecisionApplyResult,
     EtimImportResult,
@@ -301,6 +313,9 @@ class NewProductsWorker(QThread):
         rules_path: Path | None,
         manual_values_file: Path | None,
         codes_file: Path | None,
+        articles: list[str] | None = None,
+        answers_file: Path | None = None,
+        incoming: list[Path] | None = None,
     ) -> None:
         super().__init__()
         self.db_path = db_path
@@ -310,24 +325,29 @@ class NewProductsWorker(QThread):
         self.rules_path = rules_path
         self.manual_values_file = manual_values_file
         self.codes_file = codes_file
+        self.articles = articles
+        self.answers_file = answers_file
+        self.incoming = incoming or []
 
     def run(self) -> None:
         try:
-            articles = new_articles_since(self.db_path, self.since)
+            articles = self.articles if self.articles is not None else new_articles_since(self.db_path, self.since)
             if not articles:
                 self.done.emit(None)
                 return
-            self.done.emit(
-                fill_new_products(
-                    self.db_path,
-                    articles,
-                    self.templates_dir,
-                    self.output_dir,
-                    self.rules_path,
-                    self.manual_values_file,
-                    self.codes_file,
-                )
+            copied = collect_templates(self.incoming, self.templates_dir)
+            run = fill_new_products(
+                self.db_path,
+                articles,
+                self.templates_dir,
+                self.output_dir,
+                self.rules_path,
+                self.manual_values_file,
+                self.codes_file,
+                answers_file=self.answers_file,
             )
+            run.copied_templates = copied
+            self.done.emit(run)
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -592,12 +612,20 @@ class MainWindow(QMainWindow):
         self.new_since_edit.setDisplayFormat("dd.MM.yyyy")
         last_since = QDate.fromString(self.config.last_new_since, "dd.MM.yyyy")
         self.new_since_edit.setDate(last_since if last_since.isValid() else QDate.currentDate().addDays(-30))
-        self.new_products_log = QTextEdit()
-        self.new_products_log.setReadOnly(True)
+        self.etm_new_mode = QRadioButton("Новинки, появившиеся после")
+        self.etm_list_mode = QRadioButton("Эти артикулы")
+        self.etm_new_mode.setChecked(True)
+        self.etm_articles_edit = QPlainTextEdit()
+        self.etm_articles_edit.setPlaceholderText("Артикулы через пробел, запятую или с новой строки")
+        self.etm_articles_edit.setMaximumHeight(70)
+        self.etm_articles_edit.textChanged.connect(lambda: self.etm_list_mode.setChecked(True))
         self.last_new_products_dir: Path | None = None
         self.last_new_products_summary: Path | None = None
-        self.open_new_products_dir_button = QPushButton("Открыть папку с файлами")
-        self.open_new_products_summary_button = QPushButton("Открыть сводку")
+        self.last_etm_run: CategoryRun | None = None
+        self.open_new_products_dir_button = QPushButton("Открыть папку")
+        self.open_new_products_summary_button = QPushButton("Открыть итог")
+        self.etm_pm_request_button = QPushButton("Запросить у продактов")
+        self.etm_again_button = QPushButton("Ещё раз для тех же товаров")
         self.raek_zip_edit = QLineEdit()
         self.raek_zip_edit.setPlaceholderText("самый свежий архив РАЭК из папки входящих или «Загрузок»")
         self.raek_site_check = QCheckBox("Сначала взять ссылки, картинки и сертификаты с сайта ensmas.ru (нужен интернет)")
@@ -627,6 +655,7 @@ class MainWindow(QMainWindow):
         self.status_text.setReadOnly(True)
         self.fill_log = QTextEdit()
         self.fill_log.setReadOnly(True)
+        self.new_products_log = self.fill_log  # one ETM tab, one log
         self.price_log = QTextEdit()
         self.price_log.setReadOnly(True)
         self.rules_log = QTextEdit()
@@ -711,11 +740,11 @@ class MainWindow(QMainWindow):
     def build_ui(self) -> QWidget:
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_database_tab(), "База")
-        self.tabs.addTab(self.build_new_products_tab(), "Новинки ЭТМ")
+        self.tabs.addTab(self.build_etm_tab(), "ЭТМ")
         self.tabs.addTab(self.build_raek_tab(), "РАЭК")
-        self.tabs.addTab(self.build_fill_tab(), "Заполнение upload_goods")
         self.tabs.addTab(self.build_price_tab(), "Обновление базы")
-        self.tabs.addTab(self.build_rules_tab(), "Правила маппинга")
+        self.rules_tab = self.build_rules_tab()
+        self.tabs.addTab(self.rules_tab, "Правила маппинга")
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -782,12 +811,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status_text, stretch=1)
         return root
 
-    def build_fill_tab(self) -> QWidget:
-        root = QWidget()
-        layout = QVBoxLayout(root)
+    def build_own_template_box(self) -> QGroupBox:
+        """Filling a template the user picked by hand: a class the program did not choose, or any other file."""
+        outer = QGroupBox("Свой шаблон upload_goods (если класс выбран вручную)")
+        layout = QVBoxLayout(outer)
 
-        box = QGroupBox("Шаблон")
+        box = QWidget()
         form = QFormLayout(box)
+        form.setContentsMargins(0, 0, 0, 0)
 
         template_row = QHBoxLayout()
         template_row.addWidget(self.template_path_edit)
@@ -826,54 +857,76 @@ class MainWindow(QMainWindow):
         layout.addWidget(box)
         layout.addLayout(actions)
         layout.addLayout(result_actions)
-        layout.addWidget(self.build_manual_import_box())
-        layout.addWidget(QLabel("Журнал"))
-        layout.addWidget(self.fill_log, stretch=1)
-        return root
+        return outer
 
-    def build_new_products_tab(self) -> QWidget:
+    def build_etm_tab(self) -> QWidget:
+        """Cards for ETM: the program picks the classes; the user's own template stays below."""
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.addWidget(
             QLabel(
-                "Программа найдёт новинки из прайса, подберёт каждой класс ЭТМ, заполнит шаблоны классов\n"
-                "и сохранит файлы для загрузки в ЭТМ. Если шаблона какого-то класса нет, она скажет, какой скачать."
+                "Программа подберёт каждому товару класс ЭТМ, заполнит шаблоны классов и соберёт всё в одну папку:\n"
+                "«Итог.xlsx» (что делать, что проверить и дозаполнить), файлы для загрузки и файлы на проверку.\n"
+                "Скачанные из личного кабинета ЭТМ шаблоны классов программа сама забирает из папки входящих и «Загрузок»."
             )
         )
-        box = QGroupBox("Что нужно")
-        form = QFormLayout(box)
-        form.addRow("Новинки, появившиеся после", self.new_since_edit)
+        box = QGroupBox("Какие товары")
+        form = QGridLayout(box)
+        form.addWidget(self.etm_new_mode, 0, 0)
+        form.addWidget(self.new_since_edit, 0, 1)
+        form.addWidget(self.etm_list_mode, 1, 0, Qt.AlignmentFlag.AlignTop)
+        form.addWidget(self.etm_articles_edit, 1, 1, 1, 2)
 
         templates_row = QHBoxLayout()
         templates_row.addWidget(self.class_templates_edit)
         choose_templates = QPushButton("Выбрать...")
         choose_templates.clicked.connect(self.choose_class_templates_dir)
         templates_row.addWidget(choose_templates)
-        form.addRow("Папка шаблонов классов ЭТМ", templates_row)
+        form.addWidget(QLabel("Папка шаблонов классов ЭТМ"), 2, 0)
+        form.addLayout(templates_row, 2, 1, 1, 2)
 
         codes_row = QHBoxLayout()
         codes_row.addWidget(self.codes_file_edit)
         choose_codes = QPushButton("Выбрать...")
         choose_codes.clicked.connect(self.choose_codes_file)
         codes_row.addWidget(choose_codes)
-        form.addRow("Файл ЧЗ с кодами (самый свежий из папки входящих или «Загрузок» берётся сам)", codes_row)
+        self.codes_file_edit.setPlaceholderText("пусто — самый свежий файл ЧЗ из папки входящих или «Загрузок»")
+        form.addWidget(QLabel("Файл ЧЗ с кодами"), 3, 0)
+        form.addLayout(codes_row, 3, 1, 1, 2)
 
         actions = QHBoxLayout()
-        run_button = QPushButton("Сформировать новинки")
-        run_button.clicked.connect(self.run_new_products)
+        self.etm_run_button = run_button = QPushButton("Сделать карточки")
+        run_button.clicked.connect(lambda: self.run_new_products())  # not the button's "checked" flag as articles
+        self.etm_again_button.setToolTip("Те же товары, что в прошлый раз: например, когда пришли ответы продактов или шаблоны")
+        self.etm_again_button.clicked.connect(self.run_etm_again)
+        self.etm_again_button.setEnabled(bool(self.config.last_etm_articles))
         self.open_new_products_dir_button.clicked.connect(self.open_new_products_dir)
         self.open_new_products_summary_button.clicked.connect(self.open_new_products_summary)
         self.open_new_products_dir_button.setEnabled(False)
         self.open_new_products_summary_button.setEnabled(False)
-        actions.addWidget(run_button)
-        actions.addWidget(self.open_new_products_dir_button)
-        actions.addWidget(self.open_new_products_summary_button)
+        for button in (run_button, self.etm_again_button, self.open_new_products_summary_button, self.open_new_products_dir_button):
+            actions.addWidget(button)
         actions.addStretch(1)
+
+        pm_actions = QHBoxLayout()
+        self.etm_pm_request_button.setToolTip("Пустые поля карточек — Excel каждому продакту и черновик письма")
+        self.etm_pm_request_button.clicked.connect(self.write_etm_pm_requests)
+        # Also after a restart, for the newest run that has empty fields.
+        self.etm_pm_request_button.setEnabled(self.saved_etm_needs() is not None)
+        pm_answers = QPushButton("Принять ответы продактов...")
+        pm_answers.setToolTip("Файлы-запросы, которые продакты прислали обратно: ответы идут в следующие карточки")
+        pm_answers.clicked.connect(lambda: self.import_pm_answers(self.fill_log, offer_cards=True))
+        pm_actions.addWidget(self.etm_pm_request_button)
+        pm_actions.addWidget(pm_answers)
+        pm_actions.addStretch(1)
 
         layout.addWidget(box)
         layout.addLayout(actions)
+        layout.addLayout(pm_actions)
+        layout.addWidget(self.build_own_template_box())
+        layout.addWidget(self.build_manual_import_box())
         layout.addWidget(QLabel("Журнал"))
-        layout.addWidget(self.new_products_log, stretch=1)
+        layout.addWidget(self.fill_log, stretch=1)
         return root
 
     def build_raek_tab(self) -> QWidget:
@@ -1015,8 +1068,34 @@ class MainWindow(QMainWindow):
 
     def write_pm_requests(self) -> None:
         result = self.last_raek_result
+        if result is not None:
+            self.ask_managers(result.needs, f"Заполняем данные для РАЭК ({result.output_path.stem})", self.raek_log)
+
+    def write_etm_pm_requests(self) -> None:
+        run = self.last_etm_run
+        if run is not None:
+            self.ask_managers(run.needs, f"Заполняем карточки товаров для ЭТМ ({run.output_dir.name})", self.fill_log)
+            return
+        # After a restart: the newest cards run in the output folder.
+        found = self.saved_etm_needs()
+        if found is None:
+            QMessageBox.information(self, "Нет карточек", "Сначала нажмите «Сделать карточки».")
+            return
+        folder, needs = found
+        self.ask_managers(needs, f"Заполняем карточки товаров для ЭТМ ({folder.name})", self.fill_log)
+
+    def saved_etm_needs(self):
         work_text = self.work_dir_edit.text().strip()
-        if result is None or not work_text:
+        if not work_text:
+            return None
+        found = last_run_needs(Path(work_text) / "output")
+        return found if found and found[1] else None
+
+    def ask_managers(self, needs: list, reason: str, log: QTextEdit) -> None:
+        """One Excel request per product manager about what is missing, and an email draft with it."""
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
             return
         work = Path(work_text)
         try:
@@ -1030,8 +1109,7 @@ class MainWindow(QMainWindow):
                 return
             output = work / "output" / f"запросы_продактам_{dt.date.today().isoformat()}"
             assignment = load_assignment(assignment_file)
-            reason = f"Заполняем данные для РАЭК ({result.output_path.stem})"
-            requests = write_requests(result.needs, assignment, work, output, reason)
+            requests = write_requests(needs, assignment, work, output, reason)
             if not requests.files and requests.skipped_open:
                 answer = QMessageBox.question(
                     self,
@@ -1041,20 +1119,22 @@ class MainWindow(QMainWindow):
                     "или вы только что вписали почты. Ответы на прежние файлы программа всё равно примет.",
                 )
                 if answer == QMessageBox.StandardButton.Yes:
-                    requests = write_requests(result.needs, assignment, work, output, reason, again=True)
+                    requests = write_requests(needs, assignment, work, output, reason, again=True)
         except Exception:
-            self.on_raek_failed(traceback.format_exc())
+            log.append(traceback.format_exc())
+            QMessageBox.critical(self, "Ошибка", traceback.format_exc())
             return
         lines = request_lines(requests) or ["Новых вопросов нет."]
         if requests.files:
             lines.append("Откройте черновики писем (.eml) в папке и отправьте. Ответы примите кнопкой «Принять ответы продактов».")
         for line in lines:
-            self.raek_log.append(line)
+            log.append(line)
         if requests.files:
             self.open_path(output)
         QMessageBox.information(self, "Запросы продактам", "\n".join(lines))
 
-    def import_pm_answers(self) -> None:
+    def import_pm_answers(self, log: QTextEdit | None = None, offer_cards: bool = False) -> None:
+        log = log if isinstance(log, QTextEdit) else self.raek_log
         work_text = self.work_dir_edit.text().strip()
         if not work_text:
             QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
@@ -1071,9 +1151,21 @@ class MainWindow(QMainWindow):
             except Exception:
                 self.on_raek_failed(traceback.format_exc())
                 return
-        lines.append("Ответы будут использованы при следующем заполнении архива РАЭК.")
+        lines.append(
+            "Ответы будут использованы при следующем заполнении архива РАЭК и карточек ЭТМ "
+            "(для карточек — кнопка «Ещё раз для тех же товаров»)."
+        )
         for line in lines:
-            self.raek_log.append(line)
+            log.append(line)
+        if offer_cards and self.config.last_etm_articles and self.worker is None:
+            answer = QMessageBox.question(
+                self,
+                "Ответы продактов",
+                "\n".join(lines) + "\n\nСобрать карточки тех же товаров заново, уже с этими ответами?",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.run_etm_again()
+            return
         QMessageBox.information(self, "Ответы продактов", "\n".join(lines))
 
     def remember_raek_answers(self) -> None:
@@ -1306,24 +1398,35 @@ class MainWindow(QMainWindow):
         if self.last_new_products_summary is not None:
             self.open_path(self.last_new_products_summary)
 
-    def run_new_products(self) -> None:
+    def run_new_products(self, articles: list[str] | None = None) -> None:
+        """Cards for new products since the date, the typed articles, or the given list."""
         try:
             self.save_current_config()
             db_path = self.validated_db_path()
             if db_path is None:
                 return
             templates_text = self.class_templates_edit.text().strip()
-            if not templates_text or not Path(templates_text).is_dir():
+            if not templates_text:
                 QMessageBox.warning(self, "Нет папки шаблонов", "Выберите папку, где лежат шаблоны классов ЭТМ.")
                 return
+            Path(templates_text).mkdir(parents=True, exist_ok=True)
+            if articles is None and self.etm_list_mode.isChecked():
+                articles = parse_articles(self.etm_articles_edit.toPlainText())
+                if not articles:
+                    QMessageBox.warning(self, "Нет артикулов", "Впишите артикулы или выберите «Новинки, появившиеся после».")
+                    return
             codes_text = self.codes_file_edit.text().strip()
             work_text = self.work_dir_edit.text().strip()
             codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             base = Path(work_text) / "output" if work_text else Path(templates_text).parent
             since = self.new_since_edit.date().toPython()
-            output_dir = base / f"новинки_{dt.date.today().isoformat()}"
+            output_dir = base / f"ЭТМ карточки {dt.datetime.now().strftime('%Y-%m-%d %H-%M')}"
             rules_path = ensure_default_rules(Path(work_text)) if work_text else None
-            self.new_products_log.append(f"Ищу новинки после {since:%d.%m.%Y}...")
+            if articles is None:
+                self.new_products_log.append(f"Ищу новинки после {since:%d.%m.%Y}...")
+            else:
+                self.new_products_log.append(f"Делаю карточки для {len(articles)} артикулов...")
+            self.etm_new_products_mode = articles is None
             worker = NewProductsWorker(
                 db_path,
                 since,
@@ -1332,27 +1435,48 @@ class MainWindow(QMainWindow):
                 rules_path,
                 self.current_manual_values_path(),
                 codes_path,
+                articles=articles,
+                answers_file=answers_path(Path(work_text)) if work_text else None,
+                incoming=codes_folders(work_text, self.inbox_dir_edit.text().strip()),
             )
             self.start_worker(worker, self.on_new_products_done, self.on_new_products_failed)
         except Exception:
             self.on_new_products_failed(traceback.format_exc())
 
+    def run_etm_again(self) -> None:
+        articles = parse_articles(self.config.last_etm_articles)
+        if articles:
+            self.run_new_products(articles)
+
     def on_new_products_done(self, run: CategoryRun | None) -> None:
         if run is None:
-            self.new_products_log.append("Новинок после этой даты нет. Если прайс давно не обновлялся, обновите базу из прайса.")
+            text = "Новинок после этой даты нет. Если прайс давно не обновлялся, обновите базу из прайса."
+            self.new_products_log.append(text)
+            QMessageBox.information(self, "Новинок нет", text)
             return
+        self.last_etm_run = run
         self.last_new_products_dir = run.output_dir
         self.last_new_products_summary = run.summary_path
         self.open_new_products_dir_button.setEnabled(True)
         self.open_new_products_summary_button.setEnabled(True)
-        self.config.last_new_since = dt.date.today().strftime("%d.%m.%Y")
+        self.etm_pm_request_button.setEnabled(bool(run.needs))
+        if getattr(self, "etm_new_products_mode", False):
+            self.config.last_new_since = dt.date.today().strftime("%d.%m.%Y")
+        self.config.last_etm_articles = " ".join(run.articles)
+        self.etm_again_button.setEnabled(True)
         save_config(self.config)
         lines = run_lines(run)
+        if run.copied_templates:
+            lines.insert(0, "Забрал новые шаблоны классов: " + ", ".join(path.name for path in run.copied_templates))
         self.new_products_log.append("Готово.")
         for line in lines:
             self.new_products_log.append(line)
-        self.send_run_summary("CHINT: новинки ЭТМ готовы", lines, self.new_products_log)
-        QMessageBox.information(self, "Новинки готовы", "\n".join(lines))
+        self.send_run_summary("CHINT: карточки ЭТМ готовы", lines, self.new_products_log)
+        self.open_path(run.summary_path)
+        short = short_lines(run)
+        if run.copied_templates:
+            short.insert(0, f"Забрал новые шаблоны классов: {len(run.copied_templates)}")
+        QMessageBox.information(self, "Карточки ЭТМ готовы", "\n".join(short))
 
     def on_new_products_failed(self, details: str) -> None:
         self.new_products_log.append("Ошибка.")
@@ -1540,6 +1664,7 @@ class MainWindow(QMainWindow):
             class_templates_dir=self.class_templates_edit.text().strip(),
             codes_file=self.codes_file_edit.text().strip(),
             last_new_since=self.config.last_new_since,
+            last_etm_articles=self.config.last_etm_articles,
             inbox_dir=self.inbox_dir_edit.text().strip(),
         )
         if self.config.work_path:
@@ -1981,7 +2106,7 @@ class MainWindow(QMainWindow):
         self.mapping_review_path_edit.setText(str(report_path))
         self.load_mapping_review()
         if self.tabs is not None:
-            self.tabs.setCurrentIndex(3)
+            self.tabs.setCurrentWidget(self.rules_tab)
         QMessageBox.information(self, "Анализ готов", f"Отчет:\n{report_path}")
 
     def on_price_downloaded(self, price_path: Path) -> None:
