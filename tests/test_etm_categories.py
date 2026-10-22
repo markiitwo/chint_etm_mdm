@@ -359,3 +359,83 @@ class SummaryUsabilityTests(CategoryTemplateTests):
         link = summary["Товары"]["F2"]
         self.assertTrue(link.value.startswith("На проверку/"))
         self.assertEqual(link.value, link.hyperlink.target)
+
+
+class ReferenceListsForManagersTests(CategoryTemplateTests):
+    """A field without a list in the class template takes ETM's reference: a dropdown or "число"."""
+
+    def run_with_reference(self, rows: list[list[object]]):
+        import json
+
+        from chint_etm_mdm.etm_categories import fill_new_products
+        from chint_etm_mdm.value_matching import import_etm_reference
+
+        rules_dir = self.root / "rules"
+        rules_dir.mkdir(exist_ok=True)
+        rules = rules_dir / "attribute_mappings.json"
+        rules.write_text(json.dumps({"version": 1, "class_rules": []}), encoding="utf-8")
+        reference = self.root / "spravochnik.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Справочник"
+        sheet.append(["Код характеристики", "Название характеристики", "Формат хар-ки", "Возможные значения", "Комментарий", "Дата актуализации значений"])
+        for row in rows:
+            sheet.append(row)
+        workbook.save(reference)
+        import_etm_reference(reference, rules_dir / "etm_reference.json")
+        run = fill_new_products(self.db, ["100"], self.templates, self.root / "out", rules)
+        return {need.key: need for need in run.needs}, run
+
+    def test_closed_list_from_reference(self) -> None:
+        needs, run = self.run_with_reference(
+            [["5", "Номинальный ток (А)", "Текстовая", value, None, None] for value in ("6 А", "10 А", "16 А")]
+        )
+        current = needs["Конфиг:Номинальный ток (А)"]
+        self.assertEqual(("A", ("6 А", "10 А", "16 А")), (current.kind, current.allowed))
+        empty = load_workbook(run.summary_path)["Дозаполнить"]
+        allowed = {row[3]: row[5] for row in empty.iter_rows(min_row=2, values_only=True)}
+        self.assertEqual("6 А, 10 А, 16 А", allowed["Номинальный ток (А)"])
+        # The class template's own list still wins where it has one.
+        self.assertIn("1P+N", needs["Конфиг:Количество силовых полюсов"].allowed)
+
+    def test_numeric_from_reference(self) -> None:
+        needs, _run = self.run_with_reference([["5", "Номинальный ток (А)", "Числовая", "000", None, None]])
+        self.assertEqual(("N", ()), (needs["Конфиг:Номинальный ток (А)"].kind, needs["Конфиг:Номинальный ток (А)"].allowed))
+
+
+class RaekAnswersInEtmTests(CategoryTemplateTests):
+    def test_codes_answered_for_raek_fill_etm_cards(self) -> None:
+        import json
+
+        from chint_etm_mdm.etm_categories import fill_new_products, shared_answers
+        from chint_etm_mdm.value_matching import canonical
+
+        answers = self.root / "answers.json"
+        answers.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "answers": [
+                        # As RAEK's request files key them: the column name in canonical form, ETIM codes.
+                        {"article": "586772", "key": canonical("Код ТН ВЭД"), "value": "8536201007"},
+                        {"article": "586772", "key": canonical("Код ОКПД2"), "value": "27.12.22.000"},
+                        {"article": "586772", "key": "EF003961", "value": "Разъемное (штепсельное) соединение"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        run = fill_new_products(self.db, ["586772"], self.templates, self.root / "out", answers_file=answers)
+        self.assertEqual(set(), {row.column for row in run.missing_rows} & {"Код ТН ВЭД", "Код ОКПД2"})
+        result, _csv = run.results["500820"]
+        with result.check_path.open(encoding="cp1251", newline="") as handle:
+            row = next(csv.DictReader(handle, delimiter=";"))
+        self.assertEqual(("8536201007", "27.12.22.000"), (row["Код ТН ВЭД"], row["Код ОКПД2"]))
+
+        # A barcode asked for RAEK goes to ETM's barcode column whatever it is called; characteristics stay.
+        found = shared_answers(
+            {("1", canonical("Штрих-код EAN")): "4600000000001", ("1", "EF001538"): "Да"},
+            {"1"},
+            ("Штрихкод", "Конфиг:С блоком управления"),
+        )
+        self.assertEqual({("1", "Штрихкод"): ("4600000000001", "pm_answer")}, found)
