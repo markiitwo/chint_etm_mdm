@@ -80,6 +80,8 @@ class RequestRoundTripTests(unittest.TestCase):
         result = write_requests(first.needs, load_assignment(assignment_file), self.root, out, "Заполняем файлы для РАЭК", today)
         levin = next(item for item in result.files if item.manager == "Левин И.")
         self.assertTrue(is_request_file(levin.path))
+        lists = load_workbook(levin.path)["Запрос"].data_validations.dataValidation
+        self.assertTrue(lists and all(not item.formula1.startswith("=") for item in lists))  # LibreOffice ignores "=…"
         self.assertIn("Левин И.", result.missing_emails)
         self.assertTrue((self.root / CONTACTS_NAME).exists())
         draft = message_from_bytes(levin.draft.read_bytes())

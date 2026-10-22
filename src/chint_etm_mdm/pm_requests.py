@@ -348,7 +348,7 @@ def write_request_file(path: Path, manager: str, needs: list[Need], request_id: 
                     lists.cell(idx, col, value)
                 letter = get_column_letter(col)
                 list_ranges[choices] = f"'{LISTS_SHEET}'!${letter}$1:${letter}${len(choices)}"
-            check = DataValidation(type="list", formula1=f"={list_ranges[choices]}", allow_blank=True)
+            check = DataValidation(type="list", formula1=list_ranges[choices], allow_blank=True)
             check.error = "Выберите значение из списка"
             check.showErrorMessage = False  # a manager may know better than the list: the program checks the answer itself
             sheet.add_data_validation(check)
