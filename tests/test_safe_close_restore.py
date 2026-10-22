@@ -184,3 +184,53 @@ class CloseDuringOperationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChosenPathsTests(CloseDuringOperationTests):
+    """GUI-01/GUI-03: plain messages for empty paths and folders; old ETIM reports can be picked."""
+
+    def warned(self, text: str):
+        from PySide6.QtWidgets import QMessageBox
+
+        with mock.patch.object(QMessageBox, "warning") as warning:
+            result = self.window.chosen_file(text, "База", "SQLite базу")
+        return result, warning
+
+    def test_empty_field_is_not_the_current_folder(self) -> None:
+        result, warning = self.warned("  ")
+        self.assertIsNone(result)
+        self.assertIn("не выбрано", warning.call_args[0][1])
+
+    def test_folder_instead_of_file(self) -> None:
+        result, warning = self.warned(self.temp_dir.name)
+        self.assertIsNone(result)
+        self.assertIn("выбрана папка", warning.call_args[0][1])
+
+    def test_missing_and_existing_file(self) -> None:
+        missing, warning = self.warned(str(Path(self.temp_dir.name) / "нет.sqlite"))
+        self.assertIsNone(missing)
+        self.assertIn("не найден", warning.call_args[0][1])
+        base = Path(self.temp_dir.name) / "base.sqlite"
+        base.write_bytes(b"")
+        found, warning = self.warned(str(base))
+        self.assertEqual(base, found)
+        warning.assert_not_called()
+
+    def test_apply_etim_button_works_after_restart(self) -> None:
+        self.assertIsNone(self.window.last_etim_report_path)
+        self.window.update_write_action_buttons()
+        self.assertTrue(self.window.apply_etim_report_button.isEnabled())
+        self.window.worker = FakeRunningWorker()
+        self.window.update_write_action_buttons()
+        self.assertFalse(self.window.apply_etim_report_button.isEnabled())
+
+    def test_apply_etim_always_offers_a_choice(self) -> None:
+        base = Path(self.temp_dir.name) / "base.sqlite"
+        base.write_bytes(b"")
+        self.window.db_path_edit.setText(str(base))
+        last = Path(self.temp_dir.name) / "last.xlsx"
+        last.write_bytes(b"")
+        self.window.last_etim_report_path = last
+        with mock.patch.object(self.window, "choose_etim_report_file", return_value=None) as choose:
+            self.window.apply_etim_decisions()
+        choose.assert_called_once_with(last)

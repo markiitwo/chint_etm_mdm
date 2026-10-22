@@ -608,9 +608,7 @@ class MainWindow(QMainWindow):
         for button in getattr(self, "write_action_buttons", []):
             button.setEnabled(not busy)
         if hasattr(self, "apply_etim_report_button"):
-            self.apply_etim_report_button.setEnabled(
-                not busy and self.last_etim_report_path is not None
-            )
+            self.apply_etim_report_button.setEnabled(not busy)
 
     def start_worker(
         self,
@@ -1445,11 +1443,15 @@ class MainWindow(QMainWindow):
             return
         self.open_path(self.last_etim_report_path)
 
-    def choose_etim_report_file(self) -> Path | None:
+    def choose_etim_report_file(self, suggested: Path | None = None) -> Path | None:
+        if suggested is not None and suggested.exists():
+            start = str(suggested)
+        else:
+            start = str(self.etim_report_dir())
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Выберите etim_import_report.xlsx",
-            "",
+            "Выберите отчёт ETIM (etim_import_report_...xlsx)",
+            start,
             "ETIM import report (*.xlsx *.xlsm);;All files (*)",
         )
         return Path(path) if path else None
@@ -1500,10 +1502,9 @@ class MainWindow(QMainWindow):
         if self.worker is not None:
             QMessageBox.warning(self, "Операция уже выполняется", "Дождитесь завершения текущей операции.")
             return
-        source = Path(self.db_path_edit.text().strip())
+        source = self.chosen_file(self.db_path_edit.text(), "База", "SQLite базу")
         work_dir_text = self.work_dir_edit.text().strip()
-        if not source.exists():
-            QMessageBox.warning(self, "База не найдена", "Сначала выберите существующую базу.")
+        if source is None:
             return
         if not work_dir_text:
             QMessageBox.warning(self, "Нет рабочей папки", "Сначала выберите рабочую папку.")
@@ -1529,7 +1530,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Бэкап не выбран", "Выберите файл бэкапа `.bak_*`.")
             return
         backup_path = Path(backup_text)
-        if not backup_path.exists():
+        if not backup_path.is_file():
             QMessageBox.warning(self, "Бэкап не найден", "Выберите существующий файл бэкапа.")
             return
         answer = QMessageBox.question(
@@ -1635,7 +1636,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Файл не выбран", "Выберите вручную дозаполненный _filled.xlsx.")
                 return
             filled_path = Path(filled_text)
-            if not filled_path.exists():
+            if not filled_path.is_file():
                 QMessageBox.warning(self, "Файл не найден", "Выберите существующий _filled.xlsx.")
                 return
             work_text = self.work_dir_edit.text().strip()
@@ -1694,11 +1695,22 @@ class MainWindow(QMainWindow):
 
     def validated_db_path(self) -> Path | None:
         self.save_current_config()
-        db_path = Path(self.db_path_edit.text().strip())
-        if not db_path.exists():
-            QMessageBox.warning(self, "База не найдена", "Выберите существующую SQLite базу.")
+        return self.chosen_file(self.db_path_edit.text(), "База", "SQLite базу")
+
+    def chosen_file(self, text: str, title: str, what: str) -> Path | None:
+        """The chosen file, or None after a plain message: an empty field is not "the current folder"."""
+        text = text.strip()
+        if not text:
+            QMessageBox.warning(self, f"{title}: не выбрано", f"Выберите {what}.")
             return None
-        return db_path
+        path = Path(text)
+        if path.is_dir():
+            QMessageBox.warning(self, f"{title}: выбрана папка", f"Выбрана папка, а нужен файл. Выберите {what}.\n\n{path}")
+            return None
+        if not path.is_file():
+            QMessageBox.warning(self, f"{title}: файл не найден", f"Файл не найден. Выберите {what}.\n\n{path}")
+            return None
+        return path
 
     def run_price_import_from_file(self) -> None:
         try:
@@ -1710,7 +1722,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Прайс не выбран", "Выберите XLSX прайс-лист.")
                 return
             price_path = Path(price_text)
-            if not price_path.exists():
+            if not price_path.is_file():
                 QMessageBox.warning(self, "Прайс не найден", "Выберите существующий XLSX прайс-лист.")
                 return
             self.price_log.append("Импортирую выбранный прайс...")
@@ -1753,7 +1765,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "ETIM не выбран", "Выберите XLSX ETIM-файл.")
                 return
             etim_path = Path(etim_text)
-            if not etim_path.exists():
+            if not etim_path.is_file():
                 QMessageBox.warning(self, "ETIM не найден", "Выберите существующий XLSX ETIM-файл.")
                 return
             self.price_log.append("Импортирую ETIM-файл...")
@@ -1767,9 +1779,8 @@ class MainWindow(QMainWindow):
             db_path = self.validated_db_path()
             if db_path is None:
                 return
-            report_path = self.last_etim_report_path
-            if report_path is None or not report_path.exists():
-                report_path = self.choose_etim_report_file()
+            # Always let the user pick: after a restart or to apply an older report, not only the last one.
+            report_path = self.choose_etim_report_file(self.last_etim_report_path)
             if report_path is None:
                 return
             answer = QMessageBox.question(
@@ -1789,8 +1800,6 @@ class MainWindow(QMainWindow):
             self.on_price_import_failed(traceback.format_exc())
 
     def validated_paths(self) -> tuple[Path, Path, Path, Path | None] | None:
-        db_path = Path(self.db_path_edit.text().strip())
-        template_path = Path(self.template_path_edit.text().strip())
         output_text = self.output_dir_edit.text().strip()
         output_dir = Path(output_text) if output_text else Path()
         work_text = self.work_dir_edit.text().strip()
@@ -1798,11 +1807,11 @@ class MainWindow(QMainWindow):
         if work_text:
             rules_path = ensure_default_rules(Path(work_text))
 
-        if not db_path.exists():
-            QMessageBox.warning(self, "База не найдена", "Выберите существующую SQLite базу.")
+        db_path = self.chosen_file(self.db_path_edit.text(), "База", "SQLite базу")
+        if db_path is None:
             return None
-        if not template_path.exists():
-            QMessageBox.warning(self, "Шаблон не найден", "Выберите файл шаблона.")
+        template_path = self.chosen_file(self.template_path_edit.text(), "Шаблон", "файл шаблона")
+        if template_path is None:
             return None
         if not output_text:
             QMessageBox.warning(self, "Нет папки результата", "Выберите папку результата.")
@@ -1931,7 +1940,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Отчет не выбран", "Выберите файл mapping_review.xlsx.")
             return
         review_path = Path(path_text)
-        if not review_path.exists():
+        if not review_path.is_file():
             QMessageBox.warning(self, "Отчет не найден", "Выберите существующий файл mapping_review.xlsx.")
             return
 
