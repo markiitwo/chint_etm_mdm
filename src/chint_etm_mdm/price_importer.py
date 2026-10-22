@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .db_utils import connect_database, create_sqlite_backup
+from .net import open_url
 from .number_parsing import parse_number
 
 
@@ -139,7 +140,7 @@ class PriceLinkParser(html.parser.HTMLParser):
 def find_latest_price_url(source_url: str = DEFAULT_PRICE_SOURCE_URL) -> str:
     source_url = source_url.strip() or DEFAULT_PRICE_SOURCE_URL
     request = urllib.request.Request(source_url, headers={"User-Agent": "CHINT ETM MDM"})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with open_url(request, timeout=30) as response:
         raw_html = response.read()
         encoding = response.headers.get_content_charset() or "utf-8"
     page_html = raw_html.decode(encoding, errors="replace")
@@ -170,7 +171,7 @@ def download_price_file(url: str, downloads_dir: Path) -> Path:
     request = urllib.request.Request(url, headers={"User-Agent": "CHINT ETM MDM"})
     temp_path: Path | None = None
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with open_url(request, timeout=120) as response:
             filename = filename_from_response(url, response.headers.get("Content-Disposition", ""))
             content_length_text = response.headers.get("Content-Length", "")
             try:

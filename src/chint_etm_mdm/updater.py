@@ -16,12 +16,10 @@ import json
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -29,6 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import __version__
+from .net import open_url
 
 APP_NAME = "CHINT ETM MDM"
 REPO = "markiitwo/chint_etm_mdm"
@@ -112,17 +111,7 @@ def previous_version(root: Path | None = None) -> str:
 
 
 def _open_url(url: str, timeout: int):
-    request = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
-    try:
-        return urllib.request.urlopen(request, timeout=timeout)
-    except urllib.error.URLError as exc:
-        if not isinstance(exc.reason, ssl.SSLError):
-            raise
-        # A portable build may not find the system certificates: use the bundled ones.
-        import certifi
-
-        context = ssl.create_default_context(cafile=certifi.where())
-        return urllib.request.urlopen(request, timeout=timeout, context=context)
+    return open_url(urllib.request.Request(url, headers={"User-Agent": APP_NAME}), timeout)
 
 
 def asset_matches(name: str, windows: bool) -> bool:

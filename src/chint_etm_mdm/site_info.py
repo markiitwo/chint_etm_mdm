@@ -20,7 +20,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -32,6 +31,7 @@ from pathlib import Path
 
 from .atomic_files import atomic_write_json
 from .filler import normalize_article
+from .net import open_url
 
 BASE_URL = "https://ensmas.ru"
 SEARCH_URL = BASE_URL + "/catalog/?q={}"
@@ -277,15 +277,7 @@ def parse_product(html: str, article: str) -> SiteRecord:
 def fetch_url(url: str) -> str:
     """GET a page as text. The program's own certificate bundle is used when the system one is missing."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ru"})
-    try:
-        response = urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT)
-    except urllib.error.URLError as exc:
-        if not isinstance(exc.reason, ssl.SSLError):
-            raise
-        import certifi
-
-        context = ssl.create_default_context(cafile=certifi.where())
-        response = urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT, context=context)
+    response = open_url(request, REQUEST_TIMEOUT)
     with response:
         charset = response.headers.get_content_charset() or "utf-8"
         return response.read().decode(charset, errors="replace")

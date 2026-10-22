@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import os
+import ssl
 import sqlite3
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from contextlib import closing
 from email.message import Message
@@ -20,6 +22,7 @@ from chint_etm_mdm.filler import fill_xlsx_template
 from chint_etm_mdm.price_importer import (
     PRICE_SHEETS,
     download_price_file,
+    find_latest_price_url,
     filename_from_response,
     read_sheet_rows,
     read_price_workbook,
@@ -87,6 +90,14 @@ class PricePackageTests(unittest.TestCase):
                 rows = read_price_workbook(path)
                 self.assertEqual("A-1", rows["Price-list"][1][0])
                 self.assertEqual("Товар", rows["Price-list"][1][1])
+
+    def test_price_page_retries_with_bundled_certificates(self) -> None:
+        page = b'<a href="/upload/Price-list-CHINT.xlsx">\xd0\x9f\xd1\x80\xd0\xb0\xd0\xb9\xd1\x81</a>'
+        untrusted = urllib.error.URLError(ssl.SSLCertVerificationError("self-signed certificate in certificate chain"))
+        with patch("urllib.request.urlopen", side_effect=[untrusted, FakeResponse(page)]) as opened:
+            url = find_latest_price_url("https://ensmas.ru/x/")
+        self.assertEqual("https://ensmas.ru/upload/Price-list-CHINT.xlsx", url)
+        self.assertIsInstance(opened.call_args_list[1].kwargs["context"], ssl.SSLContext)
 
     def test_download_validates_before_publish_and_uses_unique_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
