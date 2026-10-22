@@ -9,6 +9,7 @@ from openpyxl import Workbook, load_workbook
 
 from chint_etm_mdm.certificates import (
     FROM_DB,
+    FROM_FILE,
     FROM_USER,
     chz_date_columns,
     number_key,
@@ -101,6 +102,39 @@ class CertificateTableTests(unittest.TestCase):
         make_chz(self.chz, dates=True)
         update_table(self.db, self.chz, self.table)
         self.assertEqual((dt.datetime(2023, 5, 1), dt.datetime(2028, 4, 30), "файл ЧЗ"), self.rows()[CERT][2:5])
+
+    def test_dates_from_an_earlier_file(self) -> None:
+        make_chz(self.chz)
+        earlier = self.root / "Запрос сертификатов_Таблица_заполнено.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Обязательные поля для заполнения", None, None, None, None, None, None, "Обязательные поля для заполнения"])
+        sheet.append(["Код РС (если известен)", "Наименование", "Артикул", "Номер сертификата", "Начало действия сертификата",
+                      "Окончание действия сертификата", "Тип сертификата", "Имя файла из архива или ссылка для скачивания",
+                      "Прямая ссылка на страницу документа в реестре Росаккредитации", "Код сертифицирующего органа"])
+        for article in (173585, 173584):
+            sheet.append([article, "Пускатель", article, CERT, dt.datetime(2023, 12, 22), dt.datetime(2028, 12, 21), "Сертификат"])
+        sheet.append([616173, "Частотник", 616173, DECL, dt.datetime(2024, 7, 1), dt.datetime(2029, 7, 1), "Декларация"])
+        workbook.save(earlier)
+
+        # The user already typed the declaration's dates by hand: they stay.
+        update_table(self.db, self.chz, self.table)
+        workbook = load_workbook(self.table)
+        for row in workbook["Сертификаты"].iter_rows(min_row=2):
+            if row[0].value == DECL:
+                row[2].value, row[3].value = dt.datetime(2024, 7, 26), dt.datetime(2029, 7, 26)
+        workbook.save(self.table)
+
+        result = update_table(self.db, self.chz, self.table, dates_file=earlier)
+        rows = self.rows()
+        self.assertEqual((dt.datetime(2023, 12, 22), dt.datetime(2028, 12, 21), FROM_FILE), rows[CERT][2:5])
+        self.assertEqual((dt.datetime(2024, 7, 26), dt.datetime(2029, 7, 26), FROM_USER), rows[DECL][2:5])
+        self.assertEqual(1, result.from_file)
+        self.assertTrue(any("Из выбранного файла" in line for line in table_lines(result)))
+
+        # Later updates without the file keep its dates.
+        update_table(self.db, self.chz, self.table)
+        self.assertEqual((dt.datetime(2023, 12, 22), dt.datetime(2028, 12, 21), FROM_FILE), self.rows()[CERT][2:5])
 
     def test_date_column_names(self) -> None:
         def found(names):
