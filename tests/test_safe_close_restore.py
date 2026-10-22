@@ -277,3 +277,21 @@ class EtmTabTests(CloseDuringOperationTests):
         with mock.patch.object(self.window, "start_worker") as start:
             self.window.etm_run_button.click()  # through the button, as the user does
         self.assertIsNone(start.call_args[0][0].articles)
+
+
+class EtmRequestsAfterRestartTests(CloseDuringOperationTests):
+    def test_saved_needs_of_the_newest_run(self) -> None:
+        import json
+
+        work = Path(self.temp_dir.name) / "work"
+        self.window.work_dir_edit.setText(str(work))
+        self.assertIsNone(self.window.saved_etm_needs())
+        tech = work / "output" / "ЭТМ карточки 2026-10-22 10-00" / "Служебное"
+        tech.mkdir(parents=True)
+        need = {"article": "1", "name": "n", "series": "s", "key": "Код ТН ВЭД", "label": "Код ТН ВЭД", "kind": "", "allowed": []}
+        (tech / "запросы_продактам.json").write_text(json.dumps({"version": 1, "needs": [need]}), encoding="utf-8")
+        folder, needs = self.window.saved_etm_needs()
+        self.assertEqual("ЭТМ карточки 2026-10-22 10-00", folder.name)
+        with mock.patch.object(self.window, "ask_managers") as ask:
+            self.window.write_etm_pm_requests()
+        self.assertEqual(["1"], [item.article for item in ask.call_args[0][0]])

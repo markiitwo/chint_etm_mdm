@@ -49,8 +49,10 @@ from .etm_categories import (
     fill_new_products,
     latest_codes_file,
     new_articles_since,
+    last_run_needs,
     parse_articles,
     run_lines,
+    short_lines,
 )
 from .etim_importer import (
     EtimDecisionApplyResult,
@@ -909,10 +911,11 @@ class MainWindow(QMainWindow):
         pm_actions = QHBoxLayout()
         self.etm_pm_request_button.setToolTip("Пустые поля карточек — Excel каждому продакту и черновик письма")
         self.etm_pm_request_button.clicked.connect(self.write_etm_pm_requests)
-        self.etm_pm_request_button.setEnabled(False)
+        # Also after a restart, for the newest run that has empty fields.
+        self.etm_pm_request_button.setEnabled(self.saved_etm_needs() is not None)
         pm_answers = QPushButton("Принять ответы продактов...")
         pm_answers.setToolTip("Файлы-запросы, которые продакты прислали обратно: ответы идут в следующие карточки")
-        pm_answers.clicked.connect(lambda: self.import_pm_answers(self.fill_log))
+        pm_answers.clicked.connect(lambda: self.import_pm_answers(self.fill_log, offer_cards=True))
         pm_actions.addWidget(self.etm_pm_request_button)
         pm_actions.addWidget(pm_answers)
         pm_actions.addStretch(1)
@@ -1072,6 +1075,21 @@ class MainWindow(QMainWindow):
         run = self.last_etm_run
         if run is not None:
             self.ask_managers(run.needs, f"Заполняем карточки товаров для ЭТМ ({run.output_dir.name})", self.fill_log)
+            return
+        # After a restart: the newest cards run in the output folder.
+        found = self.saved_etm_needs()
+        if found is None:
+            QMessageBox.information(self, "Нет карточек", "Сначала нажмите «Сделать карточки».")
+            return
+        folder, needs = found
+        self.ask_managers(needs, f"Заполняем карточки товаров для ЭТМ ({folder.name})", self.fill_log)
+
+    def saved_etm_needs(self):
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            return None
+        found = last_run_needs(Path(work_text) / "output")
+        return found if found and found[1] else None
 
     def ask_managers(self, needs: list, reason: str, log: QTextEdit) -> None:
         """One Excel request per product manager about what is missing, and an email draft with it."""
@@ -1115,7 +1133,7 @@ class MainWindow(QMainWindow):
             self.open_path(output)
         QMessageBox.information(self, "Запросы продактам", "\n".join(lines))
 
-    def import_pm_answers(self, log: QTextEdit | None = None) -> None:
+    def import_pm_answers(self, log: QTextEdit | None = None, offer_cards: bool = False) -> None:
         log = log if isinstance(log, QTextEdit) else self.raek_log
         work_text = self.work_dir_edit.text().strip()
         if not work_text:
@@ -1139,6 +1157,15 @@ class MainWindow(QMainWindow):
         )
         for line in lines:
             log.append(line)
+        if offer_cards and self.config.last_etm_articles and self.worker is None:
+            answer = QMessageBox.question(
+                self,
+                "Ответы продактов",
+                "\n".join(lines) + "\n\nСобрать карточки тех же товаров заново, уже с этими ответами?",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.run_etm_again()
+            return
         QMessageBox.information(self, "Ответы продактов", "\n".join(lines))
 
     def remember_raek_answers(self) -> None:
@@ -1423,7 +1450,9 @@ class MainWindow(QMainWindow):
 
     def on_new_products_done(self, run: CategoryRun | None) -> None:
         if run is None:
-            self.new_products_log.append("Новинок после этой даты нет. Если прайс давно не обновлялся, обновите базу из прайса.")
+            text = "Новинок после этой даты нет. Если прайс давно не обновлялся, обновите базу из прайса."
+            self.new_products_log.append(text)
+            QMessageBox.information(self, "Новинок нет", text)
             return
         self.last_etm_run = run
         self.last_new_products_dir = run.output_dir
@@ -1444,7 +1473,10 @@ class MainWindow(QMainWindow):
             self.new_products_log.append(line)
         self.send_run_summary("CHINT: карточки ЭТМ готовы", lines, self.new_products_log)
         self.open_path(run.summary_path)
-        QMessageBox.information(self, "Карточки ЭТМ готовы", "\n".join(lines))
+        short = short_lines(run)
+        if run.copied_templates:
+            short.insert(0, f"Забрал новые шаблоны классов: {len(run.copied_templates)}")
+        QMessageBox.information(self, "Карточки ЭТМ готовы", "\n".join(short))
 
     def on_new_products_failed(self, details: str) -> None:
         self.new_products_log.append("Ошибка.")

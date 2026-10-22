@@ -22,11 +22,12 @@ import sqlite3
 from collections import Counter
 from contextlib import closing
 from copy import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
+from .atomic_files import atomic_write_json
 from .db import ProductRecord, connect, fetch_products
 from .export_templates import PartnerTemplate, clean_product_name, load_partner_template, partner_template_text
 from .filler import FillReportRow, FillResult, fill_xlsx_template, normalize_article, normalize_header
@@ -457,10 +458,12 @@ def card_status(run: CategoryRun, article: str, missing: int) -> str:
         return "Нет шаблона класса: скачайте его"
     result, _csv = made
     if result.check_path and article in result.check_articles:
-        status = "Проверить перед загрузкой"
+        status = "Проверить перед загрузкой (лист «Проверить»)"
     else:
-        status = "Готово к загрузке"
-    return f"{status}; пустых полей: {missing}" if missing else status
+        status = "Можно загружать"
+    if missing:
+        status += f"; не заполнено полей: {missing} (лист «Дозаполнить»)"
+    return status
 
 
 def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library: dict[str, Path]) -> None:
@@ -492,6 +495,11 @@ def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library:
                 upload_file_name(run.results.get(code), article),
             ]
         )
+    for row in sheet.iter_rows(min_row=2, min_col=6, max_col=6):
+        cell = row[0]
+        if cell.value:
+            cell.hyperlink = str(cell.value)  # relative to Итог.xlsx: a click opens the file
+            cell.style = "Hyperlink"
     for article in run.not_found:
         sheet.append([article, "", "", "", "Артикула нет в базе", ""])
 
@@ -553,7 +561,7 @@ def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library:
                 len(members),
                 examples,
                 f"Скачайте в личном кабинете ЭТМ шаблон класса {code} (upload_goods_category_template_{code}.xlsx) "
-                "в «Загрузки» или папку входящих и нажмите «Сделать карточки» ещё раз",
+                "в «Загрузки» или папку входящих и нажмите «Ещё раз для тех же товаров»",
             ]
         )
 
@@ -669,7 +677,57 @@ def fill_new_products(
         run.check_rows.extend(row for row in result.rows if row.status in CHECK_STATUSES and row.column)
     run.needs = needs_for_managers(run, products, series)
     write_summary(run, products, library)
+    save_needs(run)
     return run
+
+
+NEEDS_FILE = "запросы_продактам.json"
+RUN_FOLDER_PREFIX = "ЭТМ карточки "
+
+
+def save_needs(run: CategoryRun) -> None:
+    """The empty fields of the run, so the managers can be asked after the program was closed."""
+    path = run.output_dir / TECH_DIR / NEEDS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    items = [{**asdict(need), "allowed": list(need.allowed)} for need in run.needs]
+    atomic_write_json(path, {"version": 1, "needs": items})
+
+
+def last_run_needs(output_dir: Path) -> tuple[Path, list[Need]] | None:
+    """The newest cards run in the output folder and its empty fields, or None."""
+    runs = sorted(
+        (folder for folder in output_dir.glob(f"{RUN_FOLDER_PREFIX}*") if (folder / TECH_DIR / NEEDS_FILE).is_file()),
+        key=lambda folder: folder.stat().st_mtime,
+    )
+    if not runs:
+        return None
+    try:
+        data = json.loads((runs[-1] / TECH_DIR / NEEDS_FILE).read_text(encoding="utf-8"))
+        needs = [Need(**{**item, "allowed": tuple(item.get("allowed", ()))}) for item in data.get("needs", [])]
+    except (OSError, ValueError, TypeError):
+        return None
+    return runs[-1], needs
+
+
+def short_lines(run: CategoryRun) -> list[str]:
+    """The few numbers for the message after a run; the details are in Итог.xlsx."""
+    ready = sum(result.safe_rows for result, _ in run.results.values())
+    held = sum(result.check_rows for result, _ in run.results.values())
+    lines = [f"Товаров: {len(run.articles)}", f"Можно загружать сразу: {ready}"]
+    if held:
+        lines.append(f"Посмотреть перед загрузкой: {held}")
+    if run.missing_rows:
+        lines.append(f"Пустых полей: {len(run.missing_rows)} у {len({row.article for row in run.missing_rows})} товаров")
+    waiting = sum(len(members) for members in run.missing_templates.values())
+    if waiting:
+        lines.append(f"Ждут шаблона класса: {waiting} (классов: {len(run.missing_templates)})")
+    if run.unclassified:
+        lines.append(f"Класс не подобран: {len(run.unclassified)}")
+    if run.not_found:
+        lines.append(f"Нет в базе: {len(run.not_found)}")
+    lines.append("")
+    lines.append("Что делать дальше — на первом листе Итог.xlsx (он уже открыт).")
+    return lines
 
 
 def todo_lines(run: CategoryRun) -> list[str]:
@@ -695,7 +753,7 @@ def todo_lines(run: CategoryRun) -> list[str]:
         count = sum(len(members) for members in run.missing_templates.values())
         lines.append(
             f"{step}. Для {count} товаров нет шаблона класса ({codes}): скачайте шаблоны в личном кабинете ЭТМ "
-            "в «Загрузки» или папку входящих (лист «Нет шаблона») и нажмите «Сделать карточки» ещё раз — "
+            "в «Загрузки» или папку входящих (лист «Нет шаблона») и нажмите «Ещё раз для тех же товаров» — "
             "программа сама заберёт их в папку шаблонов."
         )
         step += 1
@@ -739,7 +797,7 @@ def run_lines(run: CategoryRun) -> list[str]:
     for code, members in sorted(run.missing_templates.items()):
         lines.append(
             f"Нет шаблона класса {code} ({len(members)} товаров): скачайте его в личном кабинете ЭТМ "
-            "в «Загрузки» и запустите ещё раз."
+            "в «Загрузки» и нажмите «Ещё раз для тех же товаров»."
         )
     if run.unclassified:
         lines.append(f"Не удалось подобрать класс: {len(run.unclassified)} товаров, список в итоге.")

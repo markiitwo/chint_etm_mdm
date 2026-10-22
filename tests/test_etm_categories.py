@@ -329,3 +329,33 @@ class ManagersRoundTripTests(CategoryTemplateTests):
         result, _csv = again.results["500820"]
         filled = {row.column: row.value for row in result.rows if row.source == "pm_answer"}
         self.assertEqual({"Конфиг:Количество силовых полюсов": "1P+N", "Код ТН ВЭД": "8536201007"}, filled)
+
+
+class SummaryUsabilityTests(CategoryTemplateTests):
+    def test_after_restart_messages_and_links(self) -> None:
+        import time
+
+        from chint_etm_mdm.etm_categories import fill_new_products, last_run_needs, short_lines
+
+        output = self.root / "output"
+        first = fill_new_products(self.db, ["625288"], self.templates, output / "ЭТМ карточки 2026-10-20 10-00")
+        time.sleep(0.01)
+        run = fill_new_products(self.db, ["586772", "625288", "404"], self.templates, output / "ЭТМ карточки 2026-10-22 10-00")
+        self.assertEqual([], first.needs)
+        folder, needs = last_run_needs(output)
+        self.assertEqual(run.output_dir, folder)
+        self.assertEqual({(n.article, n.key) for n in run.needs}, {(n.article, n.key) for n in needs})
+        self.assertIsNone(last_run_needs(self.root / "пусто"))
+
+        text = "\n".join(short_lines(run))
+        self.assertIn("Товаров: 3", text)
+        self.assertIn("Ждут шаблона класса: 1", text)
+        self.assertIn("Итог.xlsx", text)
+
+        summary = load_workbook(run.summary_path)
+        todo = "\n".join(str(row[0] or "") for row in summary["Что делать"].iter_rows(values_only=True))
+        self.assertIn("«Ещё раз для тех же товаров»", todo)  # not "Сделать карточки": the date has moved on
+        self.assertNotIn("«Сделать карточки» ещё раз", todo)
+        link = summary["Товары"]["F2"]
+        self.assertTrue(link.value.startswith("На проверку/"))
+        self.assertEqual(link.value, link.hyperlink.target)
