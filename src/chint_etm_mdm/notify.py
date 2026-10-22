@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from .atomic_files import atomic_write_json
+from .net import open_url
 
 SETTINGS_NAME = "notify.json"
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
@@ -80,14 +81,7 @@ def save_settings(settings: NotifySettings, path: Path | None = None) -> None:
 
 def post_json(url: str, data: dict) -> dict:
     request = urllib.request.Request(url, data=urllib.parse.urlencode(data).encode(), method="POST")
-    try:
-        response = urllib.request.urlopen(request, timeout=TIMEOUT)
-    except urllib.error.URLError as exc:
-        if not isinstance(exc.reason, ssl.SSLError):
-            raise
-        import certifi
-
-        response = urllib.request.urlopen(request, timeout=TIMEOUT, context=ssl.create_default_context(cafile=certifi.where()))
+    response = open_url(request, TIMEOUT)
     with response:
         return json.loads(response.read().decode("utf-8"))
 
