@@ -2608,9 +2608,14 @@ class MainWindow(QMainWindow):
                     "action": action,
                 }
             )
-        if rows:
-            return rows
-        return self.read_mapping_review_candidates_from_source_choice(workbook, review_path)
+        # Both sheets: a field with some candidates on "Правила" may have more on "Выбор источника".
+        seen = {(row["class81_code"], row["template_field"], row["source_attribute"]) for row in rows}
+        for row in self.read_mapping_review_candidates_from_source_choice(workbook, review_path):
+            key = (row["class81_code"], row["template_field"], row["source_attribute"])
+            if key not in seen:
+                seen.add(key)
+                rows.append(row)
+        return rows
 
     def read_mapping_review_candidates_from_source_choice(
         self, workbook, review_path: Path

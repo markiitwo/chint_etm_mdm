@@ -367,3 +367,23 @@ class CopyBaseTests(CloseDuringOperationTests):
         with mock.patch.object(self.window, "start_worker") as start:
             self.window.copy_db_to_workspace()
         start.assert_not_called()
+
+
+class MappingReviewTests(CloseDuringOperationTests):
+    def test_both_sheets_reach_the_rules_tab(self) -> None:
+        from openpyxl import Workbook
+
+        report = Path(self.temp_dir.name) / "mapping_review.xlsx"
+        workbook = Workbook()
+        rules = workbook.active
+        rules.title = "Правила"
+        rules.append(["81 класс", "Поле шаблона", "Кандидат источника", "Покрытие кандидата", "Примеры значений", "Примеры артикулов", "Действие"])
+        rules.append(["C1", "Конфиг:Ток", "Ток, А", 3, "16", "1", "уже утверждено"])
+        rules.append(["C1", "Конфиг:Ток", "Номинальный ток", 2, "25", "2", "проверить"])
+        choice = workbook.create_sheet("Выбор источника")
+        choice.append(["Категория", "Артикул", "Поле шаблона", "Возможный источник", "Значение", "Комментарий"])
+        choice.append(["C1", "2", "Конфиг:Ток", "Номинальный ток", "25", ""])
+        choice.append(["C1", "3", "Конфиг:Ток", "Ток расцепителя", "32", ""])
+        workbook.save(report)
+        rows = self.window.read_mapping_review_candidates(report)
+        self.assertEqual(["Номинальный ток", "Ток расцепителя"], [row["source_attribute"] for row in rows])
