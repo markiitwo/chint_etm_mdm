@@ -35,7 +35,7 @@ from openpyxl import load_workbook
 
 from . import __version__
 from .analyzer import analyze_template_mapping
-from .config import AppConfig, ensure_work_dirs, first_run_defaults, load_config, save_config
+from .config import AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
 from .db_utils import copy_sqlite_database
 from .etm_categories import CategoryRun, fill_new_products, latest_codes_file, new_articles_since, run_lines
@@ -180,13 +180,9 @@ class RaekWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
-def download_folders() -> list[Path]:
-    return [Path.home() / "Downloads", Path.home() / "Загрузки"]
-
-
-def codes_folders(work_dir: str) -> list[Path]:
-    """Where a new "Честный знак" file usually lands: Downloads and the work folder's input."""
-    folders = download_folders()
+def codes_folders(work_dir: str, inbox_dir: str = "") -> list[Path]:
+    """Where a new "Честный знак" file usually lands: the inbox folder, Downloads and the work folder's input."""
+    folders = incoming_folders(inbox_dir)
     if work_dir:
         folders.append(Path(work_dir) / "input")
     return folders
@@ -424,6 +420,8 @@ class MainWindow(QMainWindow):
         self.backup_file_edit = QLineEdit()
         self.class_templates_edit = QLineEdit(self.config.class_templates_dir or self.default_class_templates_dir())
         self.codes_file_edit = QLineEdit(self.config.codes_file)
+        self.inbox_dir_edit = QLineEdit(self.config.inbox_dir)
+        self.inbox_dir_edit.setPlaceholderText("например, общая папка RDP; пусто — только «Загрузки»")
         self.new_since_edit = QDateEdit()
         self.new_since_edit.setCalendarPopup(True)
         self.new_since_edit.setDisplayFormat("dd.MM.yyyy")
@@ -436,7 +434,7 @@ class MainWindow(QMainWindow):
         self.open_new_products_dir_button = QPushButton("Открыть папку с файлами")
         self.open_new_products_summary_button = QPushButton("Открыть сводку")
         self.raek_zip_edit = QLineEdit()
-        self.raek_zip_edit.setPlaceholderText("самый свежий архив РАЭК из «Загрузок»")
+        self.raek_zip_edit.setPlaceholderText("самый свежий архив РАЭК из папки входящих или «Загрузок»")
         self.raek_site_check = QCheckBox("Сначала взять ссылки, картинки и сертификаты с сайта ensmas.ru (нужен интернет)")
         self.raek_site_check.setChecked(True)
         self.raek_log = QTextEdit()
@@ -546,6 +544,12 @@ class MainWindow(QMainWindow):
         choose_db.clicked.connect(self.choose_db)
         form.addWidget(choose_db, 1, 2)
 
+        form.addWidget(QLabel("Папка входящих"), 3, 0)
+        form.addWidget(self.inbox_dir_edit, 3, 1)
+        choose_inbox = QPushButton("Выбрать...")
+        choose_inbox.clicked.connect(self.choose_inbox_dir)
+        form.addWidget(choose_inbox, 3, 2)
+
         form.addWidget(QLabel("Бэкап для отката"), 2, 0)
         form.addWidget(self.backup_file_edit, 2, 1)
         choose_backup = QPushButton("Выбрать...")
@@ -646,7 +650,7 @@ class MainWindow(QMainWindow):
         choose_codes = QPushButton("Выбрать...")
         choose_codes.clicked.connect(self.choose_codes_file)
         codes_row.addWidget(choose_codes)
-        form.addRow("Файл ЧЗ с кодами (самый свежий из «Загрузок» берётся сам)", codes_row)
+        form.addRow("Файл ЧЗ с кодами (самый свежий из папки входящих или «Загрузок» берётся сам)", codes_row)
 
         actions = QHBoxLayout()
         run_button = QPushButton("Сформировать новинки")
@@ -671,7 +675,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.addWidget(
             QLabel(
-                "Сохраните архив от менеджера РАЭК в «Загрузки» и нажмите кнопку. Программа заполнит пустые клетки\n"
+                "Сохраните архив от менеджера РАЭК в папку входящих или в «Загрузки» и нажмите кнопку. Программа заполнит пустые клетки\n"
                 "и положит рядом готовый архив для ответа и отчёт: что проверить и чего нет в базе. Заполненное РАЭК не трогает."
             )
         )
@@ -721,7 +725,7 @@ class MainWindow(QMainWindow):
         return root
 
     def choose_raek_zip(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Архив от менеджера РАЭК", str(Path.home() / "Downloads"), "ZIP (*.zip)")
+        path, _ = QFileDialog.getOpenFileName(self, "Архив от менеджера РАЭК", str(self.incoming()[0]), "ZIP (*.zip)")
         if path:
             self.raek_zip_edit.setText(path)
 
@@ -732,15 +736,15 @@ class MainWindow(QMainWindow):
             if db_path is None:
                 return
             zip_text = self.raek_zip_edit.text().strip()
-            zip_path = Path(zip_text) if zip_text else latest_raek_zip(download_folders())
+            zip_path = Path(zip_text) if zip_text else latest_raek_zip(self.incoming())
             if zip_path is None or not zip_path.is_file():
-                QMessageBox.warning(self, "Нет архива", "Сохраните архив РАЭК в «Загрузки» или выберите его кнопкой «Выбрать...».")
+                QMessageBox.warning(self, "Нет архива", "Сохраните архив РАЭК в папку входящих или в «Загрузки», или выберите его кнопкой «Выбрать...».")
                 return
             work_text = self.work_dir_edit.text().strip()
             output_dir = (Path(work_text) / "output" if work_text else zip_path.parent) / f"раэк_{dt.date.today().isoformat()}"
             rules_path = ensure_default_rules(Path(work_text)) if work_text else None
             codes_text = self.codes_file_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
+            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             ask_site = self.raek_site_check.isChecked()
             self.raek_log.append(f"Заполняю {zip_path.name}...")
             if ask_site:
@@ -780,7 +784,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
                 return
             codes_text = self.codes_file_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
+            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             self.raek_log.append("Обновляю таблицу сертификатов...")
             worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE)
             self.start_worker(worker, self.on_certificates_done, self.on_raek_failed)
@@ -799,12 +803,12 @@ class MainWindow(QMainWindow):
             return
         work = Path(work_text)
         try:
-            assignment_file = latest_assignment_file(codes_folders(work_text) + [work])
+            assignment_file = latest_assignment_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()) + [work])
             if assignment_file is None:
                 QMessageBox.warning(
                     self,
                     "Нет файла закрепления",
-                    "Положите «Закрепление ПМ.xlsx» в «Загрузки» или в рабочую папку: по нему программа решает, кому из продактов писать.",
+                    "Положите «Закрепление ПМ.xlsx» в папку входящих, «Загрузки» или в рабочую папку: по нему программа решает, кому из продактов писать.",
                 )
                 return
             output = work / "output" / f"запросы_продактам_{dt.date.today().isoformat()}"
@@ -828,7 +832,7 @@ class MainWindow(QMainWindow):
         if not work_text:
             QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
             return
-        paths, _ = QFileDialog.getOpenFileNames(self, "Файлы-запросы с ответами продактов", str(download_folders()[0]), "Excel (*.xlsx)")
+        paths, _ = QFileDialog.getOpenFileNames(self, "Файлы-запросы с ответами продактов", str(self.incoming()[0]), "Excel (*.xlsx)")
         if not paths:
             return
         lines = []
@@ -1086,7 +1090,7 @@ class MainWindow(QMainWindow):
                 return
             codes_text = self.codes_file_edit.text().strip()
             work_text = self.work_dir_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
+            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             base = Path(work_text) / "output" if work_text else Path(templates_text).parent
             since = self.new_since_edit.date().toPython()
             output_dir = base / f"новинки_{dt.date.today().isoformat()}"
@@ -1279,6 +1283,15 @@ class MainWindow(QMainWindow):
             self.mapping_review_path_edit.setText(path)
             self.load_mapping_review()
 
+    def incoming(self) -> list[Path]:
+        return incoming_folders(self.inbox_dir_edit.text().strip())
+
+    def choose_inbox_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Папка, куда приходят файлы (ЧЗ, архивы РАЭК, ответы продактов)", self.inbox_dir_edit.text())
+        if path:
+            self.inbox_dir_edit.setText(path)
+            self.save_current_config()
+
     def save_current_config(self) -> None:
         self.config = AppConfig(
             work_dir=self.work_dir_edit.text().strip(),
@@ -1286,6 +1299,7 @@ class MainWindow(QMainWindow):
             class_templates_dir=self.class_templates_edit.text().strip(),
             codes_file=self.codes_file_edit.text().strip(),
             last_new_since=self.config.last_new_since,
+            inbox_dir=self.inbox_dir_edit.text().strip(),
         )
         if self.config.work_path:
             ensure_work_dirs(self.config.work_path)

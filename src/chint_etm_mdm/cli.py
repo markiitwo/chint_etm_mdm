@@ -5,6 +5,7 @@ import datetime as dt
 from pathlib import Path
 
 from .analyzer import analyze_template_mapping
+from .config import incoming_folders, load_config
 from .db import get_stats
 from .etm_categories import fill_new_products, latest_codes_file, new_articles_since
 from .etim_importer import (
@@ -98,7 +99,7 @@ def main() -> None:
     if args.certificates_table:
         table = update_certificates_table(
             db_path,
-            latest_codes_file([Path.home() / "Downloads", Path.home() / "Загрузки"], Path(args.codes_file) if args.codes_file else None),
+            latest_codes_file(incoming_folders(load_config().inbox_dir), Path(args.codes_file) if args.codes_file else None),
             Path(args.certificates_table),
         )
         for line in certificates_lines(table):
@@ -133,7 +134,7 @@ def main() -> None:
             Path(args.raek_zip),
             output_dir,
             latest_codes_file(
-                [Path.home() / "Downloads", Path.home() / "Загрузки"], Path(args.codes_file) if args.codes_file else None
+                incoming_folders(load_config().inbox_dir), Path(args.codes_file) if args.codes_file else None
             ),
             rules_path,
             site_cache,
@@ -148,7 +149,7 @@ def main() -> None:
             if rules_path is None:
                 parser.error("--rules is required for --pm-requests")
             work = rules_path.parent.parent
-            assignment_file = latest_assignment_file([Path.home() / "Downloads", Path.home() / "Загрузки", work / "input", work])
+            assignment_file = latest_assignment_file(incoming_folders(load_config().inbox_dir) + [work / "input", work])
             if assignment_file is None:
                 parser.error("«Закрепление ПМ.xlsx» not found in Downloads or the work folder")
             requests = write_requests(
@@ -226,7 +227,7 @@ def main() -> None:
             rules_path,
             manual_values_file,
             latest_codes_file(
-                [Path.home() / "Downloads", Path.home() / "Загрузки"], Path(args.codes_file) if args.codes_file else None
+                incoming_folders(load_config().inbox_dir), Path(args.codes_file) if args.codes_file else None
             ),
         )
         print(f"articles={len(articles)}")
