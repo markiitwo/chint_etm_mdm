@@ -53,6 +53,7 @@ from .filler import FillResult, fill_template
 from .raek import RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answers, result_lines as raek_result_lines
 from .site_info import default_cache_path as site_cache_path
 from .certificates import TABLE_NAME as CERTIFICATES_TABLE, TableResult, table_lines, update_table
+from .pm_requests import answer_lines, answers_path, import_answers, latest_assignment_file, load_assignment, request_lines, write_requests
 from .update_ui import Updates, offer_install
 from .value_matching import import_etm_reference
 from .mapping_rules import (
@@ -146,9 +147,11 @@ class RaekWorker(QThread):
         site_cache: Path | None = None,
         ask_site: bool = False,
         certificates_table: Path | None = None,
+        answers_file: Path | None = None,
     ) -> None:
         super().__init__()
         self.certificates_table = certificates_table
+        self.answers_file = answers_file
         self.db_path = db_path
         self.zip_path = zip_path
         self.output_dir = output_dir
@@ -170,6 +173,7 @@ class RaekWorker(QThread):
                     self.ask_site,
                     progress=self.progress.emit,
                     certificates_table=self.certificates_table,
+                    answers_path=self.answers_file,
                 )
             )
         except Exception:
@@ -440,6 +444,7 @@ class MainWindow(QMainWindow):
         self.last_raek_result: RaekResult | None = None
         self.open_raek_dir_button = QPushButton("Открыть папку с архивом")
         self.open_raek_report_button = QPushButton("Открыть отчёт")
+        self.pm_request_button = QPushButton("Запросить у продактов")
         self.coverage_table = QTableWidget(0, 8)
         self.rules_table = QTableWidget(0, 8)
         self.last_output_path: Path | None = None
@@ -690,6 +695,12 @@ class MainWindow(QMainWindow):
         certificates.setToolTip("Даты сертификатов: вписываются один раз на документ, программа ставит их всем товарам")
         certificates.clicked.connect(self.run_certificates_table)
         self.write_action_buttons.append(certificates)
+        self.pm_request_button.setToolTip("Excel-запрос каждому продакту о том, чего нет в базе, и черновик письма с ним")
+        self.pm_request_button.clicked.connect(self.write_pm_requests)
+        self.pm_request_button.setEnabled(False)
+        pm_answers = QPushButton("Принять ответы продактов...")
+        pm_answers.setToolTip("Файлы-запросы, которые продакты прислали обратно: ответы сразу идут в заполнение")
+        pm_answers.clicked.connect(self.import_pm_answers)
         self.open_raek_dir_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.output_path.parent))
         self.open_raek_report_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.report_path))
         self.open_raek_dir_button.setEnabled(False)
@@ -697,9 +708,14 @@ class MainWindow(QMainWindow):
         for button in (run_button, self.open_raek_dir_button, self.open_raek_report_button, remember, certificates):
             actions.addWidget(button)
         actions.addStretch(1)
+        pm_actions = QHBoxLayout()
+        for button in (self.pm_request_button, pm_answers):
+            pm_actions.addWidget(button)
+        pm_actions.addStretch(1)
 
         layout.addWidget(box)
         layout.addLayout(actions)
+        layout.addLayout(pm_actions)
         layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.raek_log, stretch=1)
         return root
@@ -731,7 +747,8 @@ class MainWindow(QMainWindow):
                 self.raek_log.append("Сначала спрошу сайт ensmas.ru о товарах, которых нет в памяти: по 2–3 секунды на товар.")
             site_cache = site_cache_path(Path(work_text)) if work_text else None
             table = Path(work_text) / CERTIFICATES_TABLE if work_text else None
-            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site, table)
+            answers = answers_path(Path(work_text)) if work_text else None
+            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site, table, answers)
             self.start_worker(worker, self.on_raek_done, self.on_raek_failed)
         except Exception:
             self.on_raek_failed(traceback.format_exc())
@@ -740,6 +757,7 @@ class MainWindow(QMainWindow):
         self.last_raek_result = result
         self.open_raek_dir_button.setEnabled(True)
         self.open_raek_report_button.setEnabled(True)
+        self.pm_request_button.setEnabled(bool(result.needs))
         lines = raek_result_lines(result)
         self.raek_log.append("Готово.")
         for line in lines:
@@ -773,6 +791,59 @@ class MainWindow(QMainWindow):
         for line in table_lines(result):
             self.raek_log.append(line)
         self.open_path(result.path)
+
+    def write_pm_requests(self) -> None:
+        result = self.last_raek_result
+        work_text = self.work_dir_edit.text().strip()
+        if result is None or not work_text:
+            return
+        work = Path(work_text)
+        try:
+            assignment_file = latest_assignment_file(codes_folders(work_text) + [work])
+            if assignment_file is None:
+                QMessageBox.warning(
+                    self,
+                    "Нет файла закрепления",
+                    "Положите «Закрепление ПМ.xlsx» в «Загрузки» или в рабочую папку: по нему программа решает, кому из продактов писать.",
+                )
+                return
+            output = work / "output" / f"запросы_продактам_{dt.date.today().isoformat()}"
+            requests = write_requests(
+                result.needs, load_assignment(assignment_file), work, output, f"Заполняем данные для РАЭК ({result.output_path.stem})"
+            )
+        except Exception:
+            self.on_raek_failed(traceback.format_exc())
+            return
+        lines = request_lines(requests) or ["Новых вопросов нет."]
+        if requests.files:
+            lines.append("Откройте черновики писем (.eml) в папке и отправьте. Ответы примите кнопкой «Принять ответы продактов».")
+        for line in lines:
+            self.raek_log.append(line)
+        if requests.files:
+            self.open_path(output)
+        QMessageBox.information(self, "Запросы продактам", "\n".join(lines))
+
+    def import_pm_answers(self) -> None:
+        work_text = self.work_dir_edit.text().strip()
+        if not work_text:
+            QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Файлы-запросы с ответами продактов", str(download_folders()[0]), "Excel (*.xlsx)")
+        if not paths:
+            return
+        lines = []
+        for path in paths:
+            try:
+                lines += answer_lines(import_answers(Path(path), Path(work_text)))
+            except ValueError as error:
+                lines.append(str(error))
+            except Exception:
+                self.on_raek_failed(traceback.format_exc())
+                return
+        lines.append("Ответы будут использованы при следующем заполнении архива РАЭК.")
+        for line in lines:
+            self.raek_log.append(line)
+        QMessageBox.information(self, "Ответы продактов", "\n".join(lines))
 
     def remember_raek_answers(self) -> None:
         work_text = self.work_dir_edit.text().strip()

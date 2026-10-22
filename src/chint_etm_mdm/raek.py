@@ -35,6 +35,7 @@ from .certificates import is_eaeu_document, number_key, table_dates
 from .db import ProductRecord, connect, fetch_products
 from .etm_categories import load_codes_file
 from .filler import normalize_article
+from .pm_requests import NAME_QUESTION, Need, load_answers
 from .site_info import FOUND as SITE_FOUND
 from .site_info import SiteCache, SiteRecord, SiteResult, site_lines, update_site_cache
 from .upload_names import series_names
@@ -130,6 +131,7 @@ class RaekResult:
     skipped_files: list[str] = field(default_factory=list)
     codes_file: Path | None = None
     site: SiteResult | None = None
+    needs: list[Need] = field(default_factory=list)  # what to ask product managers
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,7 @@ class Sources:
     learned: dict
     site: dict[str, SiteRecord] = field(default_factory=dict)  # article -> what ensmas.ru answered
     cert_dates: dict[str, tuple] = field(default_factory=dict)  # document key -> (from, to) from the certificates table
+    answers: dict[tuple[str, str], str] = field(default_factory=dict)  # (article, feature code or column) -> manager's answer
     chz_articles: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -345,6 +348,10 @@ def ean13(product: ProductRecord, chz_value: str) -> Cell:
     return Cell(EMPTY, note="Нет штрих-кода ни в файле ЧЗ, ни в базе")
 
 
+ASKED_COLUMNS = {canonical(name) for name in ("Штрих-код EAN", "Код ТН ВЭД", "Код ОКПД2", "Серия")}
+NO_VALUE = "В базе нет значения"
+
+
 def column_value(header: str, article: str, product: ProductRecord, sources: Sources) -> Cell | None:
     """Plain (non-ETIM) columns. None for a column the program does not know."""
     chz = sources.chz
@@ -354,6 +361,9 @@ def column_value(header: str, article: str, product: ProductRecord, sources: Sou
         return Cell(FILLED, constants[key])
     if key in {canonical(name) for name in sources.settings.get("leave_empty", [])}:
         return Cell(FILLED, None)
+    answer = sources.answers.get((article, key), "")
+    if key in ASKED_COLUMNS and answer:
+        return Cell(FILLED, answer, "Ответ продакта")
     if key == canonical("Штрих-код EAN"):
         return ean13(product, chz.get((article, "ean"), ""))
     if key == canonical("Код ТН ВЭД"):
@@ -467,7 +477,11 @@ def feature_value(feature: Feature, product: ProductRecord, sources: Sources, ma
         if own and kind_needed not in own.split("/"):
             return Cell(FILLED, "-...-")
     if not raw or looks_like_file(raw):
-        return Cell(EMPTY, note="В базе нет значения" + (f" (искали «{source}»)" if source else ""))
+        answer = sources.answers.get((article, feature.code), "")
+        if not answer:
+            return Cell(EMPTY, note=NO_VALUE + (f" (искали «{source}»)" if source else ""))
+        cell = format_feature(feature, answer, sources)
+        return Cell(cell.status, cell.value, "Ответ продакта" + (f"; {cell.note}" if cell.note else ""))
     cell = format_feature(feature, raw, sources)
     if cell.status == FILLED and not sure:
         return Cell(CHECK, cell.value, f"Взято из «{source}» по похожему названию")
@@ -563,6 +577,10 @@ def fill_sheet(file_name: str, sheet, sources: Sources, result: RaekResult) -> b
                 if isinstance(cell.value, dt.datetime):
                     target.number_format = "DD.MM.YYYY"
             setattr(result, cell.status, getattr(result, cell.status) + 1)
+            if product is not None and cell.status == EMPTY:
+                need = manager_need(article, text(sheet.cell(row, name_col).value), header, features.get(col), cell, sources)
+                if need:
+                    result.needs.append(need)
             if cell.status != FILLED or cell.note:
                 result.rows.append(
                     RaekRow(
@@ -583,7 +601,32 @@ def fill_sheet(file_name: str, sheet, sources: Sources, result: RaekResult) -> b
             users = sum(1 for product in products if (product.attributes or {}).get(attribute))
             examples = sorted({(product.attributes or {}).get(attribute, "") for product in products} - {""})[:3]
             result.names.append([sheet.title, feature.code, feature.name, attribute, users, "; ".join(examples), ""])
+            series = Counter(series_of(product.article, sources) for product in products if (product.attributes or {}).get(attribute))
+            result.needs.append(
+                Need(
+                    "",
+                    f"Характеристика РАЭК «{feature.name}» — в базе «{attribute}», примеры: {'; '.join(examples)}",
+                    series.most_common(1)[0][0] if series else "",
+                    f"{NAME_QUESTION}{feature.code}:{attribute}",
+                    "Это одна и та же характеристика?",
+                )
+            )
     return True
+
+
+def series_of(article: str, sources: Sources) -> str:
+    return sources.series.get(article) or sources.chz.get((article, "series"), "")
+
+
+def manager_need(article: str, name: str, header: str, feature: Feature | None, cell: Cell, sources: Sources) -> Need | None:
+    """An empty cell a product manager can answer: a feature the database lacks, or a code nobody has."""
+    if feature is not None:
+        if not cell.note.startswith(NO_VALUE):
+            return None
+        return Need(article, name, series_of(article, sources), feature.code, feature.name, feature.kind, feature.allowed)
+    if canonical(header) not in ASKED_COLUMNS:
+        return None
+    return Need(article, name, series_of(article, sources), canonical(header), header)
 
 
 def zip_articles(path: Path) -> list[str]:
@@ -631,6 +674,7 @@ def fill_raek_zip(
     fetch=None,
     progress=None,
     certificates_table: Path | None = None,
+    answers_path: Path | None = None,
 ) -> RaekResult:
     """Fill the archive. With `ask_site`, ensmas.ru is asked first about articles it has no recent answer for."""
     articles = zip_articles(zip_path)
@@ -648,6 +692,7 @@ def fill_raek_zip(
         learned=load_learned(rules_path),
         site=cache.records,
         cert_dates=table_dates(certificates_table),
+        answers=load_answers(answers_path),
     )
     output_path, report_path = output_paths(zip_path, output_dir)
     result = RaekResult(output_path, report_path, products=len(articles), codes_file=codes_path, site=site_result)
@@ -777,6 +822,8 @@ def result_lines(result: RaekResult) -> list[str]:
         lines.append(f"  нечем заполнить {count}: {note}")
     if result.names:
         lines.append(f"Проверьте лист «Названия» в отчёте ({len(result.names)} строк): да/нет, и программа запомнит.")
+    if result.needs:
+        lines.append(f"Можно спросить у продактов: {len(result.needs)} поз. (кнопка «Запросить у продактов»).")
     if result.codes_file:
         lines.append(f"Коды и штрих-коды взяты из файла {result.codes_file.name}.")
     if result.site:

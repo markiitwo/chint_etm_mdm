@@ -23,6 +23,7 @@ from .manual_values import (
 from .value_matching import import_etm_reference
 from .site_info import default_cache_path as site_cache_path
 from .certificates import TABLE_NAME as CERTIFICATES_TABLE, table_lines as certificates_lines, update_table as update_certificates_table
+from .pm_requests import answer_lines, answers_path, import_answers, latest_assignment_file, load_assignment, request_lines, write_requests
 from .raek import fill_raek_zip, remember_name_answers, result_lines as raek_result_lines
 from .price_importer import download_price_file, find_latest_price_url, import_price_workbook, result_lines
 
@@ -73,6 +74,8 @@ def main() -> None:
     parser.add_argument("--raek-site", action="store_true", help="With --raek-zip: first ask ensmas.ru about articles not in the site cache")
     parser.add_argument("--site-cache", help="Site answers cache (default: <work dir>/cache/ensmas_site.json next to --rules)")
     parser.add_argument("--certificates-table", help="Create or update the certificates table (xlsx): dates once per document; ЧЗ codes from --codes-file or Downloads")
+    parser.add_argument("--pm-requests", action="store_true", help="With --raek-zip and --rules: write an Excel request per product manager for what the database lacks")
+    parser.add_argument("--pm-answers", nargs="+", help="Import request files sent back by product managers (needs --rules)")
     parser.add_argument("--raek-answers", help="Remember the да/нет answers from the «Названия» sheet of a RAEK report (needs --rules)")
     args = parser.parse_args()
 
@@ -102,6 +105,14 @@ def main() -> None:
             print(line)
         return
 
+    if args.pm_answers:
+        if rules_path is None:
+            parser.error("--rules is required for --pm-answers")
+        for path in args.pm_answers:
+            for line in answer_lines(import_answers(Path(path), rules_path.parent.parent)):
+                print(line)
+        return
+
     if args.raek_answers:
         if rules_path is None:
             parser.error("--rules is required for --raek-answers")
@@ -129,9 +140,22 @@ def main() -> None:
             args.raek_site,
             progress=print,
             certificates_table=site_cache.parent.parent / CERTIFICATES_TABLE if site_cache else None,
+            answers_path=answers_path(rules_path.parent.parent) if rules_path else None,
         )
         for line in raek_result_lines(result):
             print(line)
+        if args.pm_requests:
+            if rules_path is None:
+                parser.error("--rules is required for --pm-requests")
+            work = rules_path.parent.parent
+            assignment_file = latest_assignment_file([Path.home() / "Downloads", Path.home() / "Загрузки", work / "input", work])
+            if assignment_file is None:
+                parser.error("«Закрепление ПМ.xlsx» not found in Downloads or the work folder")
+            requests = write_requests(
+                result.needs, load_assignment(assignment_file), work, output_dir / "запросы_продактам", f"Заполняем данные для РАЭК ({result.output_path.stem})"
+            )
+            for line in request_lines(requests) or ["Новых вопросов нет."]:
+                print(line)
         return
 
     if args.restore_backup:
