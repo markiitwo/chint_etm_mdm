@@ -40,6 +40,7 @@ from .analyzer import analyze_template_mapping
 from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
 from .db_utils import BackupRejected, copy_sqlite_database
+from .dimension_audit import AuditResult, ClearResult, audit_dimensions, audit_lines, clear_lines, clear_wrong_dimensions
 from .etm_categories import CategoryRun, fill_new_products, latest_codes_file, new_articles_since, run_lines
 from .etim_importer import (
     EtimDecisionApplyResult,
@@ -489,6 +490,40 @@ class EtimDecisionWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class DimensionAuditWorker(QThread):
+    """Reads the base and lists sizes earlier ETIM imports wrote from wrong columns."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, report_dir: Path) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.report_dir = report_dir
+
+    def run(self) -> None:
+        try:
+            self.done.emit(audit_dimensions(self.db_path, self.report_dir))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class DimensionClearWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, findings) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.findings = findings
+
+    def run(self) -> None:
+        try:
+            self.done.emit(clear_wrong_dimensions(self.db_path, self.findings))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class RestoreWorker(QThread):
     """Rolls the base back in the background: a big base takes a while and the window must not look frozen."""
 
@@ -529,6 +564,8 @@ class MainWindow(QMainWindow):
             | EtimImportWorker
             | EtimDecisionWorker
             | RestoreWorker
+            | DimensionAuditWorker
+            | DimensionClearWorker
             | None
         ) = None
         self.close_when_done = False
@@ -728,6 +765,13 @@ class MainWindow(QMainWindow):
         buttons.addWidget(backup_button)
         buttons.addWidget(self.restore_button)
         buttons.addWidget(refresh_button)
+        self.audit_dimensions_button = QPushButton("Проверить размеры в базе")
+        self.audit_dimensions_button.setToolTip(
+            "Найти длины, ширины и высоты, которые прошлые импорты ETIM взяли не из той колонки "
+            "(например, «Макс. длина кабеля»), и после подтверждения очистить их."
+        )
+        self.audit_dimensions_button.clicked.connect(self.run_dimension_audit)
+        buttons.addWidget(self.audit_dimensions_button)
         notify_button = QPushButton("Сводка на почту и в Telegram...")
         notify_button.clicked.connect(lambda: NotifyDialog(self).exec())
         buttons.addWidget(notify_button)
@@ -1137,6 +1181,7 @@ class MainWindow(QMainWindow):
         form.addRow("Действия", actions)
         self.write_action_buttons = [
             self.restore_button,
+            self.audit_dimensions_button,
             self.import_price_file_button,
             self.download_import_price_button,
             self.import_etim_button,
@@ -1552,6 +1597,55 @@ class MainWindow(QMainWindow):
             lambda safety_backup: self.on_restore_done(backup_path, safety_backup),
             self.on_restore_failed,
         )
+
+    def run_dimension_audit(self) -> None:
+        if self.worker is not None:
+            QMessageBox.warning(self, "Операция уже выполняется", "Дождитесь завершения текущей операции.")
+            return
+        db_path = self.validated_db_path()
+        if db_path is None:
+            return
+        self.price_log.append("Проверяю размеры в базе...")
+        self.start_worker(
+            DimensionAuditWorker(db_path, self.etim_report_dir()), self.on_dimension_audit_done, self.on_price_import_failed
+        )
+
+    def on_dimension_audit_done(self, result: AuditResult) -> None:
+        lines = audit_lines(result)
+        for line in lines:
+            self.price_log.append(line)
+        self.open_path(result.report_path)
+        if not result.fixable:
+            QMessageBox.information(self, "Проверка размеров", "\n".join(lines))
+            return
+        answer = QMessageBox.question(
+            self,
+            "Очистить неверные размеры?",
+            "\n".join(lines)
+            + f"\n\nОчистить {len(result.fixable)} значений, которые пришли из ETIM не из той колонки? "
+            "Остальные строки отчёта программа не трогает — их проверьте сами.\n"
+            "Перед очисткой будет сделан бэкап базы. После очистки импортируйте ETIM-файл заново, "
+            "чтобы заполнить размеры из правильных колонок.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # Started after this handler returns: the audit worker is still the current operation here.
+        QTimer.singleShot(0, lambda: self.start_dimension_clear(result))
+
+    def start_dimension_clear(self, result: AuditResult) -> None:
+        self.price_log.append("Очищаю неверные размеры...")
+        self.start_worker(
+            DimensionClearWorker(result.db_path, result.fixable), self.on_dimension_clear_done, self.on_price_import_failed
+        )
+
+    def on_dimension_clear_done(self, result: ClearResult) -> None:
+        lines = clear_lines(result)
+        for line in lines:
+            self.price_log.append(line)
+        self.refresh_database_status()
+        QMessageBox.information(self, "Размеры очищены", "\n".join(lines))
 
     def on_restore_failed(self, details: str) -> None:
         self.price_log.append("Откат не выполнен.")

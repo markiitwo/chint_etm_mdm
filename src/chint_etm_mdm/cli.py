@@ -43,6 +43,11 @@ def main() -> None:
     parser.add_argument("--rules", help="Optional path to attribute_mappings.json")
     parser.add_argument("--manual-values", help="Optional path to manual_values.json")
     parser.add_argument("--stats", action="store_true", help="Print database status before filling")
+    parser.add_argument(
+        "--audit-dimensions",
+        action="store_true",
+        help="List product sizes earlier ETIM imports took from wrong columns (report only, the base is not changed)",
+    )
     parser.add_argument("--import-price", help="Import a local CHINT price-list XLSX into the database")
     parser.add_argument("--price-url", help="Download and import a CHINT price-list XLSX URL")
     parser.add_argument("--import-etim", help="Import dimensions and attributes from an ETIM XLSX into the database")
@@ -95,6 +100,14 @@ def main() -> None:
         print(f"etm_reference={target}")
         print(f"characteristics={characteristics}")
         print(f"allowed_values={values}")
+        return
+
+    if args.audit_dimensions:
+        from .dimension_audit import audit_dimensions, audit_lines
+
+        report_dir = output_dir or db_path.parent / "reports"
+        for line in audit_lines(audit_dimensions(db_path, report_dir)):
+            print(line)
         return
 
     if args.certificates_table:

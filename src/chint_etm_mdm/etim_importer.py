@@ -32,6 +32,16 @@ DIMENSION_EXCLUDE_HINTS = {
     "width_mm": (),
     "height_mm": ("уровнем моря", "над уровнем", "altitude"),
 }
+# A product size column is the size word, a unit and at most these words: "Длина, мм",
+# "Высота корпуса, мм", "Габаритная ширина, см". Anything else ("Макс. длина кабеля, м",
+# "Ширина шины", "Длина зачистки") is another characteristic that only mentions a length.
+SIZE_WORD_STEMS = ("длин", "ширин", "высот", "глубин", "length", "width", "height", "depth")
+SIZE_QUALIFIER_STEMS = (
+    "габарит", "издели", "товар", "продукт", "корпус", "общ", "наружн", "внешн", "overall", "product",
+)
+SIZE_UNIT_WORDS = {"мм", "mm", "см", "cm", "м", "m", "в", "in"}
+# Nothing this program fills is longer than 10 m; a bigger number is a misread column.
+MAX_PRODUCT_SIZE_MM = 10_000.0
 OVERALL_DIMENSION_HINT = "габарит"
 OVERALL_DIMENSION_SECONDARY_HINT = "размер"
 SOURCE_KIND = "etim_manual"
@@ -167,11 +177,13 @@ def parse_dimension_number(value: object, header: object) -> float | None:
     if number is None or number <= 0:
         return None
     if value_unit is not None:
-        return number * UNIT_FACTORS_MM[value_unit]
-    header_factor = unit_factor(normalize_text(header))
-    if header_factor is None and UNIT_RE.search(normalize_text(header)):
-        return None
-    return number * (header_factor or 1.0)
+        size = number * UNIT_FACTORS_MM[value_unit]
+    else:
+        header_factor = unit_factor(normalize_text(header))
+        if header_factor is None and UNIT_RE.search(normalize_text(header)):
+            return None
+        size = number * (header_factor or 1.0)
+    return size if size <= MAX_PRODUCT_SIZE_MM else None
 
 
 def chain_order_from_header(header: object) -> tuple[str, ...] | None:
@@ -232,7 +244,10 @@ def parse_overall_dimensions(value: object, header: object = "") -> dict[str, fl
             return {}
     else:
         factor = 1.0
-    return {key: float(item) * factor for key, item in zip(order, values)}
+    sizes = {key: float(item) * factor for key, item in zip(order, values)}
+    if any(size > MAX_PRODUCT_SIZE_MM for size in sizes.values()):
+        return {}
+    return sizes
 
 
 def parse_dimension_cell(value: object, header: object, dimension_key: str) -> float | None:
@@ -240,6 +255,24 @@ def parse_dimension_cell(value: object, header: object, dimension_key: str) -> f
     if any(hint in header_text for hint in DIMENSION_EXCLUDE_HINTS.get(dimension_key, ())):
         return None
     return parse_dimension_number(value, header)
+
+
+def is_product_size_header(header: object) -> bool:
+    text = normalize_text(header).casefold()
+    text = re.sub(r"^\w+:ef\d+:", "", text)  # ETIM "name:EF000040:Высота корпуса, мм"
+    words = re.findall(r"[^\W\d_]+", text)
+    has_size_word = False
+    for word in words:
+        if word.startswith(SIZE_WORD_STEMS):
+            has_size_word = True
+        elif len(word) > 1 and word not in SIZE_UNIT_WORDS and not word.startswith(SIZE_QUALIFIER_STEMS):
+            return False
+    return has_size_word
+
+
+def is_size_source(header: object) -> bool:
+    """Whether a column an ETIM value came from really holds the product's size (also a size chain)."""
+    return is_product_size_header(header) or find_overall_dimension_column([header]) is not None
 
 
 def find_dimension_column(
@@ -257,6 +290,7 @@ def find_dimension_column(
         and any(hint in header for hint in hints)
         and not any(exclude in header for exclude in exclude_hints)
         and chain_order_from_header(headers[index]) is None
+        and is_product_size_header(headers[index])
     ]
     for index in candidates:
         if UNIT_RE.search(normalized[index]):
@@ -989,15 +1023,24 @@ def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecis
                 rejected.append(f"{label}: товара нет в этой базе")
                 continue
             source_query = (
-                f"SELECT 1 FROM product_dimensions_raw WHERE article = ? AND source_kind = ? "
+                f"SELECT source_field FROM product_dimensions_raw WHERE article = ? AND source_kind = ? "
                 f"AND dimension_kind = ? AND ABS({column} - ?) <= 0.001"
             )
             source_params: list[object] = [article, SOURCE_KIND, column, value]
             if import_id is not None:
                 source_query += " AND import_id = ?"
                 source_params.append(import_id)
-            if conn.execute(source_query, source_params).fetchone() is None:
+            source_fields = [str(row[0] or "") for row in conn.execute(source_query, source_params)]
+            if not source_fields:
                 rejected.append(f"{label}: значение {format_mm(value)} не найдено в импорте ETIM этой базы")
+                continue
+            # An unknown (empty) column is given the benefit of the doubt, as before.
+            if not any(not field or is_size_source(field) for field in source_fields):
+                # An older report: the value came from e.g. "Макс. длина кабеля", not the product's size.
+                rejected.append(
+                    f"{label}: значение {format_mm(value)} взято из колонки «{source_fields[0]}», "
+                    "это не размер товара"
+                )
                 continue
             current_row = conn.execute(
                 f"SELECT {column} FROM product_dimensions_resolved WHERE article = ?", (article,)

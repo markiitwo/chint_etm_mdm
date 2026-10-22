@@ -177,3 +177,43 @@ class ImportSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SizeColumnTests(unittest.TestCase):
+    """A column that only mentions a length is not the product's size."""
+
+    def test_size_headers(self) -> None:
+        own = [
+            "Длина, мм", "Ширина, см", "Высота, м", "Глубина, мм", "Высота корпуса, мм", "Габаритная длина, см",
+            "Длина (L), мм", "name:EF000040:Высота корпуса, мм", "Width, mm", "Ширина изделия, мм",
+        ]
+        other = [
+            "Макс. длина кабеля, м", "Ширина шины, мм", "Длина зачистки провода, мм", "Длина упаковки, мм",
+            "Высота над уровнем моря, м", "Ширина в модулях", "Механическая износостойкость, циклов",
+        ]
+        for header in own:
+            self.assertTrue(etim_importer.is_product_size_header(header), header)
+        for header in other:
+            self.assertFalse(etim_importer.is_product_size_header(header), header)
+
+    def test_cable_length_is_not_taken_for_the_product_length(self) -> None:
+        # The case from a real ETIM file: 1000 m of cable became a 1 000 000 mm product length.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_etim(
+                Path(tmp) / "etim.xlsx",
+                [(
+                    "Лист19",
+                    [
+                        ["Артикул", "Макс. длина кабеля, м", "Механическая износостойкость, циклов", "Высота, мм"],
+                        ["311015", 1000, 1000000, 80],
+                    ],
+                )],
+            )
+            found = etim_importer.scan_etim_workbook(path, ["311015"])["311015"]
+        self.assertEqual({"height_mm": 80.0}, found.dimensions)
+        self.assertEqual("1000", found.attributes["Макс. длина кабеля, м"])
+
+    def test_impossible_size_is_not_used(self) -> None:
+        self.assertIsNone(etim_importer.parse_dimension_number(1000, "Длина, м"))
+        self.assertEqual(2200.0, etim_importer.parse_dimension_number(2.2, "Высота, м"))
+        self.assertEqual({}, etim_importer.parse_overall_dimensions("100x200x30000", "ДхШхВ, мм"))
