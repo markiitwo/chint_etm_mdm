@@ -333,3 +333,37 @@ class BaseProblemTests(unittest.TestCase):
             text = root / "price.sqlite"
             text.write_bytes(b"PK\x03\x04 not sqlite" * 50)
             self.assertIn("не похож на базу SQLite", base_problem(text))
+
+
+class CopyBaseTests(CloseDuringOperationTests):
+    def test_copy_in_the_background_keeps_the_old_one(self) -> None:
+        from chint_etm_mdm.app import CopyBaseWorker
+
+        root = Path(self.temp_dir.name)
+        source = root / "Загрузки" / "chint_mdm.sqlite"
+        source.parent.mkdir()
+        make_base(source, "new")
+        target = root / "work" / "database" / "chint_mdm.sqlite"
+        target.parent.mkdir(parents=True)
+        make_base(target, "old")
+        copied = []
+        worker = CopyBaseWorker(source, target)
+        worker.done.connect(copied.append)
+        worker.failed.connect(self.fail)
+        worker.run()
+        self.assertEqual([target], copied)
+        self.assertEqual("new", product_name(target))
+        backups = list(target.parent.glob("*before_copy*"))
+        self.assertEqual(1, len(backups))
+        self.assertEqual("old", product_name(backups[0]))
+
+    def test_window_does_not_copy_the_base_onto_itself(self) -> None:
+        root = Path(self.temp_dir.name)
+        base = root / "work" / "database" / "chint_mdm.sqlite"
+        base.parent.mkdir(parents=True)
+        make_base(base, "x")
+        self.window.db_path_edit.setText(str(base))
+        self.window.work_dir_edit.setText(str(root / "work"))
+        with mock.patch.object(self.window, "start_worker") as start:
+            self.window.copy_db_to_workspace()
+        start.assert_not_called()

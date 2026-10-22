@@ -41,7 +41,7 @@ from . import __version__
 from .analyzer import analyze_template_mapping
 from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
-from .db_utils import BackupRejected, base_problem, copy_sqlite_database
+from .db_utils import BackupRejected, base_problem, copy_sqlite_database, create_sqlite_backup
 from .etm_materials import (
     DESCRIPTIONS_TABLE,
     MaterialsResult,
@@ -598,6 +598,27 @@ class DimensionClearWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class CopyBaseWorker(QThread):
+    """Copies the base into the work folder in the background: a big base takes a while."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, source: Path, target: Path) -> None:
+        super().__init__()
+        self.source = source
+        self.target = target
+
+    def run(self) -> None:
+        try:
+            if self.target.exists():
+                create_sqlite_backup(self.target, label="before_copy")
+            copy_sqlite_database(self.source, self.target)
+            self.done.emit(self.target)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class RestoreWorker(QThread):
     """Rolls the base back in the background: a big base takes a while and the window must not look frozen."""
 
@@ -640,6 +661,7 @@ class MainWindow(QMainWindow):
             | RestoreWorker
             | DimensionAuditWorker
             | MaterialsWorker
+            | CopyBaseWorker
             | DimensionClearWorker
             | None
         ) = None
@@ -1883,10 +1905,22 @@ class MainWindow(QMainWindow):
         if not work_dir_text:
             QMessageBox.warning(self, "Нет рабочей папки", "Сначала выберите рабочую папку.")
             return
-        target_dir = Path(work_dir_text) / "database"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / "chint_mdm.sqlite"
-        copy_sqlite_database(source, target)
+        target = Path(work_dir_text) / "database" / "chint_mdm.sqlite"
+        if target.resolve() == source.resolve():
+            QMessageBox.information(self, "Уже там", f"База уже лежит в рабочей папке:\n{target}")
+            return
+        if target.exists():
+            answer = QMessageBox.question(
+                self,
+                "Заменить базу?",
+                f"В рабочей папке уже есть база:\n{target}\n\nЗаменить её копией выбранной? Старая будет сохранена рядом как бэкап.",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.price_log.append(f"Копирую базу в рабочую папку: {target}")
+        self.start_worker(CopyBaseWorker(source, target), self.on_base_copied, self.on_price_import_failed)
+
+    def on_base_copied(self, target: Path) -> None:
         self.db_path_edit.setText(str(target))
         self.save_current_config()
         self.refresh_database_status()
