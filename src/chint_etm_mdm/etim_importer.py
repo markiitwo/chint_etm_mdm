@@ -270,6 +270,11 @@ def is_product_size_header(header: object) -> bool:
     return has_size_word
 
 
+def is_size_source(header: object) -> bool:
+    """Whether a column an ETIM value came from really holds the product's size (also a size chain)."""
+    return is_product_size_header(header) or find_overall_dimension_column([header]) is not None
+
+
 def find_dimension_column(
     headers: list[object],
     hints: Iterable[str],
@@ -1018,15 +1023,24 @@ def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecis
                 rejected.append(f"{label}: товара нет в этой базе")
                 continue
             source_query = (
-                f"SELECT 1 FROM product_dimensions_raw WHERE article = ? AND source_kind = ? "
+                f"SELECT source_field FROM product_dimensions_raw WHERE article = ? AND source_kind = ? "
                 f"AND dimension_kind = ? AND ABS({column} - ?) <= 0.001"
             )
             source_params: list[object] = [article, SOURCE_KIND, column, value]
             if import_id is not None:
                 source_query += " AND import_id = ?"
                 source_params.append(import_id)
-            if conn.execute(source_query, source_params).fetchone() is None:
+            source_fields = [str(row[0] or "") for row in conn.execute(source_query, source_params)]
+            if not source_fields:
                 rejected.append(f"{label}: значение {format_mm(value)} не найдено в импорте ETIM этой базы")
+                continue
+            # An unknown (empty) column is given the benefit of the doubt, as before.
+            if not any(not field or is_size_source(field) for field in source_fields):
+                # An older report: the value came from e.g. "Макс. длина кабеля", not the product's size.
+                rejected.append(
+                    f"{label}: значение {format_mm(value)} взято из колонки «{source_fields[0]}», "
+                    "это не размер товара"
+                )
                 continue
             current_row = conn.execute(
                 f"SELECT {column} FROM product_dimensions_resolved WHERE article = ?", (article,)
