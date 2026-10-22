@@ -13,6 +13,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 
 from .db_utils import connect_database, restore_sqlite_backup
+from .excel_files import readable_xlsx
 from .number_parsing import parse_number
 from .price_importer import backup_database
 
@@ -276,8 +277,7 @@ def collect_attributes(headers: list[object], row: tuple[object, ...], article_c
 
 
 def scan_etim_workbook(etim_path: Path, articles: Iterable[str]) -> dict[str, EtimArticleData]:
-    if etim_path.suffix.lower() not in {".xlsx", ".xlsm"}:
-        raise ValueError("ETIM-файл должен быть XLSX/XLSM.")
+    etim_path = readable_xlsx(etim_path, "ETIM-файл")
 
     articles_to_find = {normalize_text(article) for article in articles if normalize_text(article)}
     if not articles_to_find:
@@ -684,13 +684,14 @@ def import_etim_workbook(
     if not db_path.exists():
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
+    readable = readable_xlsx(etim_path, "ETIM-файл")  # before the backup: an unreadable file changes nothing
     backup_path = backup_database(db_path) if make_backup else None
     with closing(connect_database(db_path)) as conn, conn:
         ensure_etim_import_tables(conn)
         articles = fetch_all_articles(conn)
         scanned_articles = len(articles)
 
-    article_data = scan_etim_workbook(etim_path, articles)
+    article_data = scan_etim_workbook(readable, articles)
 
     with closing(connect_database(db_path)) as conn, conn:
         ensure_etim_import_tables(conn)
