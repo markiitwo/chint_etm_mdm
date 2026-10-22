@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from .atomic_files import atomic_write_json
+from .config import read_settings_file
 from .net import open_url
 
 SETTINGS_NAME = "notify.json"
@@ -58,15 +59,21 @@ def settings_path() -> Path:
 
 def load_settings(path: Path | None = None) -> NotifySettings:
     path = path or settings_path()
-    if not path.exists():
-        return NotifySettings()
+    raw = read_settings_file(path, "Настройки сводки")
+    defaults = NotifySettings()
+    values = {}
+    for item in fields(NotifySettings):
+        value = raw.get(item.name, getattr(defaults, item.name))
+        default = getattr(defaults, item.name)
+        if isinstance(default, str) and isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = str(value)  # a chat id written as a number
+        # A value of the wrong kind (a list for the address, text for a flag) falls back to the default.
+        values[item.name] = value if type(value) is type(default) else default
+    settings = NotifySettings(**values)
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return NotifySettings()
-    known = {item.name for item in fields(NotifySettings)}
-    settings = NotifySettings(**{key: value for key, value in raw.items() if key in known})
-    settings.smtp_port = int(settings.smtp_port or 465)
+        settings.smtp_port = int(raw.get("smtp_port") or 465)
+    except (TypeError, ValueError):
+        settings.smtp_port = 465
     return settings
 
 

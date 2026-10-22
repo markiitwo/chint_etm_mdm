@@ -37,7 +37,7 @@ from openpyxl import load_workbook
 
 from . import __version__
 from .analyzer import analyze_template_mapping
-from .config import AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
+from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
 from .db_utils import BackupRejected, copy_sqlite_database
 from .etm_categories import CategoryRun, fill_new_products, latest_codes_file, new_articles_since, run_lines
@@ -595,6 +595,13 @@ class MainWindow(QMainWindow):
         self.refresh_database_status()
         self.update_write_action_buttons()
         self.updates = Updates(self)
+        if config_load_problems:
+            QTimer.singleShot(0, self.show_settings_problems)
+
+    def show_settings_problems(self) -> None:
+        problems = list(config_load_problems)
+        config_load_problems.clear()
+        QMessageBox.warning(self, "Настройки не прочитаны", "\n\n".join(problems))
 
     def update_write_action_buttons(self) -> None:
         busy = self.worker is not None
