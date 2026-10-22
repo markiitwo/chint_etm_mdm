@@ -295,3 +295,13 @@ class EtmRequestsAfterRestartTests(CloseDuringOperationTests):
         with mock.patch.object(self.window, "ask_managers") as ask:
             self.window.write_etm_pm_requests()
         self.assertEqual(["1"], [item.article for item in ask.call_args[0][0]])
+
+
+class WriteButtonsTests(CloseDuringOperationTests):
+    def test_buttons_of_every_tab_wait_for_the_operation(self) -> None:
+        texts = {button.text() for button in self.window.write_action_buttons}
+        for text in ("Заполнить архив РАЭК", "Сделать материалы", "Откатить базу из бэкапа", "Импортировать ETIM"):
+            self.assertIn(text, texts)
+        self.window.worker = FakeRunningWorker()
+        self.window.update_write_action_buttons()
+        self.assertFalse(any(button.isEnabled() for button in self.window.write_action_buttons))
