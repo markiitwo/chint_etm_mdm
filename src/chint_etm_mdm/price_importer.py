@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .db_utils import connect_database, create_sqlite_backup
+from .db_utils import connect_database, create_sqlite_backup, sha256_file
 from .net import open_url
 from .number_parsing import parse_number
 
@@ -108,6 +108,10 @@ class PriceImportResult:
     missing_columns: tuple[str, ...] = ()
     unknown_columns: tuple[str, ...] = ()
     invalid_numbers: int = 0
+    # Set when this very file was imported before and nothing was changed now.
+    repeat_of_snapshot: int | None = None
+    repeat_of_date: str = ""
+    conflicting_articles: tuple[str, ...] = ()
 
 
 class PriceLinkParser(html.parser.HTMLParser):
@@ -422,8 +426,47 @@ def read_price_workbook(xlsx_path: Path) -> dict[str, list[list[str]]]:
     return workbook_rows
 
 
+DATE_IN_NAME_RE = re.compile(r"\d{1,2}[.\-_]\d{1,2}[.\-_]\d{2,4}|\d{4}[.\-_]\d{1,2}[.\-_]\d{1,2}")
+COPY_SUFFIX_RE = re.compile(r"(?:_\d{1,3}| ?\(\d{1,3}\))$")
+
+
 def snapshot_date_from_filename(path: Path) -> str:
-    return path.stem.replace("Price-list-CHINT_", "")
+    date = path.stem.replace("Price-list-CHINT_", "")
+    # "_1" from a second download or " (1)" from the browser is not part of the date.
+    stripped = COPY_SUFFIX_RE.sub("", date)
+    if stripped != date and DATE_IN_NAME_RE.search(stripped):
+        return stripped
+    return date
+
+
+CONTENT_HASH_COLUMN = "content_sha256"
+
+
+def has_content_hash_column(conn: sqlite3.Connection) -> bool:
+    return any(row[1] == CONTENT_HASH_COLUMN for row in conn.execute("PRAGMA table_info(price_snapshots)"))
+
+
+def ensure_content_hash_column(conn: sqlite3.Connection) -> None:
+    # An added empty column: older versions of the program keep working with the base.
+    if not has_content_hash_column(conn):
+        conn.execute(f"ALTER TABLE price_snapshots ADD COLUMN {CONTENT_HASH_COLUMN} TEXT")
+
+
+def imported_snapshot_for(db_path: Path, digest: str) -> tuple[int, str] | None:
+    """The snapshot this exact file content already went into, if any."""
+    with closing(connect_database(db_path)) as conn:
+        if not has_content_hash_column(conn):
+            return None
+        row = conn.execute(
+            f"SELECT id, COALESCE(snapshot_date, '') FROM price_snapshots WHERE {CONTENT_HASH_COLUMN} = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (digest,),
+        ).fetchone()
+    return (int(row[0]), str(row[1])) if row else None
+
+
+def already_imported(xlsx_path: Path, db_path: Path) -> tuple[int, str] | None:
+    return imported_snapshot_for(db_path, sha256_file(xlsx_path))
 
 
 def latest_snapshot_id(conn: sqlite3.Connection) -> int | None:
@@ -485,28 +528,39 @@ def count_new_articles(conn: sqlite3.Connection, previous_snapshot_id: int | Non
     )
 
 
+def same_price(current: object, previous: object) -> bool:
+    """100 and 100.00 (or 1 234,50 and 1234.5) are one price; text compares as text."""
+    if current is None:
+        return True  # the column was absent from the new file: not a change
+    left = parse_number(current)
+    right = parse_number(previous) if previous is not None else None
+    if left is not None and right is not None:
+        return abs(left - right) < 0.005
+    return str(current).strip() == str(previous or "").strip()
+
+
 def count_changed_prices(conn: sqlite3.Connection, previous_snapshot_id: int | None, snapshot_id: int) -> int:
+    """Articles whose price changed; an article listed twice is still one article."""
     if previous_snapshot_id is None:
         return 0
-    return int(
-        conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM price_snapshot_items current
-            JOIN price_snapshot_items previous ON previous.article = current.article
-            WHERE current.snapshot_id = ?
-              AND previous.snapshot_id = ?
-              AND (
-                  (current.price_with_vat IS NOT NULL
-                   AND current.price_with_vat != COALESCE(previous.price_with_vat, ''))
-                  OR (current.price_without_vat IS NOT NULL
-                      AND current.price_without_vat != COALESCE(previous.price_without_vat, ''))
-              )
-            """,
-            (snapshot_id, previous_snapshot_id),
-        ).fetchone()[0]
-        or 0
-    )
+
+    def last_prices(snapshot: int) -> dict[str, tuple[object, object]]:
+        rows = conn.execute(
+            "SELECT article, price_with_vat, price_without_vat FROM price_snapshot_items "
+            "WHERE snapshot_id = ? AND article IS NOT NULL ORDER BY id",
+            (snapshot,),
+        )
+        return {str(row[0]): (row[1], row[2]) for row in rows}
+
+    previous = last_prices(previous_snapshot_id)
+    changed = 0
+    for article, (with_vat, without_vat) in last_prices(snapshot_id).items():
+        if article not in previous:
+            continue
+        old_with, old_without = previous[article]
+        if not same_price(with_vat, old_with) or not same_price(without_vat, old_without):
+            changed += 1
+    return changed
 
 
 def row_dict(header: list[str], row: list[str]) -> dict[str, str]:
@@ -564,7 +618,21 @@ def count_invalid_numbers(rows: list[list[str]]) -> int:
     return invalid
 
 
+def conflicting_price_articles(rows: list[list[str]]) -> tuple[str, ...]:
+    """Articles listed more than once with different data; the last row wins, as before."""
+    if not rows:
+        return ()
+    header = rows[0]
+    seen: dict[str, set[tuple[str, ...]]] = {}
+    for row in rows[1:]:
+        article = value(row_dict(header, row), "Артикул").strip()
+        if article:
+            seen.setdefault(article, set()).add(tuple(str(cell).strip() for cell in row))
+    return tuple(sorted(article for article, variants in seen.items() if len(variants) > 1))
+
+
 def insert_price_rows(cur: sqlite3.Cursor, snapshot_id: int, rows: list[list[str]]) -> int:
+    """Write the price rows; an exact repeat of a row is written once."""
     if not rows:
         return 0
     header = rows[0]
@@ -576,6 +644,7 @@ def insert_price_rows(cur: sqlite3.Cursor, snapshot_id: int, rows: list[list[str
         f"VALUES ({', '.join(['?'] * (len(SNAPSHOT_FIELDS) + 2))})"
     )
     imported = 0
+    seen: dict[str, set[tuple[str, ...]]] = {}
     for row in rows[1:]:
         if not any(row):
             continue
@@ -583,6 +652,11 @@ def insert_price_rows(cur: sqlite3.Cursor, snapshot_id: int, rows: list[list[str
         article = value(data, "Артикул").strip()
         if not article:
             continue
+        variants = seen.setdefault(article, set())
+        key = tuple(str(cell).strip() for cell in row)
+        if key in variants:
+            continue  # the same row twice
+        variants.add(key)
         imported += 1
         cur.execute(
             upsert_sql,
@@ -692,13 +766,39 @@ def import_price_workbook(
     source_url: str = "",
     make_backup: bool = True,
     progress: Callable[[str], None] | None = None,
+    allow_repeat: bool = False,
 ) -> PriceImportResult:
+    """Import a price list; the same file a second time changes nothing unless ``allow_repeat``.
+
+    Repeating on purpose is for a base rolled back to before that import.
+    """
     if not xlsx_path.exists():
         raise FileNotFoundError(f"Прайс не найден: {xlsx_path}")
     if not db_path.exists():
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
     report_progress = progress or (lambda _message: None)
+    digest = sha256_file(xlsx_path)
+    earlier = imported_snapshot_for(db_path, digest)
+    if earlier and not allow_repeat:
+        with closing(connect_database(db_path)) as conn:
+            products_total = int(conn.execute("SELECT COUNT(*) FROM products").fetchone()[0])
+        return PriceImportResult(
+            price_file=xlsx_path,
+            db_path=db_path,
+            backup_path=None,
+            snapshot_id=earlier[0],
+            snapshot_date=earlier[1],
+            price_rows=0,
+            new_rows=0,
+            out_rows=0,
+            history_rows=0,
+            products_total=products_total,
+            new_articles=0,
+            changed_price_rows=0,
+            repeat_of_snapshot=earlier[0],
+            repeat_of_date=earlier[1],
+        )
     report_progress("Читаю и проверяю прайс-лист...")
     workbook_rows = read_price_workbook(xlsx_path)
     price_sheet = workbook_rows["Price-list"]
@@ -712,14 +812,15 @@ def import_price_workbook(
     report_progress("Обновляю товары и цены в базе...")
     with closing(connect_database(db_path)) as conn, conn:
         ensure_price_indexes(conn)
+        ensure_content_hash_column(conn)
         previous_snapshot_id = latest_snapshot_id(conn)
         cur = conn.cursor()
         cur.execute(
-            """
-            INSERT INTO price_snapshots (snapshot_date, source_url, local_file, workbook_name)
-            VALUES (?, ?, ?, ?)
+            f"""
+            INSERT INTO price_snapshots (snapshot_date, source_url, local_file, workbook_name, {CONTENT_HASH_COLUMN})
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (snapshot_date, source_url, str(xlsx_path), xlsx_path.name),
+            (snapshot_date, source_url, str(xlsx_path), xlsx_path.name, digest),
         )
         snapshot_id = int(cur.lastrowid)
 
@@ -751,10 +852,18 @@ def import_price_workbook(
         missing_columns=missing_columns,
         unknown_columns=unknown_columns,
         invalid_numbers=invalid_numbers,
+        conflicting_articles=conflicting_price_articles(workbook_rows["Price-list"]),
     )
 
 
 def result_lines(result: PriceImportResult) -> list[str]:
+    if result.repeat_of_snapshot is not None:
+        return [
+            f"Прайс: {result.price_file}",
+            f"Этот прайс уже был импортирован (снимок {result.repeat_of_date or '—'}, id {result.repeat_of_snapshot}). "
+            "База не менялась.",
+            f"Товаров в базе всего: {result.products_total}",
+        ]
     lines = [
         f"Прайс: {result.price_file}",
         f"База: {result.db_path}",
@@ -778,6 +887,10 @@ def result_lines(result: PriceImportResult) -> list[str]:
             f"Нечисловых значений веса/объёма/количества: {result.invalid_numbers} "
             "(сохранены как текст, в шаблон не попадут)"
         )
+    if result.conflicting_articles:
+        shown = ", ".join(result.conflicting_articles[:10])
+        more = f" и ещё {len(result.conflicting_articles) - 10}" if len(result.conflicting_articles) > 10 else ""
+        lines.append(f"Артикулы с разными строками в прайсе (взята последняя строка): {shown}{more}")
     if result.backup_path:
         lines.append(f"Бэкап базы: {result.backup_path}")
     return lines

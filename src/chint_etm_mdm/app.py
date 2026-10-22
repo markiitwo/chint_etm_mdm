@@ -74,6 +74,7 @@ from .manual_values import (
 from .price_importer import (
     DEFAULT_PRICE_SOURCE_URL,
     PriceImportResult,
+    already_imported,
     download_price_file,
     find_latest_price_url,
     import_price_workbook,
@@ -400,12 +401,14 @@ class PriceImportWorker(QThread):
         price_path: Path | None,
         price_url: str,
         downloads_dir: Path,
+        allow_repeat: bool = False,
     ) -> None:
         super().__init__()
         self.db_path = db_path
         self.price_path = price_path
         self.price_url = price_url
         self.downloads_dir = downloads_dir
+        self.allow_repeat = allow_repeat
 
     def run(self) -> None:
         try:
@@ -424,6 +427,7 @@ class PriceImportWorker(QThread):
                     source_url=self.price_url,
                     make_backup=True,
                     progress=self.progress.emit,
+                    allow_repeat=self.allow_repeat,
                 )
             )
         except Exception:
@@ -1725,8 +1729,22 @@ class MainWindow(QMainWindow):
             if not price_path.is_file():
                 QMessageBox.warning(self, "Прайс не найден", "Выберите существующий XLSX прайс-лист.")
                 return
+            earlier = already_imported(price_path, db_path)
+            if earlier is not None:
+                answer = QMessageBox.question(
+                    self,
+                    "Прайс уже импортирован",
+                    f"Этот же файл уже был импортирован (снимок {earlier[1] or '—'}, id {earlier[0]}).\n\n"
+                    "Повторный импорт нужен только если базу откатывали из бэкапа. Импортировать ещё раз?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
             self.price_log.append("Импортирую выбранный прайс...")
-            worker = PriceImportWorker(db_path, price_path, "", self.price_download_dir())
+            worker = PriceImportWorker(
+                db_path, price_path, "", self.price_download_dir(), allow_repeat=earlier is not None
+            )
             self.start_worker(worker, self.on_price_import_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
@@ -1883,7 +1901,8 @@ class MainWindow(QMainWindow):
         for line in result_lines(result):
             self.price_log.append(line)
         self.refresh_database_status()
-        QMessageBox.information(self, "Прайс импортирован", "\n".join(result_lines(result)))
+        title = "Прайс уже был импортирован" if result.repeat_of_snapshot is not None else "Прайс импортирован"
+        QMessageBox.information(self, title, "\n".join(result_lines(result)))
 
     def on_etim_import_done(self, result: EtimImportResult) -> None:
         self.etim_file_edit.setText(str(result.etim_file))
