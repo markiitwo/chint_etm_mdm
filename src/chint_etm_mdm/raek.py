@@ -28,6 +28,7 @@ from io import BytesIO
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
 
 from . import partners
 from .atomic_files import atomic_write_json
@@ -337,15 +338,10 @@ def as_date(value: str) -> dt.datetime | None:
 
 
 def ean13(product: ProductRecord, chz_value: str) -> Cell:
+    """The product's own barcode from the ЧЗ file. A pack barcode is a different code and is never used."""
     if re.fullmatch(r"\d{13}", chz_value):
         return Cell(FILLED, chz_value)
-    for gtin in (product.gtin_inner, product.gtin_outer):
-        digits = re.sub(r"\D", "", gtin)
-        if len(digits) == 14 and digits[0] in "12345678":
-            body = digits[1:13]
-            check = (10 - sum(int(d) * (3 if idx % 2 else 1) for idx, d in enumerate(body)) % 10) % 10
-            return Cell(CHECK, body + str(check), "Получен из GTIN упаковки (без первой цифры); в файле ЧЗ штрих-кода нет")
-    return Cell(EMPTY, note="Нет штрих-кода ни в файле ЧЗ, ни в базе")
+    return Cell(EMPTY, note="Нет штрих-кода товара в файле ЧЗ")
 
 
 ASKED_COLUMNS = {canonical(name) for name in ("Штрих-код EAN", "Код ТН ВЭД", "Код ОКПД2", "Серия")}
@@ -719,19 +715,64 @@ def fill_raek_zip(
 NAMES_HEADERS = ["Лист", "Код ETIM", "Характеристика РАЭК", "Взято из базы", "Товаров", "Примеры", "Верно? (да/нет)"]
 
 
+@dataclass
+class DataSummary:
+    """What the archive says about products and their data, not about cells."""
+
+    products: int
+    complete: int
+    not_in_db: int
+    missing: list[tuple[str, int, str]]  # data, products without it, main reason
+    to_check: list[tuple[str, int, str]]  # data, products where it should be checked, main reason
+
+
+def data_label(column: str) -> str:
+    return re.sub(r"^EF\d+\s+", "", column)
+
+
+def data_summary(result: RaekResult) -> DataSummary:
+    not_in_db = {row.article for row in result.rows if row.note == "Артикула нет в базе"}
+    groups: dict[str, dict[str, tuple[set[str], Counter]]] = {STATUS_LABELS[EMPTY]: {}, STATUS_LABELS[CHECK]: {}}
+    incomplete = set(not_in_db)
+    for row in result.rows:
+        if row.status not in groups or row.article in not_in_db:
+            continue
+        incomplete.add(row.article)
+        articles, reasons = groups[row.status].setdefault(data_label(row.column), (set(), Counter()))
+        articles.add(row.article)
+        reasons[row.note.split(" (")[0].split(";")[0]] += 1
+
+    def ordered(status: str) -> list[tuple[str, int, str]]:
+        items = [(label, len(articles), reasons.most_common(1)[0][0]) for label, (articles, reasons) in groups[status].items()]
+        return sorted(items, key=lambda item: (-item[1], item[0]))
+
+    return DataSummary(
+        result.products,
+        max(result.products - len(incomplete), 0),
+        len(not_in_db),
+        ordered(STATUS_LABELS[EMPTY]),
+        ordered(STATUS_LABELS[CHECK]),
+    )
+
+
 def write_report(result: RaekResult) -> None:
     workbook = Workbook()
     summary = workbook.active
     summary.title = "Итог"
-    summary.append(["Что", "Сколько"])
-    for label, count in (
-        ("Товаров в архиве", result.products),
-        ("Заполнено ячеек", result.filled),
-        ("Заполнено, но стоит проверить", result.check),
-        ("Нечем заполнить", result.empty),
-        ("Уже были заполнены (не трогали)", result.kept),
-    ):
-        summary.append([label, count])
+    totals = data_summary(result)
+    summary.append(["Товаров в архиве", totals.products])
+    summary.append(["Все данные есть и проверять нечего", totals.complete])
+    if totals.not_in_db:
+        summary.append(["Товаров нет в базе", totals.not_in_db])
+    for title, items in (("Каких данных нет", totals.missing), ("Что проверить", totals.to_check)):
+        if not items:
+            continue
+        summary.append([])
+        summary.append([title, "Товаров", "Почему"])
+        summary.cell(summary.max_row, 1).font = Font(bold=True)
+        for item in items:
+            summary.append(list(item))
+    summary.append([])
     if result.codes_file:
         summary.append(["Файл ЧЗ", result.codes_file.name])
     for name in result.skipped_files:
@@ -811,15 +852,19 @@ def latest_raek_zip(folders: list[Path]) -> Path | None:
 
 
 def result_lines(result: RaekResult) -> list[str]:
-    lines = [
-        f"Товаров в архиве: {result.products}, файлов заполнено: {result.files}.",
-        f"Заполнено ячеек: {result.filled}. Стоит проверить: {result.check}. Нечем заполнить: {result.empty}.",
-    ]
-    if result.kept:
-        lines.append(f"Уже заполненные ячейки ({result.kept}) не трогали.")
-    reasons = Counter(row.note.split(" (")[0].split(";")[0] for row in result.rows if row.status == STATUS_LABELS[EMPTY])
-    for note, count in reasons.most_common(4):
-        lines.append(f"  нечем заполнить {count}: {note}")
+    totals = data_summary(result)
+    lines = [f"Товаров в архиве: {totals.products}. Все данные есть у {totals.complete}."]
+    if totals.not_in_db:
+        lines.append(f"Товаров нет в базе: {totals.not_in_db}.")
+    if totals.missing:
+        lines.append("Каких данных нет:")
+        lines.extend(f"  {label} — у {count} тов. ({reason})" for label, count, reason in totals.missing[:8])
+        if len(totals.missing) > 8:
+            lines.append(f"  и ещё {len(totals.missing) - 8} видов данных, см. отчёт.")
+    if totals.to_check:
+        lines.append("Что проверить:")
+        lines.extend(f"  {label} — у {count} тов. ({reason})" for label, count, reason in totals.to_check[:5])
+    lines.append("Данные, которые у РАЭК уже были, программа не трогала.")
     if result.names:
         lines.append(f"Проверьте лист «Названия» в отчёте ({len(result.names)} строк): да/нет, и программа запомнит.")
     if result.needs:

@@ -23,7 +23,8 @@ from chint_etm_mdm.pm_requests import (
     request_lines,
     write_requests,
 )
-from test_raek import DRIVE, RaekTests, cells
+import test_raek
+from test_raek import DRIVE, cells
 
 
 def make_assignment(path: Path) -> None:
@@ -57,10 +58,10 @@ class AssignmentTests(unittest.TestCase):
 
 
 class RequestRoundTripTests(unittest.TestCase):
-    setUp = RaekTests.setUp
-    tearDown = RaekTests.tearDown
-    fill = RaekTests.fill
-    member = RaekTests.member
+    setUp = test_raek.RaekTests.setUp
+    tearDown = test_raek.RaekTests.tearDown
+    fill = test_raek.RaekTests.fill
+    member = test_raek.RaekTests.member
 
     def test_request_answer_and_fill(self) -> None:
         with closing(sqlite3.connect(self.db)) as conn, conn:
