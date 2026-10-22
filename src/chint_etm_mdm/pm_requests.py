@@ -243,6 +243,22 @@ def load_answers(path: Path | None) -> dict[tuple[str, str], str]:
     return {(item["article"], item["key"]): item["value"] for item in data.get("answers", [])}
 
 
+ETIM_FEATURE_RE = re.compile(r"^EF\d+$")
+
+
+def load_answer_attributes(path: Path | None) -> dict[str, dict[str, str]]:
+    """Characteristics managers answered for RAEK (keyed by ETIM feature), as product data:
+    article -> {characteristic name: value}. Another partner matches names and values its own way."""
+    if path is None or not path.exists():
+        return {}
+    data = read_json(path, {})
+    found: dict[str, dict[str, str]] = {}
+    for item in data.get("answers", []):
+        if ETIM_FEATURE_RE.match(str(item.get("key", ""))) and item.get("article") and item.get("label"):
+            found.setdefault(item["article"], {})[str(item["label"])] = str(item["value"])
+    return found
+
+
 # --- writing requests ----------------------------------------------------------------------------
 
 

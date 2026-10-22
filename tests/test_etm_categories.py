@@ -439,3 +439,32 @@ class RaekAnswersInEtmTests(CategoryTemplateTests):
             ("Штрихкод", "Конфиг:С блоком управления"),
         )
         self.assertEqual({("1", "Штрихкод"): ("4600000000001", "pm_answer")}, found)
+
+
+class RaekCharacteristicsInEtmTests(CategoryTemplateTests):
+    """Characteristics answered for RAEK are product data for ETM: matched by name and to ETM's list."""
+
+    def test_answered_characteristics_fill_matching_etm_fields(self) -> None:
+        import json
+
+        from chint_etm_mdm.etm_categories import fill_new_products
+
+        answers = self.root / "answers.json"
+        items = [
+            {"article": "100", "key": "EF000001", "label": "Количество силовых полюсов", "value": "1P+N"},
+            {"article": "100", "key": "EF000002", "label": "Тип срабатывания по диф.току", "value": "ac"},
+            {"article": "100", "key": "EF000003", "label": "Цвет корпуса", "value": "Белый"},
+        ]
+        answers.write_text(json.dumps({"version": 1, "answers": items}), encoding="utf-8")
+
+        before = fill_new_products(self.db, ["100"], self.templates, self.root / "out1")
+        after = fill_new_products(self.db, ["100"], self.templates, self.root / "out2", answers_file=answers)
+        asked_before = {need.key for need in before.needs}
+        asked_after = {need.key for need in after.needs}
+        self.assertIn("Конфиг:Количество силовых полюсов", asked_before)
+        self.assertNotIn("Конфиг:Количество силовых полюсов", asked_after)
+        self.assertNotIn("Конфиг:Тип срабатывания по диф.току", asked_after)
+        result, _csv = after.results["500820"]
+        values = {row.column: row.value for row in result.rows if row.status.startswith("filled")}
+        self.assertEqual("1P+N", values["Конфиг:Количество силовых полюсов"])
+        self.assertEqual("AC", values["Конфиг:Тип срабатывания по диф.току"])  # written as ETM's list has it
