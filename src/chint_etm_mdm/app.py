@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDateEdit,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -53,6 +55,7 @@ from .filler import FillResult, fill_template
 from .raek import RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answers, result_lines as raek_result_lines
 from .site_info import default_cache_path as site_cache_path
 from .certificates import TABLE_NAME as CERTIFICATES_TABLE, TableResult, table_lines, update_table
+from .notify import NotifySettings, find_telegram_chat, load_settings as load_notify_settings, save_settings as save_notify_settings, send_summary
 from .pm_requests import answer_lines, answers_path, import_answers, latest_assignment_file, load_assignment, request_lines, write_requests
 from .update_ui import Updates, offer_install
 from .value_matching import import_etm_reference
@@ -178,6 +181,100 @@ class RaekWorker(QThread):
             )
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+class SummaryWorker(QThread):
+    """Sends a run summary in the background: a slow mail server must not freeze the window."""
+
+    done = Signal(object)
+
+    def __init__(self, settings: NotifySettings, title: str, lines: list[str]) -> None:
+        super().__init__()
+        self.settings = settings
+        self.title = title
+        self.lines = lines
+
+    def run(self) -> None:
+        self.done.emit(send_summary(self.settings, self.title, self.lines))
+
+
+class NotifyDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Сводка на почту и в Telegram")
+        settings = load_notify_settings()
+        self.after_run = QCheckBox("Отправлять сводку после заполнения РАЭК и новинок ЭТМ")
+        self.after_run.setChecked(settings.send_after_run)
+        self.email_to = QLineEdit(settings.email_to)
+        self.smtp_host = QLineEdit(settings.smtp_host)
+        self.smtp_host.setPlaceholderText("например, smtp.yandex.ru или smtp.mail.ru")
+        self.smtp_port = QLineEdit(str(settings.smtp_port))
+        self.smtp_user = QLineEdit(settings.smtp_user)
+        self.smtp_user.setPlaceholderText("почта, с которой отправлять")
+        self.smtp_password = QLineEdit(settings.smtp_password)
+        self.smtp_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.smtp_password.setPlaceholderText("пароль приложения из настроек почты")
+        self.telegram_token = QLineEdit(settings.telegram_token)
+        self.telegram_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.telegram_token.setPlaceholderText("токен бота от @BotFather")
+        self.telegram_chat = QLineEdit(settings.telegram_chat_id)
+        find_chat = QPushButton("Найти чат")
+        find_chat.setToolTip("Сначала напишите боту любое сообщение в Telegram")
+        find_chat.clicked.connect(self.find_chat)
+        test = QPushButton("Отправить пробную сводку")
+        test.clicked.connect(self.send_test)
+
+        form = QFormLayout()
+        form.addRow(self.after_run)
+        form.addRow(QLabel("<b>Почта</b>"))
+        form.addRow("Кому", self.email_to)
+        form.addRow("Почтовый сервер", self.smtp_host)
+        form.addRow("Порт (465 или 587)", self.smtp_port)
+        form.addRow("С какой почты", self.smtp_user)
+        form.addRow("Пароль", self.smtp_password)
+        form.addRow(QLabel("<b>Telegram</b>"))
+        form.addRow("Токен бота", self.telegram_token)
+        chat_row = QHBoxLayout()
+        chat_row.addWidget(self.telegram_chat)
+        chat_row.addWidget(find_chat)
+        form.addRow("Чат", chat_row)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(test)
+        layout.addWidget(buttons)
+
+    def settings(self) -> NotifySettings:
+        port = self.smtp_port.text().strip()
+        return NotifySettings(
+            send_after_run=self.after_run.isChecked(),
+            email_to=self.email_to.text().strip(),
+            smtp_host=self.smtp_host.text().strip(),
+            smtp_port=int(port) if port.isdigit() else 465,
+            smtp_user=self.smtp_user.text().strip(),
+            smtp_password=self.smtp_password.text(),
+            telegram_token=self.telegram_token.text().strip(),
+            telegram_chat_id=self.telegram_chat.text().strip(),
+        )
+
+    def find_chat(self) -> None:
+        try:
+            chat_id, who = find_telegram_chat(self.telegram_token.text())
+        except Exception as exc:
+            QMessageBox.warning(self, "Чат не найден", str(exc))
+            return
+        self.telegram_chat.setText(chat_id)
+        QMessageBox.information(self, "Чат найден", f"Сводки будут приходить в чат: {who or chat_id}")
+
+    def send_test(self) -> None:
+        report = send_summary(self.settings(), "CHINT ETM MDM: пробная сводка", ["Если вы это читаете, сводки настроены."])
+        QMessageBox.information(self, "Пробная сводка", "\n".join(report))
+
+    def save(self) -> None:
+        save_notify_settings(self.settings())
+        self.accept()
 
 
 def codes_folders(work_dir: str, inbox_dir: str = "") -> list[Path]:
@@ -569,6 +666,9 @@ class MainWindow(QMainWindow):
         buttons.addWidget(backup_button)
         buttons.addWidget(self.restore_button)
         buttons.addWidget(refresh_button)
+        notify_button = QPushButton("Сводка на почту и в Telegram...")
+        notify_button.clicked.connect(lambda: NotifyDialog(self).exec())
+        buttons.addWidget(notify_button)
 
         layout.addWidget(setup_box)
         layout.addLayout(buttons)
@@ -766,6 +866,7 @@ class MainWindow(QMainWindow):
         self.raek_log.append("Готово.")
         for line in lines:
             self.raek_log.append(line)
+        self.send_run_summary("CHINT: архив РАЭК заполнен", lines, self.raek_log)
         QMessageBox.information(self, "Архив РАЭК готов", "\n".join(lines))
 
     def on_raek_failed(self, details: str) -> None:
@@ -1123,6 +1224,7 @@ class MainWindow(QMainWindow):
         self.new_products_log.append("Готово.")
         for line in lines:
             self.new_products_log.append(line)
+        self.send_run_summary("CHINT: новинки ЭТМ готовы", lines, self.new_products_log)
         QMessageBox.information(self, "Новинки готовы", "\n".join(lines))
 
     def on_new_products_failed(self, details: str) -> None:
@@ -1282,6 +1384,14 @@ class MainWindow(QMainWindow):
         if path:
             self.mapping_review_path_edit.setText(path)
             self.load_mapping_review()
+
+    def send_run_summary(self, title: str, lines: list[str], log: QTextEdit) -> None:
+        settings = load_notify_settings()
+        if not settings.send_after_run:
+            return
+        self.summary_worker = SummaryWorker(settings, title, lines)
+        self.summary_worker.done.connect(lambda report: [log.append(line) for line in report])
+        self.summary_worker.start()
 
     def incoming(self) -> list[Path]:
         return incoming_folders(self.inbox_dir_edit.text().strip())
