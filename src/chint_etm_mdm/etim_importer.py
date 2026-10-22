@@ -32,6 +32,16 @@ DIMENSION_EXCLUDE_HINTS = {
     "width_mm": (),
     "height_mm": ("уровнем моря", "над уровнем", "altitude"),
 }
+# A product size column is the size word, a unit and at most these words: "Длина, мм",
+# "Высота корпуса, мм", "Габаритная ширина, см". Anything else ("Макс. длина кабеля, м",
+# "Ширина шины", "Длина зачистки") is another characteristic that only mentions a length.
+SIZE_WORD_STEMS = ("длин", "ширин", "высот", "глубин", "length", "width", "height", "depth")
+SIZE_QUALIFIER_STEMS = (
+    "габарит", "издели", "товар", "продукт", "корпус", "общ", "наружн", "внешн", "overall", "product",
+)
+SIZE_UNIT_WORDS = {"мм", "mm", "см", "cm", "м", "m", "в", "in"}
+# Nothing this program fills is longer than 10 m; a bigger number is a misread column.
+MAX_PRODUCT_SIZE_MM = 10_000.0
 OVERALL_DIMENSION_HINT = "габарит"
 OVERALL_DIMENSION_SECONDARY_HINT = "размер"
 SOURCE_KIND = "etim_manual"
@@ -167,11 +177,13 @@ def parse_dimension_number(value: object, header: object) -> float | None:
     if number is None or number <= 0:
         return None
     if value_unit is not None:
-        return number * UNIT_FACTORS_MM[value_unit]
-    header_factor = unit_factor(normalize_text(header))
-    if header_factor is None and UNIT_RE.search(normalize_text(header)):
-        return None
-    return number * (header_factor or 1.0)
+        size = number * UNIT_FACTORS_MM[value_unit]
+    else:
+        header_factor = unit_factor(normalize_text(header))
+        if header_factor is None and UNIT_RE.search(normalize_text(header)):
+            return None
+        size = number * (header_factor or 1.0)
+    return size if size <= MAX_PRODUCT_SIZE_MM else None
 
 
 def chain_order_from_header(header: object) -> tuple[str, ...] | None:
@@ -232,7 +244,10 @@ def parse_overall_dimensions(value: object, header: object = "") -> dict[str, fl
             return {}
     else:
         factor = 1.0
-    return {key: float(item) * factor for key, item in zip(order, values)}
+    sizes = {key: float(item) * factor for key, item in zip(order, values)}
+    if any(size > MAX_PRODUCT_SIZE_MM for size in sizes.values()):
+        return {}
+    return sizes
 
 
 def parse_dimension_cell(value: object, header: object, dimension_key: str) -> float | None:
@@ -240,6 +255,19 @@ def parse_dimension_cell(value: object, header: object, dimension_key: str) -> f
     if any(hint in header_text for hint in DIMENSION_EXCLUDE_HINTS.get(dimension_key, ())):
         return None
     return parse_dimension_number(value, header)
+
+
+def is_product_size_header(header: object) -> bool:
+    text = normalize_text(header).casefold()
+    text = re.sub(r"^\w+:ef\d+:", "", text)  # ETIM "name:EF000040:Высота корпуса, мм"
+    words = re.findall(r"[^\W\d_]+", text)
+    has_size_word = False
+    for word in words:
+        if word.startswith(SIZE_WORD_STEMS):
+            has_size_word = True
+        elif len(word) > 1 and word not in SIZE_UNIT_WORDS and not word.startswith(SIZE_QUALIFIER_STEMS):
+            return False
+    return has_size_word
 
 
 def find_dimension_column(
@@ -257,6 +285,7 @@ def find_dimension_column(
         and any(hint in header for hint in hints)
         and not any(exclude in header for exclude in exclude_hints)
         and chain_order_from_header(headers[index]) is None
+        and is_product_size_header(headers[index])
     ]
     for index in candidates:
         if UNIT_RE.search(normalized[index]):
