@@ -252,6 +252,8 @@ def main() -> None:
         print(f"dimensions={stats.dimensions_count}")
         print(f"attributes={stats.attributes_count}")
         print(f"latest_price={stats.latest_price_snapshot}")
+        if template_path is None and output_dir is None and not args.analyze_mapping:
+            return  # statistics alone; with --template it is printed before filling
 
     if args.analyze_mapping:
         if template_path is None or output_dir is None:
