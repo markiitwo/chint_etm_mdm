@@ -359,3 +359,45 @@ class SummaryUsabilityTests(CategoryTemplateTests):
         link = summary["Товары"]["F2"]
         self.assertTrue(link.value.startswith("На проверку/"))
         self.assertEqual(link.value, link.hyperlink.target)
+
+
+class ReferenceListsForManagersTests(CategoryTemplateTests):
+    """A field without a list in the class template takes ETM's reference: a dropdown or "число"."""
+
+    def run_with_reference(self, rows: list[list[object]]):
+        import json
+
+        from chint_etm_mdm.etm_categories import fill_new_products
+        from chint_etm_mdm.value_matching import import_etm_reference
+
+        rules_dir = self.root / "rules"
+        rules_dir.mkdir(exist_ok=True)
+        rules = rules_dir / "attribute_mappings.json"
+        rules.write_text(json.dumps({"version": 1, "class_rules": []}), encoding="utf-8")
+        reference = self.root / "spravochnik.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Справочник"
+        sheet.append(["Код характеристики", "Название характеристики", "Формат хар-ки", "Возможные значения", "Комментарий", "Дата актуализации значений"])
+        for row in rows:
+            sheet.append(row)
+        workbook.save(reference)
+        import_etm_reference(reference, rules_dir / "etm_reference.json")
+        run = fill_new_products(self.db, ["100"], self.templates, self.root / "out", rules)
+        return {need.key: need for need in run.needs}, run
+
+    def test_closed_list_from_reference(self) -> None:
+        needs, run = self.run_with_reference(
+            [["5", "Номинальный ток (А)", "Текстовая", value, None, None] for value in ("6 А", "10 А", "16 А")]
+        )
+        current = needs["Конфиг:Номинальный ток (А)"]
+        self.assertEqual(("A", ("6 А", "10 А", "16 А")), (current.kind, current.allowed))
+        empty = load_workbook(run.summary_path)["Дозаполнить"]
+        allowed = {row[3]: row[5] for row in empty.iter_rows(min_row=2, values_only=True)}
+        self.assertEqual("6 А, 10 А, 16 А", allowed["Номинальный ток (А)"])
+        # The class template's own list still wins where it has one.
+        self.assertIn("1P+N", needs["Конфиг:Количество силовых полюсов"].allowed)
+
+    def test_numeric_from_reference(self) -> None:
+        needs, _run = self.run_with_reference([["5", "Номинальный ток (А)", "Числовая", "000", None, None]])
+        self.assertEqual(("N", ()), (needs["Конфиг:Номинальный ток (А)"].kind, needs["Конфиг:Номинальный ток (А)"].allowed))

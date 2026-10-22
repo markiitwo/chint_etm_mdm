@@ -73,6 +73,8 @@ class CategoryRun:
     check_rows: list[FillReportRow] = field(default_factory=list)
     # (class, canonical field) -> ETM's closed list of values for it
     allowed: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+    # (class, canonical field) of numeric characteristics in ETM's reference
+    numeric: set[tuple[str, str]] = field(default_factory=set)
     needs: list[Need] = field(default_factory=list)
     copied_templates: list[Path] = field(default_factory=list)
 
@@ -576,13 +578,35 @@ def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library:
     workbook.save(run.summary_path)
 
 
+def add_reference_lists(run: CategoryRun, template: PartnerTemplate, rules_path: Path | None) -> None:
+    """Fields without a list in the class template get ETM's reference list, or are marked numeric."""
+    lists = template.value_lists(rules_path)
+    if lists is None:
+        return
+    for row in run.missing_rows:
+        if not row.column.startswith(CONFIG_PREFIX):
+            continue
+        choice = run.classes.get(row.article)
+        key = (choice.code if choice else "", canonical(field_label(row.column)))
+        if key in run.allowed or key in run.numeric:
+            continue
+        characteristic = lists.characteristic(field_label(row.column))
+        if characteristic is None:
+            continue
+        if characteristic.closed:
+            run.allowed[key] = tuple(characteristic.values)
+        elif characteristic.numeric:
+            run.numeric.add(key)
+
+
 def needs_for_managers(run: CategoryRun, products: dict[str, ProductRecord], series: dict[str, str]) -> list[Need]:
     """The empty fields as questions for the product managers, with ETM's list where it has one."""
     needs = []
     for row in run.missing_rows:
         product = products.get(row.article)
         choice = run.classes.get(row.article)
-        allowed = run.allowed.get((choice.code if choice else "", canonical(field_label(row.column))), ())
+        field_key = (choice.code if choice else "", canonical(field_label(row.column)))
+        allowed = run.allowed.get(field_key, ())
         needs.append(
             Need(
                 article=row.article,
@@ -590,7 +614,7 @@ def needs_for_managers(run: CategoryRun, products: dict[str, ProductRecord], ser
                 series=series.get(row.article, ""),
                 key=row.column,
                 label=field_label(row.column),
-                kind="A" if allowed else "",
+                kind="A" if allowed else "N" if field_key in run.numeric else "",
                 allowed=allowed,
             )
         )
@@ -675,6 +699,7 @@ def fill_new_products(
         run.results[code] = (result, csv_path)
         run.missing_rows.extend(row for row in result.rows if row.status in MISSING_STATUSES and row.column)
         run.check_rows.extend(row for row in result.rows if row.status in CHECK_STATUSES and row.column)
+    add_reference_lists(run, template, rules_path)
     run.needs = needs_for_managers(run, products, series)
     write_summary(run, products, library)
     save_needs(run)
