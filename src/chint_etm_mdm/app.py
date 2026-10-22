@@ -2211,6 +2211,17 @@ class MainWindow(QMainWindow):
         row_data = check_item.data(Qt.ItemDataRole.UserRole)
         return row_data if isinstance(row_data, dict) else None
 
+    def rules_locked(self) -> bool:
+        """Rules do not change under a running fill: one operation works with one set of rules."""
+        if self.worker is None:
+            return False
+        QMessageBox.warning(
+            self,
+            "Операция уже выполняется",
+            "Правила можно менять, когда закончится текущая операция.",
+        )
+        return True
+
     def remove_matching_rule_row(self, target: dict[str, str]) -> None:
         for row_idx in range(self.rules_table.rowCount()):
             row_data = self.row_data(row_idx)
@@ -2219,6 +2230,8 @@ class MainWindow(QMainWindow):
                 return
 
     def save_rule_data(self, row_data: dict[str, str]) -> bool:
+        if self.rules_locked():
+            return False
         rules_path = self.rules_path_from_work_dir()
         if rules_path is None:
             return False
@@ -2241,6 +2254,8 @@ class MainWindow(QMainWindow):
         return self.save_rule_data(row_data) if row_data is not None else False
 
     def reject_rule_data(self, row_data: dict[str, str]) -> bool:
+        if self.rules_locked():
+            return False
         rules_path = self.rules_path_from_work_dir()
         if rules_path is None:
             return False
@@ -2263,6 +2278,8 @@ class MainWindow(QMainWindow):
         return self.reject_rule_data(row_data) if row_data is not None else False
 
     def save_selected_rules(self) -> None:
+        if self.rules_locked():
+            return
         rules_path = self.rules_path_from_work_dir()
         if rules_path is None:
             return
@@ -2306,6 +2323,8 @@ class MainWindow(QMainWindow):
         )
 
     def reject_selected_rules(self) -> None:
+        if self.rules_locked():
+            return
         rules_path = self.rules_path_from_work_dir()
         if rules_path is None:
             return

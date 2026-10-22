@@ -234,3 +234,21 @@ class ChosenPathsTests(CloseDuringOperationTests):
         with mock.patch.object(self.window, "choose_etim_report_file", return_value=None) as choose:
             self.window.apply_etim_decisions()
         choose.assert_called_once_with(last)
+
+
+class RulesDuringOperationTests(CloseDuringOperationTests):
+    def test_rules_do_not_change_under_a_running_operation(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        self.window.worker = FakeRunningWorker()
+        row = {"class81_code": "C1", "template_field": "Ток", "source_attribute": "A"}
+        with mock.patch.object(QMessageBox, "warning") as warning, mock.patch(
+            "chint_etm_mdm.app.add_approved_class_rule"
+        ) as approve, mock.patch("chint_etm_mdm.app.add_rejected_class_rule") as reject:
+            self.assertFalse(self.window.save_rule_data(row))
+            self.assertFalse(self.window.reject_rule_data(row))
+            self.window.save_selected_rules()
+            self.window.reject_selected_rules()
+        approve.assert_not_called()
+        reject.assert_not_called()
+        self.assertEqual(4, warning.call_count)
