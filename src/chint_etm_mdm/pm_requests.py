@@ -225,6 +225,8 @@ def open_keys(journal: dict, today: dt.date) -> set[tuple[str, str]]:
     """Questions asked less than REASK_DAYS ago and not answered yet."""
     keys = set()
     for request in journal.get("requests", []):
+        if request.get("replaced"):
+            continue
         created = dt.date.fromisoformat(request["created"][:10])
         if (today - created).days >= REASK_DAYS:
             continue
@@ -251,12 +253,18 @@ def write_requests(
     output_dir: Path,
     reason: str,
     today: dt.date | None = None,
+    again: bool = False,
 ) -> RequestsResult:
+    """One request file per manager. With `again`, open questions are asked anew and the earlier files are
+    marked replaced (answers sent in them are still accepted)."""
     today = today or dt.date.today()
     result = RequestsResult()
     journal_file = journal_path(work_dir)
     journal = read_json(journal_file, {"version": 1, "requests": []})
-    already = open_keys(journal, today)
+    already = set() if again else open_keys(journal, today)
+    if again:
+        for request in journal["requests"]:
+            request.setdefault("replaced", today.isoformat())
     contacts = update_contacts(work_dir / CONTACTS_NAME, assignment) if assignment else load_contacts(work_dir / CONTACTS_NAME)
     by_manager: dict[str, list[Need]] = defaultdict(list)
     seen = set()

@@ -93,6 +93,12 @@ class RequestRoundTripTests(unittest.TestCase):
         self.assertEqual([], again.files)
         self.assertEqual(len(first.needs), again.skipped_open)
 
+        # Asked to make the files anew (lost, broken, emails added later): every open question again.
+        anew = write_requests(first.needs, load_assignment(assignment_file), self.root, out, "Заполняем файлы для РАЭК", today, again=True)
+        self.assertEqual(len(result.files), len(anew.files))
+        self.assertEqual(0, anew.skipped_open)
+        self.assertEqual([], write_requests(first.needs, load_assignment(assignment_file), self.root, out, "Заполняем файлы для РАЭК", today).files)
+
         # The manager answers in their own words; the program matches the partner's list.
         workbook = load_workbook(levin.path)
         sheet = workbook["Запрос"]

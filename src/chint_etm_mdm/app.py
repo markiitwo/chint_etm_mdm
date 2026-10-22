@@ -924,9 +924,19 @@ class MainWindow(QMainWindow):
                 )
                 return
             output = work / "output" / f"запросы_продактам_{dt.date.today().isoformat()}"
-            requests = write_requests(
-                result.needs, load_assignment(assignment_file), work, output, f"Заполняем данные для РАЭК ({result.output_path.stem})"
-            )
+            assignment = load_assignment(assignment_file)
+            reason = f"Заполняем данные для РАЭК ({result.output_path.stem})"
+            requests = write_requests(result.needs, assignment, work, output, reason)
+            if not requests.files and requests.skipped_open:
+                answer = QMessageBox.question(
+                    self,
+                    "Вопросы уже заданы",
+                    f"Эти вопросы ({requests.skipped_open}) уже отправлены продактам и ждут ответа.\n"
+                    "Сделать файлы запросов заново? Это нужно, если прежние потерялись, были с ошибкой "
+                    "или вы только что вписали почты. Ответы на прежние файлы программа всё равно примет.",
+                )
+                if answer == QMessageBox.StandardButton.Yes:
+                    requests = write_requests(result.needs, assignment, work, output, reason, again=True)
         except Exception:
             self.on_raek_failed(traceback.format_exc())
             return
