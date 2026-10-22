@@ -46,6 +46,7 @@ class ManualImportResult:
     skipped_values: int
     learned_matches: int = 0
     learned_names: int = 0
+    removed_values: int = 0
 
 
 def manual_values_path(work_dir: Path) -> Path:
@@ -95,7 +96,12 @@ def load_manual_values(path: Path | None) -> dict[tuple[str, str], str]:
     return values
 
 
-def upsert_manual_values(path: Path, rows: list[ManualImportRow], source_file: Path) -> None:
+def upsert_manual_values(
+    path: Path,
+    rows: list[ManualImportRow],
+    source_file: Path,
+    removed: list[ManualImportRow] | None = None,
+) -> None:
     data = read_manual_document(path)
     imported_at = dt.datetime.now().isoformat(timespec="seconds")
     by_key: dict[tuple[str, str], dict] = {}
@@ -106,6 +112,8 @@ def upsert_manual_values(path: Path, rows: list[ManualImportRow], source_file: P
         if key[0] and key[1]:
             by_key[key] = item
 
+    for row in removed or []:
+        by_key.pop((row.article, row.field), None)
     for row in rows:
         by_key[(row.article, row.field)] = {
             "article": row.article,
@@ -196,7 +204,9 @@ def import_manual_completions(
     products = fetch_products(db_path, articles)
 
     template = load_partner_template(DEFAULT_PARTNER)
+    saved = load_manual_values(values_path)
     imported: list[ManualImportRow] = []
+    removed: list[ManualImportRow] = []
     learned_matches: list[tuple[str, str, str]] = []
     skipped = 0
     for row in rows:
@@ -222,8 +232,24 @@ def import_manual_completions(
                     learned_match = value_match_to_remember(template, product, header, manual_value, rules_path)
                     if learned_match:
                         learned_matches.append(learned_match)
+            saved_value = saved.get((article, header), "")
             if db_value == manual_value:
-                skipped += 1
+                if saved_value and saved_value != manual_value:
+                    # The manager put the base's value back: the old hand-entered one must stop coming back.
+                    removed.append(
+                        ManualImportRow(
+                            article=article,
+                            field=header,
+                            value=manual_value,
+                            previous_value=saved_value,
+                            action="Ручное значение снято: в файле снова значение из базы",
+                        )
+                    )
+                else:
+                    skipped += 1
+                continue
+            if saved_value == manual_value:
+                skipped += 1  # already saved earlier, nothing new
                 continue
             imported.append(
                 ManualImportRow(
@@ -236,12 +262,12 @@ def import_manual_completions(
             )
     workbook.close()
 
-    upsert_manual_values(values_path, imported, filled_path)
+    upsert_manual_values(values_path, imported, filled_path, removed)
     learned_path = template.learned_matches_path(rules_path)
     learned_added = remember_matches(learned_path, learned_matches) if learned_path and learned_matches else 0
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"{filled_path.stem}_manual_import_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
-    write_manual_import_report(report_path, imported)
+    write_manual_import_report(report_path, imported + removed)
     return ManualImportResult(
         filled_file=filled_path,
         values_path=values_path,
@@ -249,6 +275,7 @@ def import_manual_completions(
         imported_values=len(imported),
         skipped_values=skipped,
         learned_matches=learned_added,
+        removed_values=len(removed),
     )
 
 
@@ -386,6 +413,7 @@ def result_lines(result: ManualImportResult) -> list[str]:
         f"Файл: {result.filled_file}",
         f"Ручных значений сохранено: {result.imported_values}",
         f"Пропущено без изменений: {result.skipped_values}",
+        *([f"Ручных значений снято (в файле снова значение из базы): {result.removed_values}"] if result.removed_values else []),
         f"Запомнено новых сопоставлений значений: {result.learned_matches}",
         f"Запомнено новых сопоставлений характеристик: {result.learned_names}",
         f"Файл ручных значений: {result.values_path}",

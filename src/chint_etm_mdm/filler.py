@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import csv
+from copy import copy
 import shutil
 import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -197,7 +198,10 @@ def check_note(template: PartnerTemplate, product: ProductRecord, header: str, v
 
 def mark_missing_cell(cell: Cell) -> None:
     cell.fill = MISSING_CELL_FILL
-    cell.font = MISSING_CELL_FONT
+    # Only the colour changes: the template's typeface, size and bold stay.
+    font = copy(cell.font)
+    font.color = copy(MISSING_CELL_FONT.color)
+    cell.font = font
 
 
 def preserve_worksheet_dropdowns(template_path: Path, output_path: Path) -> None:
@@ -554,6 +558,15 @@ def fill_csv_template(
         product = products.get(article)
         if not product:
             report.append(FillReportRow(row_number, article, "", "not_found", "", "", "Артикул не найден в базе"))
+            # A value the manager entered by hand for this article still goes in.
+            for col_idx, header in enumerate(headers):
+                if col_idx == article_idx or header in template.skip_headers or cell_text(row[col_idx]):
+                    continue
+                manual_value = manual_values.get((article, header), "")
+                if manual_value:
+                    row[col_idx] = manual_value
+                    filled_cells += 1
+                    report.append(FillReportRow(row_number, article, header, "filled", manual_value, "manual_completion", ""))
             continue
         if class_idx is not None and class_idx < len(row):
             product = template.with_template_class(product, normalize_header(row[class_idx]))
@@ -704,10 +717,21 @@ def fill_xlsx_template(
         if not product:
             report.append(FillReportRow(row_number, article, "", "not_found", "", "", "Артикул не найден в базе"))
             for col_idx in fillable_columns:
-                if col_idx != article_idx and col_idx < len(row):
-                    mark_missing_cell(row[col_idx])
-                    if template.is_reportable(headers[col_idx]):
-                        missing_cells += 1
+                if col_idx == article_idx or col_idx >= len(row):
+                    continue
+                header = headers[col_idx]
+                if header in template.skip_headers or cell_text(row[col_idx].value):
+                    continue  # already filled in the template: neither red nor counted as missing
+                manual_value = manual_values.get((article, header), "")
+                if manual_value:
+                    # A value the manager entered by hand for this article still goes in.
+                    row[col_idx].value = template.spreadsheet_value(header, manual_value)
+                    filled_cells += 1
+                    report.append(FillReportRow(row_number, article, header, "filled", manual_value, "manual_completion", ""))
+                    continue
+                mark_missing_cell(row[col_idx])
+                if template.is_reportable(header):
+                    missing_cells += 1
             continue
         if class_idx is not None and class_idx < len(row):
             product = template.with_template_class(
