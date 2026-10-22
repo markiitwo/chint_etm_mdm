@@ -12,7 +12,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 
-from .db_utils import connect_database, restore_sqlite_backup
+from .db_utils import CHINT_TABLES, connect_database, restore_sqlite_backup
 from .number_parsing import parse_number
 from .price_importer import backup_database
 
@@ -898,7 +898,7 @@ def apply_etim_conflict_decisions(report_path: Path, db_path: Path) -> EtimDecis
 
 
 def restore_database_backup(db_path: Path, backup_path: Path) -> Path:
-    return restore_sqlite_backup(db_path, backup_path).path
+    return restore_sqlite_backup(db_path, backup_path, CHINT_TABLES).path
 
 
 def result_lines(result: EtimImportResult) -> list[str]:

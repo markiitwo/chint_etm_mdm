@@ -7,8 +7,8 @@ import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QDate, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -39,7 +39,7 @@ from . import __version__
 from .analyzer import analyze_template_mapping
 from .config import AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
-from .db_utils import copy_sqlite_database
+from .db_utils import BackupRejected, copy_sqlite_database
 from .etm_categories import CategoryRun, fill_new_products, latest_codes_file, new_articles_since, run_lines
 from .etim_importer import (
     EtimDecisionApplyResult,
@@ -485,6 +485,29 @@ class EtimDecisionWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class RestoreWorker(QThread):
+    """Rolls the base back in the background: a big base takes a while and the window must not look frozen."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, backup_path: Path) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.backup_path = backup_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(restore_database_backup(self.db_path, self.backup_path))
+        except BackupRejected as exc:
+            self.failed.emit(f"База не изменена.\n\n{exc}")
+        except Exception:
+            self.failed.emit(
+                "Откат не удался. Если база стала неправильной, рядом с ней лежит её копия "
+                "до отката (.before_restore_...) — её можно выбрать как бэкап.\n\n" + traceback.format_exc()
+            )
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -501,8 +524,11 @@ class MainWindow(QMainWindow):
             | PriceFindWorker
             | EtimImportWorker
             | EtimDecisionWorker
+            | RestoreWorker
             | None
         ) = None
+        self.close_when_done = False
+        self.summary_worker: SummaryWorker | None = None
         self.write_action_buttons: list[QPushButton] = []
         self.tabs: QTabWidget | None = None
 
@@ -609,6 +635,32 @@ class MainWindow(QMainWindow):
         if self.worker is worker:
             self.worker = None
         self.update_write_action_buttons()
+        if self.close_when_done and self.worker is None:
+            # Let the result message go first, then close as the user asked.
+            QTimer.singleShot(0, self.close)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Do not quit in the middle of an operation: the base or a file could be left half-written."""
+        if self.worker is not None and self.worker.isRunning():
+            if self.close_when_done:
+                event.ignore()
+                return
+            answer = QMessageBox.question(
+                self,
+                "Идёт операция",
+                "Программа ещё работает: если закрыть её сейчас, база или файлы могут записаться не до конца.\n\n"
+                "Закрыть программу сама, когда операция закончится?",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.close_when_done = True
+                self.statusBar().showMessage("Программа закроется, когда закончится текущая операция.")
+            event.ignore()
+            return
+        # Background helpers (summary mail, update check) only need a moment to finish.
+        for helper in (self.summary_worker, self.updates.worker):
+            if helper is not None and helper.isRunning():
+                helper.wait(15000)
+        event.accept()
 
     def build_ui(self) -> QWidget:
         self.tabs = QTabWidget()
@@ -1482,11 +1534,19 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            safety_backup = restore_database_backup(db_path, backup_path)
-        except Exception:
-            self.on_price_import_failed(traceback.format_exc())
-            return
+        self.price_log.append(f"Откатываю базу из бэкапа: {backup_path}")
+        self.start_worker(
+            RestoreWorker(db_path, backup_path),
+            lambda safety_backup: self.on_restore_done(backup_path, safety_backup),
+            self.on_restore_failed,
+        )
+
+    def on_restore_failed(self, details: str) -> None:
+        self.price_log.append("Откат не выполнен.")
+        self.price_log.append(details)
+        QMessageBox.critical(self, "Откат не выполнен", details)
+
+    def on_restore_done(self, backup_path: Path, safety_backup: Path) -> None:
         self.price_log.append(f"База восстановлена из бэкапа: {backup_path}")
         self.price_log.append(f"Копия базы до отката: {safety_backup}")
         self.refresh_database_status()
