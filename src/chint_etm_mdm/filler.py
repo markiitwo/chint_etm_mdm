@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import csv
 from copy import copy
-import shutil
-import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -250,9 +249,8 @@ def preserve_worksheet_dropdowns(template_path: Path, output_path: Path) -> None
         if not replacements:
             return
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=output_path.suffix) as tmp:
-            temp_path = Path(tmp.name)
-
+        # Next to the output, not in the system temp folder: the final rename stays on one disk.
+        temp_path = output_path.with_name(f".{output_path.stem}.dropdowns{output_path.suffix}")
         try:
             with ZipFile(temp_path, "w", compression=ZIP_DEFLATED) as new_zip:
                 for info in output_zip.infolist():
@@ -260,10 +258,11 @@ def preserve_worksheet_dropdowns(template_path: Path, output_path: Path) -> None
                     if data is None:
                         data = output_zip.read(info.filename)
                     new_zip.writestr(info, data)
-            shutil.move(str(temp_path), output_path)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+    # Both archives are closed here: Windows does not replace a file that is still open.
+    os.replace(temp_path, output_path)
 
 
 def insert_after_xml_tag(xml: bytes, tag: bytes, payload: bytes) -> bytes:
@@ -350,11 +349,25 @@ def has_vba_project(path: Path) -> bool:
 
 
 def make_output_paths(template_path: Path, output_dir: Path) -> tuple[Path, Path]:
+    """Names that do not exist yet: two runs in the same second do not overwrite each other."""
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_path = output_dir / f"{template_path.stem}_filled_{stamp}{template_path.suffix}"
-    report_path = output_dir / f"{template_path.stem}_report_{stamp}.xlsx"
-    return output_path, report_path
+    for version in range(1, 1000):
+        tail = stamp if version == 1 else f"{stamp}_{version}"
+        output_path = output_dir / f"{template_path.stem}_filled_{tail}{template_path.suffix}"
+        report_path = output_dir / f"{template_path.stem}_report_{tail}.xlsx"
+        if not output_path.exists() and not report_path.exists():
+            return output_path, report_path
+    raise ValueError(f"Не удалось подобрать свободное имя в {output_dir}")
+
+
+def staging_path(path: Path) -> Path:
+    """Where a result is written before it gets its real name: a failed save leaves no half file under it."""
+    return path.with_name(f".{path.stem}.saving{path.suffix}")
+
+
+def publish(staging: Path, path: Path) -> None:
+    os.replace(staging, path)
 
 
 def value_matches_to_review(rows: list[FillReportRow]) -> list[list[object]]:
@@ -478,7 +491,12 @@ def write_report(
             max_len = max(len(str(cell.value or "")) for cell in column_cells)
             sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 10), 70)
 
-    workbook.save(path)
+    staging = staging_path(path)
+    try:
+        workbook.save(staging)
+        publish(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def fill_template(
@@ -651,10 +669,15 @@ def fill_csv_template(
                 )
 
     output_path, report_path = make_output_paths(template_path, output_dir)
-    with output_path.open("w", newline="", encoding="utf-8-sig") as fh:
-        writer = csv.writer(fh, delimiter=getattr(dialect, "delimiter", ";"))
-        writer.writerows(reader)
-    write_report(report_path, report)
+    staging = staging_path(output_path)
+    try:
+        with staging.open("w", newline="", encoding="utf-8-sig") as fh:
+            writer = csv.writer(fh, delimiter=getattr(dialect, "delimiter", ";"))
+            writer.writerows(reader)
+        write_report(report_path, report)
+        publish(staging, output_path)
+    finally:
+        staging.unlink(missing_ok=True)
 
     unique_articles = {a for a in articles if a}
     found = len(unique_articles.intersection(products.keys()))
@@ -833,11 +856,16 @@ def fill_xlsx_template(
                 )
 
     output_path, report_path = make_output_paths(template_path, output_dir)
-    workbook.save(output_path)
-    preserve_worksheet_dropdowns(template_path, output_path)
-    if input_has_vba and not has_vba_project(output_path):
-        raise ValueError("После сохранения XLSM потерян xl/vbaProject.bin.")
-    write_report(report_path, report)
+    staging = staging_path(output_path)
+    try:
+        workbook.save(staging)
+        preserve_worksheet_dropdowns(template_path, staging)
+        if input_has_vba and not has_vba_project(staging):
+            raise ValueError("После сохранения XLSM потерян xl/vbaProject.bin.")
+        write_report(report_path, report)
+        publish(staging, output_path)
+    finally:
+        staging.unlink(missing_ok=True)
 
     unique_articles = {a for a in articles if a}
     found = len(unique_articles.intersection(products.keys()))

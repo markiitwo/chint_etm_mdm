@@ -124,3 +124,34 @@ class PutBaseValueBackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SafeSaveTests(unittest.TestCase):
+    """FIL-04: a failed save leaves no half file; two runs in one second keep both results."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.template = write_book(self.root / "template.xlsx", [["X-9", None, None, None]])
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def fill(self):
+        with patch("chint_etm_mdm.filler.fetch_products", return_value={}):
+            return fill_xlsx_template(self.root / "db.sqlite", self.template, self.root / "out")
+
+    def test_two_runs_in_one_second(self) -> None:
+        with patch("chint_etm_mdm.filler.dt") as clock:
+            clock.datetime.now.return_value.strftime.return_value = "2026-10-22_10-00-00"
+            first = self.fill()
+            second = self.fill()
+        self.assertNotEqual(first.output_path, second.output_path)
+        self.assertNotEqual(first.report_path, second.report_path)
+        self.assertTrue(first.output_path.exists() and second.output_path.exists())
+
+    def test_failed_report_leaves_no_result(self) -> None:
+        with patch("chint_etm_mdm.filler.write_report", side_effect=PermissionError("отчёт открыт")):
+            with self.assertRaises(PermissionError):
+                self.fill()
+        self.assertEqual([], sorted(path.name for path in (self.root / "out").iterdir()))
