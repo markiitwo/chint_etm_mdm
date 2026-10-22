@@ -78,4 +78,12 @@ jobs:
       - if: steps.exists.outputs.yes != '1'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ steps.version.outputs.tag }}" assets/* --target "$GITHUB_SHA" --title "${{ steps.version.outputs.tag }}" --generate-notes
+        # The release text is this version's section of CHANGELOG.md; without one, GitHub writes it.
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          awk -v version="${tag#v}" '/^## /{take = ($2 == version)} take' CHANGELOG.md > release_notes.md 2>/dev/null || true
+          if [ -s release_notes.md ]; then
+            gh release create "$tag" assets/* --target "$GITHUB_SHA" --title "$tag" --notes-file release_notes.md
+          else
+            gh release create "$tag" assets/* --target "$GITHUB_SHA" --title "$tag" --generate-notes
+          fi

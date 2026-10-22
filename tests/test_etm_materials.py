@@ -175,3 +175,69 @@ class PiecesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EtmReportTests(MaterialsTests):
+    """ETM's goods list and certificates report: materials only for what the cards lack."""
+
+    def goods_list(self) -> Path:
+        path = self.root / "goodsList_05-10-26_732.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "goodsList"
+        sheet.append([
+            "Код Товара", "Наименование", "Артикул", "Расширенный Артикул", "Поставляемый", "Наличие Фото",
+            "Наличие файлов тех.информации", "Наличие описания", "Наличие 2D/3D модели", "Наличие ТНВЭД", "Наличие ОКПД 2",
+        ])
+        sheet.append([1, "NVF7", 616173, 616173, "Да", "Да", "Да", "Нет", "Нет", "Нет", "Да"])
+        sheet.append([2, "Без сайта", 777, 777, "Да", "Нет", "Да", "Да", "Да", "Да", "Да"])
+        sheet.append([3, "Снят", 888, 888, "Нет", "Нет", "Нет", "Нет", "Нет", "Нет", "Нет"])
+        sheet.append([4, "Без артикула", None, None, "Да", "Нет", "Нет", "Нет", "Нет", "Нет", "Нет"])
+        workbook.save(path)
+        return path
+
+    def sert_report(self) -> Path:
+        path = self.root / "report_sert_19-10-26_2019.csv"
+        path.write_bytes(
+            ("Код товара;Полное наименование;Артикул;Расширенный артикул;Код производителя;Сертификат;Причина\r\n"
+             "1;NVF7;616173;616173;2019;" + NUMBER + ";У действующего сертификата отсутствует обязательная URL-ссылка на запись в реестре\r\n"
+             "2;Без сайта;777;777;2019;отсутствует;нет сертификата (или нет ни одного обязательного)\r\n").encode("cp1251")
+        )
+        return path
+
+    def test_reports_are_read(self) -> None:
+        needs = m.ReportNeeds()
+        needs.add(m.read_etm_report(self.goods_list()))
+        needs.add(m.read_etm_report(self.sert_report()))
+        self.assertEqual({"616173"}, needs.wanted["Описание"])
+        self.assertEqual({"616173"}, needs.wanted["2D/3D"])
+        self.assertEqual({"777"}, needs.wanted["Фото"])  # 888 is no longer supplied, 4 has no article
+        self.assertNotIn("Тех. информация", needs.wanted)
+        self.assertEqual({"616173", "777"}, needs.wanted["Сертификаты"])
+        self.assertEqual({"616173": ["Код ТН ВЭД"]}, needs.codes_missing)
+        self.assertIn("Товаров без фото: 1", m.report_lines(needs))
+        with self.assertRaisesRegex(ValueError, "не знаю такой отчёт"):
+            other = self.root / "other.csv"
+            other.write_text("Расширенный артикул;Цена\n1;2\n", encoding="utf-8")
+            m.read_etm_report(other)
+
+    def test_materials_only_for_what_is_missing(self) -> None:
+        m.write_descriptions(self.work / m.DESCRIPTIONS_TABLE, {"NVF7": {"Описание": DESCRIPTION}}, {}, {})
+        needs = m.ReportNeeds()
+        needs.add(m.read_etm_report(self.goods_list()))
+        needs.add(m.read_etm_report(self.sert_report()))
+        result = m.make_materials(
+            self.db, [], self.work, self.root / "out", self.chz, fetch_page=self.site, fetch_file=self.fetch_file,
+            today=dt.date(2026, 10, 22), site_delay=0, wanted=needs.wanted, codes_missing=needs.codes_missing,
+        )
+        # 616173 has its documents in ETM: only drawings and models would go, and the test page has none.
+        self.assertNotIn("Тех. информация", result.files)
+        self.assertEqual(["616173"], [row["Расширенный артикул"] for row in read_csv(result.files["Описание"])])
+        self.assertEqual(["616173"], [row["Расширенный артикул"] for row in read_csv(result.files["Сертификаты"])])
+        # 777: no photo on the site; "не требуется" in ЧЗ while ETM asks for a document.
+        checks = {(row.article, row.form): row.problem for row in result.checks}
+        self.assertIn(("777", "Фото"), checks)
+        self.assertIn("ЭТМ просит документ", checks[("777", "Сертификаты")])
+        self.assertNotIn(("616173", "Фото"), checks)  # the card has a photo: nothing asked
+        codes = load_workbook(result.summary_path)["Коды в карточке"]
+        self.assertEqual(("616173", "Код ТН ВЭД"), (codes["A2"].value, codes["C2"].value))

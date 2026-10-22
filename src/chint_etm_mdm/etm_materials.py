@@ -90,6 +90,8 @@ class MaterialsResult:
     downloaded: int = 0
     checks: list[CheckRow] = field(default_factory=list)
     site_lines: list[str] = field(default_factory=list)
+    # Cards in ETM without ТН ВЭД/ОКПД2: (article, name, missing fields, values the ЧЗ file has)
+    codes: list[tuple[str, str, list[str], dict[str, str]]] = field(default_factory=list)
 
 
 # --- documents -------------------------------------------------------------------------------------
@@ -378,11 +380,24 @@ def make_materials(
     fetch_file: Callable[[str], bytes] | None = None,
     today: dt.date | None = None,
     site_delay: float | None = None,
+    wanted: dict[str, set[str]] | None = None,
+    codes_missing: dict[str, list[str]] | None = None,
 ) -> MaterialsResult:
-    """The four ETM forms for the products, the files to upload with them and a summary."""
+    """The four ETM forms for the products, the files to upload with them and a summary.
+
+    `wanted` (form -> articles, e.g. from an ETM report) limits each form to the products that lack
+    it; "2D/3D" asks for drawings and models only. `codes_missing` (article -> code names) lists
+    products whose card in ETM lacks ТН ВЭД or ОКПД2.
+    """
     today = today or dt.date.today()
     say = progress or (lambda _text: None)
+    if wanted is not None:
+        articles = sorted({article for members in wanted.values() for article in members})
     articles = list(dict.fromkeys(normalize_article(article) for article in articles if normalize_article(article)))
+
+    def wants(form: str, article: str) -> bool:
+        return wanted is None or article in wanted.get(form, ())
+
     result = MaterialsResult(output_dir, output_dir / SUMMARY_NAME, articles)
     upload_dir, check_dir, files_dir = (output_dir / name for name in (UPLOAD_DIR, CHECK_DIR, FILES_DIR))
     series = series_names(db_path, articles)
@@ -394,7 +409,8 @@ def make_materials(
         options: dict = {"fetch": fetch_page} if fetch_page else {}
         if site_delay is not None:
             options["delay"] = site_delay
-        result.site_lines = site_lines(update_site_cache(cache, articles, progress=say, **options))
+        on_site = [article for article in articles if any(wants(form, article) for form in ("Фото", "Тех. информация", "2D/3D", "Сертификаты"))]
+        result.site_lines = site_lines(update_site_cache(cache, on_site, progress=say, **options))
     records: dict[str, SiteRecord | None] = {article: cache.found(article) for article in articles}
     file_cache = work_dir / "cache" / "ensmas_files"
     all_series = [series.get(article, "") for article in articles]
@@ -402,6 +418,8 @@ def make_materials(
     # Photos: the main photo on the site, by link.
     photo_rows = []
     for article in articles:
+        if not wants("Фото", article):
+            continue
         record = records[article]
         if record is None or not record.image_url:
             result.checks.append(CheckRow(article, "Фото", "на ensmas.ru нет фото товара", "добавьте фото в ЭТМ вручную"))
@@ -416,14 +434,18 @@ def make_materials(
     doc_rows = []
     saved: dict[str, bool] = {}
     for article in articles:
+        all_documents = wants("Тех. информация", article)
+        models_only = not all_documents and wants("2D/3D", article)
         record = records[article]
-        if record is None:
+        if record is None or not (all_documents or models_only):
             continue
         for document in record.documents:
             if is_certificate_document(document) or not document.get("url"):
                 continue
             name = file_name_from_url(document["url"])
             kind = document_type(name)
+            if models_only and not kind.startswith(("2D", "3D")):
+                continue  # the card has its documents, only drawings and models are missing
             if not kind:
                 result.checks.append(CheckRow(article, "Тех. информация", f"файл «{name}»: не понятно, какой это тип для ЭТМ", "посмотрите файл и загрузите его сами"))
                 continue
@@ -449,10 +471,16 @@ def make_materials(
             if pdf:
                 pdf_by_number.setdefault(number_key(str(row["number"])), pdf)
     for article in articles:
+        if not wants("Сертификаты", article):
+            continue
         row = chz.get(article)
         number = " ".join(str((row or {}).get("number") or "").split())
         if not number or number.casefold() in {"не требуется", "-"}:
-            if codes_path is None:
+            if wanted is not None and number:
+                result.checks.append(
+                    CheckRow(article, "Сертификаты", f"в файле ЧЗ «{number}», а ЭТМ просит документ", "приложите отказное письмо (тип ПОТКАЗ) или документ")
+                )
+            elif codes_path is None:
                 result.checks.append(CheckRow(article, "Сертификаты", "нет файла ЧЗ", "сохраните свежий файл ЧЗ в «Загрузки»"))
             elif row is None:
                 result.checks.append(CheckRow(article, "Сертификаты", "артикула нет в файле ЧЗ"))
@@ -487,10 +515,12 @@ def make_materials(
 
     # Descriptions: one text per series from the table.
     table = work_dir / DESCRIPTIONS_TABLE
-    update_descriptions_table(table, series, names)
+    update_descriptions_table(table, {article: value for article, value in series.items() if wants("Описание", article)}, names)
     texts = read_descriptions(table)
     description_rows, held_rows = [], []
     for article in articles:
+        if not wants("Описание", article):
+            continue
         key = series.get(article, "").strip().upper()
         values = texts.get(key, {})
         if not values.get("Описание"):
@@ -519,8 +549,23 @@ def make_materials(
                 path = path.with_name(f"{path.stem}_check.csv")
             write_csv(path, header, rows)
             result.files[form] = path
+    if codes_missing:
+        known = load_codes(codes_path)
+        for article, fields in sorted(codes_missing.items()):
+            result.codes.append((article, names.get(article, ""), fields, {field: known.get((article, field), "") for field in fields}))
     write_summary(result, names)
     return result
+
+
+def load_codes(codes_path: Path | None) -> dict[tuple[str, str], str]:
+    if codes_path is None:
+        return {}
+    from .etm_categories import load_codes_file
+
+    try:
+        return load_codes_file(codes_path)
+    except (OSError, ValueError):
+        return {}
 
 
 def product_names(db_path: Path, articles: list[str]) -> dict[str, str]:
@@ -548,6 +593,12 @@ def todo_lines(result: MaterialsResult) -> list[str]:
         lines.append(f"3. Описания в папке «{CHECK_DIR}» не проходят правила ЭТМ (лист «Проверить»): поправьте и соберите заново.")
     if result.checks:
         lines.append(f"Что не получилось сделать само: лист «Проверить» ({len(result.checks)} строк).")
+    if result.codes:
+        known = sum(1 for _a, _n, fields, values in result.codes if all(values.get(field) for field in fields))
+        lines.append(
+            f"У {len(result.codes)} карточек в ЭТМ нет ТН ВЭД или ОКПД2 (лист «Коды в карточке»); у {known} коды есть "
+            "в файле ЧЗ. Коды — поля самой карточки, их меняют через карточку товара в ЭТМ."
+        )
     if not lines:
         lines.append("Делать ничего не нужно.")
     lines.append("")
@@ -573,6 +624,17 @@ def write_summary(result: MaterialsResult, names: dict[str, str]) -> None:
         check.column_dimensions[column].width = width
     check.freeze_panes = "A2"
     check.auto_filter.ref = check.dimensions
+    if result.codes:
+        codes = workbook.create_sheet("Коды в карточке")
+        codes.append(["Артикул", "Название", "Нет в ЭТМ", "Код ТН ВЭД из файла ЧЗ", "Код ОКПД2 из файла ЧЗ"])
+        for cell in codes[1]:
+            cell.font = Font(bold=True)
+        for article, name, fields, values in result.codes:
+            codes.append([article, name, ", ".join(fields), values.get("Код ТН ВЭД", ""), values.get("Код ОКПД2", "")])
+        for column, width in zip("ABCDE", (14, 60, 24, 24, 24)):
+            codes.column_dimensions[column].width = width
+        codes.freeze_panes = "A2"
+        codes.auto_filter.ref = codes.dimensions
     result.output_dir.mkdir(parents=True, exist_ok=True)
     workbook.save(result.summary_path)
 
@@ -588,4 +650,107 @@ def materials_lines(result: MaterialsResult) -> list[str]:
         lines.append(f"Проверить: {len(result.checks)} (лист «Проверить» в Итог.xlsx)")
     lines.extend(result.site_lines)
     lines.append(f"Папка: {result.output_dir.name}")
+    return lines
+
+
+# --- ETM's reports on what cards lack ---------------------------------------------------------------
+
+GOODS_FLAGS = {
+    "наличие фото": "Фото",
+    "наличие файлов тех.информации": "Тех. информация",
+    "наличие описания": "Описание",
+    "наличие 2d/3d модели": "2D/3D",
+}
+CODE_FLAGS = {"наличие тнвэд": "Код ТН ВЭД", "наличие окпд 2": "Код ОКПД2"}
+
+
+@dataclass
+class ReportNeeds:
+    """What ETM's reports say the cards lack: form -> articles, and the codes missing in cards."""
+
+    wanted: dict[str, set[str]] = field(default_factory=dict)
+    codes_missing: dict[str, list[str]] = field(default_factory=dict)
+    reasons: dict[str, str] = field(default_factory=dict)  # article -> ETM's reason about certificates
+    files: list[str] = field(default_factory=list)
+
+    def add(self, other: "ReportNeeds") -> None:
+        for form, members in other.wanted.items():
+            self.wanted.setdefault(form, set()).update(members)
+        for article, fields in other.codes_missing.items():
+            self.codes_missing.setdefault(article, [])
+            self.codes_missing[article] += [item for item in fields if item not in self.codes_missing[article]]
+        self.reasons.update(other.reasons)
+        self.files += other.files
+
+
+def report_rows(path: Path) -> list[list[str]]:
+    """The first sheet of an XLSX that has a header, or a CSV (Win-1251 or UTF-8, ";")."""
+    if path.suffix.lower() == ".csv":
+        raw = path.read_bytes()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode(CSV_ENCODING)
+        return [[cell.strip() for cell in row] for row in csv.reader(text.splitlines(), delimiter=";")]
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        for sheet in workbook.worksheets:
+            rows = [["" if cell is None else str(cell).strip() for cell in row] for row in sheet.iter_rows(values_only=True)]
+            rows = [row for row in rows if any(row)]
+            if rows:
+                return rows
+    finally:
+        workbook.close()
+    return []
+
+
+def read_etm_report(path: Path) -> ReportNeeds:
+    """ETM's goods list («Наличие Фото», «Наличие описания»...) or its certificates report («Причина»)."""
+    rows = report_rows(path)
+    if not rows:
+        raise ValueError(f"{path.name}: файл пустой.")
+    header = [" ".join(cell.split()).casefold() for cell in rows[0]]
+    article_idx = next((idx for idx, name in enumerate(header) if name == "расширенный артикул"), None)
+    if article_idx is None:
+        raise ValueError(f"{path.name}: нет колонки «Расширенный артикул» — это не отчёт ЭТМ о товарах.")
+    needs = ReportNeeds(files=[path.name])
+
+    def cell(row: list[str], idx: int | None) -> str:
+        return row[idx] if idx is not None and idx < len(row) else ""
+
+    if any(name in header for name in GOODS_FLAGS):
+        supplied_idx = header.index("поставляемый") if "поставляемый" in header else None
+        for row in rows[1:]:
+            article = normalize_article(cell(row, article_idx))
+            if not article or cell(row, supplied_idx).casefold() == "нет":
+                continue  # products ETM no longer takes are left alone
+            for name, form in GOODS_FLAGS.items():
+                if name in header and cell(row, header.index(name)).casefold() == "нет":
+                    needs.wanted.setdefault(form, set()).add(article)
+            for name, code in CODE_FLAGS.items():
+                if name in header and cell(row, header.index(name)).casefold() == "нет":
+                    needs.codes_missing.setdefault(article, []).append(code)
+        return needs
+    if "причина" in header:
+        reason_idx = header.index("причина")
+        for row in rows[1:]:
+            article = normalize_article(cell(row, article_idx))
+            if article and cell(row, reason_idx):
+                needs.wanted.setdefault("Сертификаты", set()).add(article)
+                needs.reasons[article] = cell(row, reason_idx)
+        return needs
+    raise ValueError(
+        f"{path.name}: не знаю такой отчёт. Подходят список товаров ЭТМ (колонки «Наличие Фото», «Наличие описания»...) "
+        "и отчёт по сертификатам (колонка «Причина»)."
+    )
+
+
+def report_lines(needs: ReportNeeds) -> list[str]:
+    lines = [f"Отчёты: {', '.join(needs.files)}"]
+    labels = {"Фото": "без фото", "Тех. информация": "без тех. информации", "2D/3D": "без 2D/3D", "Описание": "без описания", "Сертификаты": "с замечаниями по сертификатам"}
+    for form, label in labels.items():
+        if needs.wanted.get(form):
+            lines.append(f"Товаров {label}: {len(needs.wanted[form])}")
+    if needs.codes_missing:
+        lines.append(f"Карточек без ТН ВЭД или ОКПД2: {len(needs.codes_missing)}")
     return lines

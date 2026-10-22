@@ -45,6 +45,9 @@ from .db_utils import BackupRejected, copy_sqlite_database
 from .etm_materials import (
     DESCRIPTIONS_TABLE,
     MaterialsResult,
+    ReportNeeds,
+    read_etm_report,
+    report_lines,
     import_description_file,
     make_materials,
     materials_lines,
@@ -526,19 +529,35 @@ class MaterialsWorker(QThread):
     failed = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, db_path: Path, articles: list[str], work_dir: Path, output_dir: Path, codes_path: Path | None) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        articles: list[str],
+        work_dir: Path,
+        output_dir: Path,
+        codes_path: Path | None,
+        needs: ReportNeeds | None = None,
+    ) -> None:
         super().__init__()
         self.db_path = db_path
         self.articles = articles
         self.work_dir = work_dir
         self.output_dir = output_dir
         self.codes_path = codes_path
+        self.needs = needs
 
     def run(self) -> None:
         try:
             self.done.emit(
                 make_materials(
-                    self.db_path, self.articles, self.work_dir, self.output_dir, self.codes_path, progress=self.progress.emit
+                    self.db_path,
+                    self.articles,
+                    self.work_dir,
+                    self.output_dir,
+                    self.codes_path,
+                    progress=self.progress.emit,
+                    wanted=self.needs.wanted if self.needs else None,
+                    codes_missing=self.needs.codes_missing if self.needs else None,
                 )
             )
         except Exception:
@@ -860,10 +879,17 @@ class MainWindow(QMainWindow):
         descriptions = QPushButton("Описания серий")
         descriptions.setToolTip("Таблица с описанием каждой серии: впишите тексты из каталогов один раз")
         descriptions.clicked.connect(self.open_descriptions_table)
+        from_report = QPushButton("Разобрать отчёт ЭТМ...")
+        from_report.setToolTip(
+            "Список товаров ЭТМ («Наличие Фото», «Наличие описания»...) или отчёт по сертификатам: "
+            "материалы только для того, чего в карточках не хватает"
+        )
+        from_report.clicked.connect(self.run_materials_from_report)
+        self.write_action_buttons.append(from_report)
         import_old = QPushButton("Взять описания из файла ЭТМ...")
         import_old.setToolTip("Файл описаний, который уже загружали в ЭТМ: тексты попадут в таблицу серий")
         import_old.clicked.connect(self.import_old_descriptions)
-        for button in (make, descriptions, import_old):
+        for button in (make, from_report, descriptions, import_old):
             row.addWidget(button)
         row.addStretch(1)
         return box
@@ -875,7 +901,37 @@ class MainWindow(QMainWindow):
                 return typed
         return parse_articles(self.config.last_etm_articles)
 
-    def run_materials(self) -> None:
+    def run_materials_from_report(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Отчёты ЭТМ: список товаров и/или сертификаты", str(self.incoming()[0]), "Отчёты ЭТМ (*.xlsx *.csv)"
+        )
+        if not paths:
+            return
+        needs = ReportNeeds()
+        try:
+            for path in paths:
+                needs.add(read_etm_report(Path(path)))
+        except ValueError as error:
+            QMessageBox.warning(self, "Отчёт ЭТМ", str(error))
+            return
+        models = needs.wanted.pop("2D/3D", set())
+        if models:
+            answer = QMessageBox.question(
+                self,
+                "2D и 3D",
+                f"Без 2D/3D-моделей в ЭТМ {len(models)} товаров. Искать для них чертежи и модели на сайте тоже?\n\n"
+                "Сайт спрашивается по 2–3 секунды на товар, поэтому в первый раз это долго; ответы запоминаются.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                needs.wanted["2D/3D"] = models
+        lines = report_lines(needs)
+        for line in lines:
+            self.fill_log.append(line)
+        self.run_materials(needs=needs)
+
+    def run_materials(self, needs: ReportNeeds | None = None) -> None:
         try:
             self.save_current_config()
             db_path = self.validated_db_path()
@@ -885,15 +941,21 @@ class MainWindow(QMainWindow):
             if not work_text:
                 QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «База».")
                 return
-            articles = self.materials_articles()
-            if not articles:
+            articles = self.materials_articles() if needs is None else []
+            if needs is None and not articles:
                 QMessageBox.information(self, "Нет товаров", "Сначала сделайте карточки или впишите артикулы в поле «Эти артикулы».")
+                return
+            if needs is not None and not any(needs.wanted.values()) and not needs.codes_missing:
+                QMessageBox.information(self, "Отчёт ЭТМ", "По отчёту в карточках всего хватает.")
                 return
             codes_text = self.codes_file_edit.text().strip()
             codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             output = Path(work_text) / "output" / f"ЭТМ материалы {dt.datetime.now().strftime('%Y-%m-%d %H-%M')}"
-            self.fill_log.append(f"Готовлю материалы для {len(articles)} товаров...")
-            worker = MaterialsWorker(db_path, articles, Path(work_text), output, codes_path)
+            if needs is None:
+                self.fill_log.append(f"Готовлю материалы для {len(articles)} товаров...")
+            else:
+                self.fill_log.append("Готовлю материалы по отчёту ЭТМ...")
+            worker = MaterialsWorker(db_path, articles, Path(work_text), output, codes_path, needs)
             self.start_worker(worker, self.on_materials_done, self.on_fill_failed)
         except Exception:
             self.on_fill_failed(traceback.format_exc())
