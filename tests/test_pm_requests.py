@@ -80,6 +80,8 @@ class RequestRoundTripTests(unittest.TestCase):
         result = write_requests(first.needs, load_assignment(assignment_file), self.root, out, "Заполняем файлы для РАЭК", today)
         levin = next(item for item in result.files if item.manager == "Левин И.")
         self.assertTrue(is_request_file(levin.path))
+        lists = load_workbook(levin.path)["Запрос"].data_validations.dataValidation
+        self.assertTrue(lists and all(not item.formula1.startswith("=") for item in lists))  # LibreOffice ignores "=…"
         self.assertIn("Левин И.", result.missing_emails)
         self.assertTrue((self.root / CONTACTS_NAME).exists())
         draft = message_from_bytes(levin.draft.read_bytes())
@@ -90,6 +92,12 @@ class RequestRoundTripTests(unittest.TestCase):
         again = write_requests(first.needs, load_assignment(assignment_file), self.root, out, "Заполняем файлы для РАЭК", today)
         self.assertEqual([], again.files)
         self.assertEqual(len(first.needs), again.skipped_open)
+
+        # Asked to make the files anew (lost, broken, emails added later): every open question again.
+        anew = write_requests(first.needs, load_assignment(assignment_file), self.root, out, "Заполняем файлы для РАЭК", today, again=True)
+        self.assertEqual(len(result.files), len(anew.files))
+        self.assertEqual(0, anew.skipped_open)
+        self.assertEqual([], write_requests(first.needs, load_assignment(assignment_file), self.root, out, "Заполняем файлы для РАЭК", today).files)
 
         # The manager answers in their own words; the program matches the partner's list.
         workbook = load_workbook(levin.path)
