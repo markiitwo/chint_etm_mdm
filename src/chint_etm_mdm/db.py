@@ -101,20 +101,24 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
             f"""
             SELECT
                 p.article,
-                COALESCE(ig.name, p.name, '') AS name,
-                COALESCE(ig.full_name, ig.name, p.name, '') AS full_name,
+                -- An empty or blank value does not hide a filled source lower in the list.
+                COALESCE(NULLIF(TRIM(ig.name), ''), NULLIF(TRIM(p.name), ''), '') AS name,
                 COALESCE(
-                    ig.class81_code,
+                    NULLIF(TRIM(ig.full_name), ''), NULLIF(TRIM(ig.name), ''), NULLIF(TRIM(p.name), ''), ''
+                ) AS full_name,
+                COALESCE(
+                    NULLIF(TRIM(ig.class81_code), ''),
                     (
-                        SELECT class81_code
+                        SELECT NULLIF(TRIM(class81_code), '')
                         FROM product_etm_class_suggestions s
-                        WHERE s.article = p.article
+                        WHERE s.article = p.article AND NULLIF(TRIM(class81_code), '') IS NOT NULL
                         ORDER BY confidence DESC
                         LIMIT 1
                     ),
                     ''
                 ) AS class81_code,
-                COALESCE(p.unit, ig.manufacturer, '') AS unit,
+                -- The manufacturer is not a unit: an empty unit becomes "шт" below.
+                COALESCE(NULLIF(TRIM(p.unit), ''), '') AS unit,
                 d.length_mm,
                 d.width_mm,
                 d.height_mm,
@@ -151,7 +155,7 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                     LIMIT 1
                 ), '') AS tnved_code,
                 COALESCE((
-                    SELECT COALESCE(okpd2_9, okpd2_6, '')
+                    SELECT COALESCE(NULLIF(TRIM(okpd2_9), ''), NULLIF(TRIM(okpd2_6), ''), '')
                     FROM product_okpd2_codes o
                     WHERE o.article = p.article
                     ORDER BY o.import_id DESC, o.id DESC

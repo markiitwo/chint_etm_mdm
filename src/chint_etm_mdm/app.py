@@ -7,8 +7,8 @@ import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QDate, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,9 +37,9 @@ from openpyxl import load_workbook
 
 from . import __version__
 from .analyzer import analyze_template_mapping
-from .config import AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
+from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
-from .db_utils import copy_sqlite_database
+from .db_utils import BackupRejected, copy_sqlite_database
 from .etm_categories import CategoryRun, fill_new_products, latest_codes_file, new_articles_since, run_lines
 from .etim_importer import (
     EtimDecisionApplyResult,
@@ -74,6 +74,7 @@ from .manual_values import (
 from .price_importer import (
     DEFAULT_PRICE_SOURCE_URL,
     PriceImportResult,
+    already_imported,
     download_price_file,
     find_latest_price_url,
     import_price_workbook,
@@ -400,12 +401,14 @@ class PriceImportWorker(QThread):
         price_path: Path | None,
         price_url: str,
         downloads_dir: Path,
+        allow_repeat: bool = False,
     ) -> None:
         super().__init__()
         self.db_path = db_path
         self.price_path = price_path
         self.price_url = price_url
         self.downloads_dir = downloads_dir
+        self.allow_repeat = allow_repeat
 
     def run(self) -> None:
         try:
@@ -424,6 +427,7 @@ class PriceImportWorker(QThread):
                     source_url=self.price_url,
                     make_backup=True,
                     progress=self.progress.emit,
+                    allow_repeat=self.allow_repeat,
                 )
             )
         except Exception:
@@ -485,6 +489,29 @@ class EtimDecisionWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class RestoreWorker(QThread):
+    """Rolls the base back in the background: a big base takes a while and the window must not look frozen."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path: Path, backup_path: Path) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.backup_path = backup_path
+
+    def run(self) -> None:
+        try:
+            self.done.emit(restore_database_backup(self.db_path, self.backup_path))
+        except BackupRejected as exc:
+            self.failed.emit(f"База не изменена.\n\n{exc}")
+        except Exception:
+            self.failed.emit(
+                "Откат не удался. Если база стала неправильной, рядом с ней лежит её копия "
+                "до отката (.before_restore_...) — её можно выбрать как бэкап.\n\n" + traceback.format_exc()
+            )
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -501,8 +528,11 @@ class MainWindow(QMainWindow):
             | PriceFindWorker
             | EtimImportWorker
             | EtimDecisionWorker
+            | RestoreWorker
             | None
         ) = None
+        self.close_when_done = False
+        self.summary_worker: SummaryWorker | None = None
         self.write_action_buttons: list[QPushButton] = []
         self.tabs: QTabWidget | None = None
 
@@ -569,15 +599,20 @@ class MainWindow(QMainWindow):
         self.refresh_database_status()
         self.update_write_action_buttons()
         self.updates = Updates(self)
+        if config_load_problems:
+            QTimer.singleShot(0, self.show_settings_problems)
+
+    def show_settings_problems(self) -> None:
+        problems = list(config_load_problems)
+        config_load_problems.clear()
+        QMessageBox.warning(self, "Настройки не прочитаны", "\n\n".join(problems))
 
     def update_write_action_buttons(self) -> None:
         busy = self.worker is not None
         for button in getattr(self, "write_action_buttons", []):
             button.setEnabled(not busy)
         if hasattr(self, "apply_etim_report_button"):
-            self.apply_etim_report_button.setEnabled(
-                not busy and self.last_etim_report_path is not None
-            )
+            self.apply_etim_report_button.setEnabled(not busy)
 
     def start_worker(
         self,
@@ -609,6 +644,32 @@ class MainWindow(QMainWindow):
         if self.worker is worker:
             self.worker = None
         self.update_write_action_buttons()
+        if self.close_when_done and self.worker is None:
+            # Let the result message go first, then close as the user asked.
+            QTimer.singleShot(0, self.close)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Do not quit in the middle of an operation: the base or a file could be left half-written."""
+        if self.worker is not None and self.worker.isRunning():
+            if self.close_when_done:
+                event.ignore()
+                return
+            answer = QMessageBox.question(
+                self,
+                "Идёт операция",
+                "Программа ещё работает: если закрыть её сейчас, база или файлы могут записаться не до конца.\n\n"
+                "Закрыть программу сама, когда операция закончится?",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.close_when_done = True
+                self.statusBar().showMessage("Программа закроется, когда закончится текущая операция.")
+            event.ignore()
+            return
+        # Background helpers (summary mail, update check) only need a moment to finish.
+        for helper in (self.summary_worker, self.updates.worker):
+            if helper is not None and helper.isRunning():
+                helper.wait(15000)
+        event.accept()
 
     def build_ui(self) -> QWidget:
         self.tabs = QTabWidget()
@@ -1386,11 +1447,15 @@ class MainWindow(QMainWindow):
             return
         self.open_path(self.last_etim_report_path)
 
-    def choose_etim_report_file(self) -> Path | None:
+    def choose_etim_report_file(self, suggested: Path | None = None) -> Path | None:
+        if suggested is not None and suggested.exists():
+            start = str(suggested)
+        else:
+            start = str(self.etim_report_dir())
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Выберите etim_import_report.xlsx",
-            "",
+            "Выберите отчёт ETIM (etim_import_report_...xlsx)",
+            start,
             "ETIM import report (*.xlsx *.xlsm);;All files (*)",
         )
         return Path(path) if path else None
@@ -1441,10 +1506,9 @@ class MainWindow(QMainWindow):
         if self.worker is not None:
             QMessageBox.warning(self, "Операция уже выполняется", "Дождитесь завершения текущей операции.")
             return
-        source = Path(self.db_path_edit.text().strip())
+        source = self.chosen_file(self.db_path_edit.text(), "База", "SQLite базу")
         work_dir_text = self.work_dir_edit.text().strip()
-        if not source.exists():
-            QMessageBox.warning(self, "База не найдена", "Сначала выберите существующую базу.")
+        if source is None:
             return
         if not work_dir_text:
             QMessageBox.warning(self, "Нет рабочей папки", "Сначала выберите рабочую папку.")
@@ -1470,7 +1534,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Бэкап не выбран", "Выберите файл бэкапа `.bak_*`.")
             return
         backup_path = Path(backup_text)
-        if not backup_path.exists():
+        if not backup_path.is_file():
             QMessageBox.warning(self, "Бэкап не найден", "Выберите существующий файл бэкапа.")
             return
         answer = QMessageBox.question(
@@ -1482,11 +1546,19 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            safety_backup = restore_database_backup(db_path, backup_path)
-        except Exception:
-            self.on_price_import_failed(traceback.format_exc())
-            return
+        self.price_log.append(f"Откатываю базу из бэкапа: {backup_path}")
+        self.start_worker(
+            RestoreWorker(db_path, backup_path),
+            lambda safety_backup: self.on_restore_done(backup_path, safety_backup),
+            self.on_restore_failed,
+        )
+
+    def on_restore_failed(self, details: str) -> None:
+        self.price_log.append("Откат не выполнен.")
+        self.price_log.append(details)
+        QMessageBox.critical(self, "Откат не выполнен", details)
+
+    def on_restore_done(self, backup_path: Path, safety_backup: Path) -> None:
         self.price_log.append(f"База восстановлена из бэкапа: {backup_path}")
         self.price_log.append(f"Копия базы до отката: {safety_backup}")
         self.refresh_database_status()
@@ -1568,7 +1640,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Файл не выбран", "Выберите вручную дозаполненный _filled.xlsx.")
                 return
             filled_path = Path(filled_text)
-            if not filled_path.exists():
+            if not filled_path.is_file():
                 QMessageBox.warning(self, "Файл не найден", "Выберите существующий _filled.xlsx.")
                 return
             work_text = self.work_dir_edit.text().strip()
@@ -1627,11 +1699,22 @@ class MainWindow(QMainWindow):
 
     def validated_db_path(self) -> Path | None:
         self.save_current_config()
-        db_path = Path(self.db_path_edit.text().strip())
-        if not db_path.exists():
-            QMessageBox.warning(self, "База не найдена", "Выберите существующую SQLite базу.")
+        return self.chosen_file(self.db_path_edit.text(), "База", "SQLite базу")
+
+    def chosen_file(self, text: str, title: str, what: str) -> Path | None:
+        """The chosen file, or None after a plain message: an empty field is not "the current folder"."""
+        text = text.strip()
+        if not text:
+            QMessageBox.warning(self, f"{title}: не выбрано", f"Выберите {what}.")
             return None
-        return db_path
+        path = Path(text)
+        if path.is_dir():
+            QMessageBox.warning(self, f"{title}: выбрана папка", f"Выбрана папка, а нужен файл. Выберите {what}.\n\n{path}")
+            return None
+        if not path.is_file():
+            QMessageBox.warning(self, f"{title}: файл не найден", f"Файл не найден. Выберите {what}.\n\n{path}")
+            return None
+        return path
 
     def run_price_import_from_file(self) -> None:
         try:
@@ -1643,11 +1726,25 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Прайс не выбран", "Выберите XLSX прайс-лист.")
                 return
             price_path = Path(price_text)
-            if not price_path.exists():
+            if not price_path.is_file():
                 QMessageBox.warning(self, "Прайс не найден", "Выберите существующий XLSX прайс-лист.")
                 return
+            earlier = already_imported(price_path, db_path)
+            if earlier is not None:
+                answer = QMessageBox.question(
+                    self,
+                    "Прайс уже импортирован",
+                    f"Этот же файл уже был импортирован (снимок {earlier[1] or '—'}, id {earlier[0]}).\n\n"
+                    "Повторный импорт нужен только если базу откатывали из бэкапа. Импортировать ещё раз?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
             self.price_log.append("Импортирую выбранный прайс...")
-            worker = PriceImportWorker(db_path, price_path, "", self.price_download_dir())
+            worker = PriceImportWorker(
+                db_path, price_path, "", self.price_download_dir(), allow_repeat=earlier is not None
+            )
             self.start_worker(worker, self.on_price_import_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
@@ -1686,7 +1783,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "ETIM не выбран", "Выберите XLSX ETIM-файл.")
                 return
             etim_path = Path(etim_text)
-            if not etim_path.exists():
+            if not etim_path.is_file():
                 QMessageBox.warning(self, "ETIM не найден", "Выберите существующий XLSX ETIM-файл.")
                 return
             self.price_log.append("Импортирую ETIM-файл...")
@@ -1700,9 +1797,8 @@ class MainWindow(QMainWindow):
             db_path = self.validated_db_path()
             if db_path is None:
                 return
-            report_path = self.last_etim_report_path
-            if report_path is None or not report_path.exists():
-                report_path = self.choose_etim_report_file()
+            # Always let the user pick: after a restart or to apply an older report, not only the last one.
+            report_path = self.choose_etim_report_file(self.last_etim_report_path)
             if report_path is None:
                 return
             answer = QMessageBox.question(
@@ -1722,8 +1818,6 @@ class MainWindow(QMainWindow):
             self.on_price_import_failed(traceback.format_exc())
 
     def validated_paths(self) -> tuple[Path, Path, Path, Path | None] | None:
-        db_path = Path(self.db_path_edit.text().strip())
-        template_path = Path(self.template_path_edit.text().strip())
         output_text = self.output_dir_edit.text().strip()
         output_dir = Path(output_text) if output_text else Path()
         work_text = self.work_dir_edit.text().strip()
@@ -1731,11 +1825,11 @@ class MainWindow(QMainWindow):
         if work_text:
             rules_path = ensure_default_rules(Path(work_text))
 
-        if not db_path.exists():
-            QMessageBox.warning(self, "База не найдена", "Выберите существующую SQLite базу.")
+        db_path = self.chosen_file(self.db_path_edit.text(), "База", "SQLite базу")
+        if db_path is None:
             return None
-        if not template_path.exists():
-            QMessageBox.warning(self, "Шаблон не найден", "Выберите файл шаблона.")
+        template_path = self.chosen_file(self.template_path_edit.text(), "Шаблон", "файл шаблона")
+        if template_path is None:
             return None
         if not output_text:
             QMessageBox.warning(self, "Нет папки результата", "Выберите папку результата.")
@@ -1807,7 +1901,8 @@ class MainWindow(QMainWindow):
         for line in result_lines(result):
             self.price_log.append(line)
         self.refresh_database_status()
-        QMessageBox.information(self, "Прайс импортирован", "\n".join(result_lines(result)))
+        title = "Прайс уже был импортирован" if result.repeat_of_snapshot is not None else "Прайс импортирован"
+        QMessageBox.information(self, title, "\n".join(result_lines(result)))
 
     def on_etim_import_done(self, result: EtimImportResult) -> None:
         self.etim_file_edit.setText(str(result.etim_file))
@@ -1819,7 +1914,10 @@ class MainWindow(QMainWindow):
         for line in etim_result_lines(result):
             self.price_log.append(line)
         self.refresh_database_status()
-        QMessageBox.information(self, "ETIM импортирован", "\n".join(etim_result_lines(result)))
+        if result.found_articles == 0 or result.report_warning:
+            QMessageBox.warning(self, "ETIM импортирован с замечаниями", "\n".join(etim_result_lines(result)))
+        else:
+            QMessageBox.information(self, "ETIM импортирован", "\n".join(etim_result_lines(result)))
 
     def on_etim_decisions_done(self, result: EtimDecisionApplyResult) -> None:
         self.last_etim_report_path = result.report_path
@@ -1861,7 +1959,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Отчет не выбран", "Выберите файл mapping_review.xlsx.")
             return
         review_path = Path(path_text)
-        if not review_path.exists():
+        if not review_path.is_file():
             QMessageBox.warning(self, "Отчет не найден", "Выберите существующий файл mapping_review.xlsx.")
             return
 
@@ -2132,6 +2230,17 @@ class MainWindow(QMainWindow):
         row_data = check_item.data(Qt.ItemDataRole.UserRole)
         return row_data if isinstance(row_data, dict) else None
 
+    def rules_locked(self) -> bool:
+        """Rules do not change under a running fill: one operation works with one set of rules."""
+        if self.worker is None:
+            return False
+        QMessageBox.warning(
+            self,
+            "Операция уже выполняется",
+            "Правила можно менять, когда закончится текущая операция.",
+        )
+        return True
+
     def remove_matching_rule_row(self, target: dict[str, str]) -> None:
         for row_idx in range(self.rules_table.rowCount()):
             row_data = self.row_data(row_idx)
@@ -2140,6 +2249,8 @@ class MainWindow(QMainWindow):
                 return
 
     def save_rule_data(self, row_data: dict[str, str]) -> bool:
+        if self.rules_locked():
+            return False
         rules_path = self.rules_path_from_work_dir()
         if rules_path is None:
             return False
@@ -2162,6 +2273,8 @@ class MainWindow(QMainWindow):
         return self.save_rule_data(row_data) if row_data is not None else False
 
     def reject_rule_data(self, row_data: dict[str, str]) -> bool:
+        if self.rules_locked():
+            return False
         rules_path = self.rules_path_from_work_dir()
         if rules_path is None:
             return False
@@ -2184,6 +2297,8 @@ class MainWindow(QMainWindow):
         return self.reject_rule_data(row_data) if row_data is not None else False
 
     def save_selected_rules(self) -> None:
+        if self.rules_locked():
+            return
         rules_path = self.rules_path_from_work_dir()
         if rules_path is None:
             return
@@ -2227,6 +2342,8 @@ class MainWindow(QMainWindow):
         )
 
     def reject_selected_rules(self) -> None:
+        if self.rules_locked():
+            return
         rules_path = self.rules_path_from_work_dir()
         if rules_path is None:
             return

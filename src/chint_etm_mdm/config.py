@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
+import shutil
 from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 
@@ -9,6 +11,9 @@ from .atomic_files import atomic_write_json
 
 APP_DIR_NAME = "CHINT ETM MDM"
 CONFIG_FILE_NAME = "config.json"
+
+# Settings files that could not be read at start; the window tells the user about them.
+LOAD_PROBLEMS: list[str] = []
 
 
 @dataclass
@@ -35,21 +40,50 @@ def user_config_path() -> Path:
     return base / CONFIG_FILE_NAME
 
 
-def load_config() -> AppConfig:
-    path = user_config_path()
+def read_settings_file(path: Path, what: str) -> dict:
+    """The file's settings, or {} when it is missing or broken.
+
+    A broken file is copied aside before the program can overwrite it with defaults, so the old
+    settings can still be looked up.
+    """
     if not path.exists():
-        return AppConfig()
+        return {}
+    problem = ""
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return AppConfig()
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except OSError as exc:
+        LOAD_PROBLEMS.append(f"{what}: не удалось прочитать {path} ({exc}). Работаю со стандартными значениями.")
+        return {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raw, problem = {}, f"файл повреждён ({exc})"
+    if not isinstance(raw, dict):
+        problem = "внутри не настройки, а " + ("пустое значение" if raw is None else type(raw).__name__)
+    if not problem:
+        return raw
+    copy = path.with_name(f"{path.name}.broken-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    try:
+        shutil.copy2(path, copy)
+        kept = f" Копия старого файла: {copy}."
+    except OSError:
+        kept = ""
+    LOAD_PROBLEMS.append(f"{what}: {problem}. Работаю со стандартными значениями.{kept}")
+    return {}
+
+
+def text_setting(raw: dict, key: str) -> str:
+    value = raw.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def load_config() -> AppConfig:
+    raw = read_settings_file(user_config_path(), "Настройки программы")
     return AppConfig(
-        work_dir=str(raw.get("work_dir") or ""),
-        db_path=str(raw.get("db_path") or ""),
-        class_templates_dir=str(raw.get("class_templates_dir") or ""),
-        codes_file=str(raw.get("codes_file") or ""),
-        last_new_since=str(raw.get("last_new_since") or ""),
-        inbox_dir=str(raw.get("inbox_dir") or ""),
+        work_dir=text_setting(raw, "work_dir"),
+        db_path=text_setting(raw, "db_path"),
+        class_templates_dir=text_setting(raw, "class_templates_dir"),
+        codes_file=text_setting(raw, "codes_file"),
+        last_new_since=text_setting(raw, "last_new_since"),
+        inbox_dir=text_setting(raw, "inbox_dir"),
     )
 
 

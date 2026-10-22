@@ -5,9 +5,13 @@ import hashlib
 import os
 import sqlite3
 import tempfile
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+
+# Tables every CHINT ETM MDM database has; a file without them is not a backup of this program's base.
+CHINT_TABLES = ("products", "price_snapshots", "price_snapshot_items")
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,32 @@ def check_sqlite_integrity(db_path: Path) -> None:
         result = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
     if result.lower() != "ok":
         raise ValueError(f"SQLite integrity_check failed for {db_path}: {result}")
+
+
+class BackupRejected(ValueError):
+    """The backup was refused before anything was touched: the base is as it was."""
+
+
+def check_backup_file(backup_path: Path, db_path: Path, required_tables: Iterable[str] = ()) -> None:
+    """Refuse a backup that would break the base: the base itself, not SQLite, damaged or not this program's."""
+    try:
+        if backup_path.resolve() == db_path.resolve() or backup_path.samefile(db_path):
+            raise BackupRejected("Выбран сам файл базы, а не бэкап. Выберите файл бэкапа (.bak_...).")
+    except OSError:
+        pass
+    try:
+        with closing(connect_database(backup_path, readonly=True)) as conn:
+            tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            result = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+    except sqlite3.DatabaseError as exc:
+        raise BackupRejected(f"Файл не похож на базу SQLite или повреждён: {backup_path}\n({exc})") from exc
+    if result.lower() != "ok":
+        raise BackupRejected(f"Бэкап повреждён, восстанавливать из него нельзя: {backup_path}\n({result})")
+    missing = [name for name in required_tables if name not in tables]
+    if missing:
+        raise BackupRejected(
+            "Это не бэкап базы программы: в файле нет таблиц " + ", ".join(missing) + f".\n{backup_path}"
+        )
 
 
 def sha256_file(path: Path) -> str:
@@ -119,12 +149,14 @@ def copy_sqlite_database(source_path: Path, target_path: Path) -> None:
                 pass
 
 
-def restore_sqlite_backup(db_path: Path, backup_path: Path) -> BackupResult:
+def restore_sqlite_backup(
+    db_path: Path, backup_path: Path, required_tables: Iterable[str] = ()
+) -> BackupResult:
     if not db_path.exists():
         raise FileNotFoundError(f"Current database not found: {db_path}")
     if not backup_path.exists():
         raise FileNotFoundError(f"Backup not found: {backup_path}")
-    check_sqlite_integrity(backup_path)
+    check_backup_file(backup_path, db_path, required_tables)
     safety_backup = create_sqlite_backup(db_path, db_path.parent, label="before_restore")
     temp_name = ""
     try:

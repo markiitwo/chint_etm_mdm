@@ -83,7 +83,7 @@ def read_rules_document(rules_path: Path) -> dict:
 def write_rules_document(rules_path: Path, data: dict) -> None:
     rules_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(rules_path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    load_attribute_rules.cache_clear()
+    _load_rules.cache_clear()
 
 
 def add_approved_class_rule(
@@ -160,6 +160,26 @@ def add_rejected_class_rule(
         raise ValueError("81 class, template field and source attribute are required.")
 
     data = read_rules_document(rules_path)
+    # A source approved earlier stops working once rejected; other approved sources of the field stay.
+    withdrawn = False
+    kept_rules = []
+    for item in data["class_rules"]:
+        if (
+            isinstance(item, dict)
+            and str(item.get("class81_code") or "").strip() == class81_code
+            and str(item.get("template_field") or "").strip() == template_field
+            and str(item.get("confidence") or "").strip() == "approved_class_rule"
+        ):
+            sources = [str(value) for value in item.get("source_attributes", []) if str(value).strip()]
+            if source_attribute in sources:
+                withdrawn = True
+                sources = [value for value in sources if value != source_attribute]
+                if not sources:
+                    continue
+                item["source_attributes"] = sources
+        kept_rules.append(item)
+    data["class_rules"] = kept_rules
+
     rejected_rules = data["rejected_class_rules"]
     for item in rejected_rules:
         if not isinstance(item, dict):
@@ -169,7 +189,9 @@ def add_rejected_class_rule(
         if str(item.get("template_field") or "").strip() != template_field:
             continue
         if str(item.get("source_attribute") or "").strip() == source_attribute:
-            return False
+            if withdrawn:
+                write_rules_document(rules_path, data)
+            return withdrawn
 
     rejected_rules.append(
         {
@@ -201,16 +223,33 @@ def rejected_sources_for(
     return tuple(dict.fromkeys(matches))
 
 
+def _rules_state(rules_path: Path | None) -> tuple[int, int]:
+    """Changes when the file is changed, also by another program, so the cache never goes stale."""
+    try:
+        stat = rules_path.stat() if rules_path else None
+    except OSError:
+        stat = None
+    return (stat.st_mtime_ns, stat.st_size) if stat else (0, 0)
+
+
 @lru_cache(maxsize=32)
-def load_attribute_rules(rules_path_text: str = "") -> tuple[AttributeRule, ...]:
+def _load_rules(
+    rules_path_text: str, _state: tuple[int, int]
+) -> tuple[tuple[AttributeRule, ...], frozenset[tuple[str, str, str]]]:
     rules_path = Path(rules_path_text) if rules_path_text else None
     if rules_path and rules_path.exists():
         raw = rules_path.read_text(encoding="utf-8")
+        name = rules_path.name
     else:
         raw = default_rules_text()
+        name = "правила по умолчанию"
     data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError(f"Файл правил {name} повреждён: внутри не JSON-объект.")
     rules = []
-    for item in data.get("class_rules", []):
+    for number, item in enumerate(data.get("class_rules", []) or [], start=1):
+        if not isinstance(item, dict) or not isinstance(item.get("source_attributes", []), list):
+            raise ValueError(f"Файл правил {name} повреждён: правило №{number} записано неправильно.")
         rules.append(
             AttributeRule(
                 class81_code=str(item.get("class81_code") or ""),
@@ -220,7 +259,26 @@ def load_attribute_rules(rules_path_text: str = "") -> tuple[AttributeRule, ...]
                 note=str(item.get("note") or ""),
             )
         )
-    return tuple(rules)
+    rejected = frozenset(
+        (
+            str(item.get("class81_code") or "").strip(),
+            str(item.get("template_field") or "").strip(),
+            str(item.get("source_attribute") or "").strip(),
+        )
+        for item in data.get("rejected_class_rules", []) or []
+        if isinstance(item, dict)
+    )
+    return tuple(rules), rejected
+
+
+def load_attribute_rules(rules_path_text: str = "") -> tuple[AttributeRule, ...]:
+    path = Path(rules_path_text) if rules_path_text else None
+    return _load_rules(rules_path_text, _rules_state(path))[0]
+
+
+def rejected_rule_keys(rules_path_text: str = "") -> frozenset[tuple[str, str, str]]:
+    path = Path(rules_path_text) if rules_path_text else None
+    return _load_rules(rules_path_text, _rules_state(path))[1]
 
 
 def source_attributes_for(
@@ -235,7 +293,11 @@ def source_attributes_for(
         if rule.confidence != "approved_class_rule":
             continue
         matches.extend(rule.source_attributes)
-    return tuple(dict.fromkeys(matches))
+    # A rejection always wins, also for an approval written by hand or by an older version.
+    rejected = rejected_rule_keys(str(rules_path or ""))
+    return tuple(
+        source for source in dict.fromkeys(matches) if (class81_code, template_field, source) not in rejected
+    )
 
 
 def rules_for(

@@ -43,3 +43,68 @@ class InboxFolderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrokenSettingsTests(unittest.TestCase):
+    """CFG-01: a damaged or odd settings file never stops the start and is kept for recovery."""
+
+    def setUp(self) -> None:
+        from unittest import mock
+
+        from chint_etm_mdm import config
+
+        self.config = config
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp_dir.name)
+        self.patch = mock.patch("pathlib.Path.home", return_value=self.home)
+        self.patch.start()
+        config.LOAD_PROBLEMS.clear()
+
+    def tearDown(self) -> None:
+        self.patch.stop()
+        self.config.LOAD_PROBLEMS.clear()
+        self.temp_dir.cleanup()
+
+    def write(self, text: str) -> Path:
+        path = self.config.user_config_path()
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_wrong_kinds_of_json_give_defaults_and_a_kept_copy(self) -> None:
+        for text in ("[]", "null", "42", '"text"', "{broken"):
+            with self.subTest(text=text):
+                self.config.LOAD_PROBLEMS.clear()
+                path = self.write(text)
+                self.assertEqual(self.config.AppConfig(), self.config.load_config())
+                self.assertEqual(1, len(self.config.LOAD_PROBLEMS))
+                copies = list(path.parent.glob("config.json.broken-*"))
+                self.assertTrue(copies)
+                self.assertEqual(text, copies[0].read_text(encoding="utf-8"))
+                for copy in copies:
+                    copy.unlink()
+
+    def test_good_old_settings_still_read(self) -> None:
+        self.write('{"work_dir": "W", "db_path": "D.sqlite", "inbox_dir": 5, "codes_file": null}')
+        loaded = self.config.load_config()
+        self.assertEqual(("W", "D.sqlite", "", ""), (loaded.work_dir, loaded.db_path, loaded.inbox_dir, loaded.codes_file))
+        self.assertEqual([], self.config.LOAD_PROBLEMS)
+
+    def test_settings_with_byte_order_mark_are_read(self) -> None:
+        self.config.user_config_path().write_text('{"work_dir": "W"}', encoding="utf-8-sig")
+        self.assertEqual("W", self.config.load_config().work_dir)
+
+    def test_notify_settings_survive_odd_values(self) -> None:
+        from chint_etm_mdm.notify import load_settings
+
+        path = self.home / "notify.json"
+        path.write_text(
+            '{"send_after_run": "yes", "email_to": ["a"], "smtp_port": "abc", "telegram_chat_id": 12345}',
+            encoding="utf-8",
+        )
+        settings = load_settings(path)
+        self.assertFalse(settings.send_after_run)
+        self.assertEqual("", settings.email_to)
+        self.assertEqual(465, settings.smtp_port)
+        self.assertEqual("12345", settings.telegram_chat_id)
+        path.write_text("[1, 2]", encoding="utf-8")
+        self.assertEqual(465, load_settings(path).smtp_port)
