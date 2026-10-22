@@ -284,6 +284,35 @@ if __name__ == "__main__":
     unittest.main()
 
 
+    def test_site_fills_links_and_pictures(self) -> None:
+        """Links, pictures and the certificate number from ensmas.ru (a fake site here)."""
+        from test_site_info import PAGE_URL, PRODUCT, SEARCH, FakeSite
+
+        site = FakeSite({"https://ensmas.ru/catalog/?q=616173": SEARCH, PAGE_URL: PRODUCT, "https://ensmas.ru/catalog/?q=631929": "<html></html>"})
+        site.pages["https://ensmas.ru/catalog/?q=999999"] = "<html></html>"
+        lines: list[str] = []
+        cache = self.root / "work" / "cache" / "ensmas_site.json"
+        result = fill_raek_zip(self.db, self.zip, self.root / "out", None, self.rules, cache, True, site, lines.append)
+        image = cells(self.member(result, "ChINT (CHINT)_IMAGE.xlsx"))
+        self.assertTrue(image[1][6].startswith("https://ensmas.ru/upload/iblock/fd6/"))
+        # No ЧЗ file this time: the drive's declaration on the site still says certification is mandatory, flagged.
+        mandatory = cells(self.member(result, "ChINT (CHINT)_MANDATORY_CERTIFICATION.xlsx"))
+        self.assertEqual(["Да", None], [row[6] for row in mandatory[1:]])
+        self.assertTrue(cache.exists())
+        self.assertTrue(any("Сайт ensmas.ru: спросил 3, найдено 1, не найдено 2" in line for line in result_lines(result)))
+        self.assertTrue(any("616173 найден" in line for line in lines))
+
+        report = load_workbook(result.report_path)
+        checks = [(row[3], row[5]) for row in report["Проверить"].iter_rows(min_row=2, values_only=True)]
+        self.assertIn(("616173", "Подлежит обязательному подтверждению соответствия"), checks)
+
+        # The next run takes the answers from memory and does not ask the site again.
+        asked = len(site.asked)
+        again = fill_raek_zip(self.db, self.zip, self.root / "out", None, self.rules, cache, True, site)
+        self.assertEqual(asked, len(site.asked))
+        self.assertTrue(cells(self.member(again, "ChINT (CHINT)_IMAGE.xlsx"))[1][6])
+
+
 class MandatoryCertificationTests(unittest.TestCase):
     def sources(self, document: str | None) -> Sources:
         chz = {("100", "series"): "NKB1"}

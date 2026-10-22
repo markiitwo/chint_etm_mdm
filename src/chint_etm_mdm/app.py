@@ -11,6 +11,7 @@ from PySide6.QtCore import QDate, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDateEdit,
     QFileDialog,
     QFormLayout,
@@ -50,6 +51,7 @@ from .etim_importer import (
 from .export_templates import etm_reference_path
 from .filler import FillResult, fill_template
 from .raek import RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answers, result_lines as raek_result_lines
+from .site_info import default_cache_path as site_cache_path
 from .update_ui import Updates, offer_install
 from .value_matching import import_etm_reference
 from .mapping_rules import (
@@ -114,18 +116,41 @@ class FillWorker(QThread):
 class RaekWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
+    progress = Signal(str)
 
-    def __init__(self, db_path: Path, zip_path: Path, output_dir: Path, codes_file: Path | None, rules_path: Path | None) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        zip_path: Path,
+        output_dir: Path,
+        codes_file: Path | None,
+        rules_path: Path | None,
+        site_cache: Path | None = None,
+        ask_site: bool = False,
+    ) -> None:
         super().__init__()
         self.db_path = db_path
         self.zip_path = zip_path
         self.output_dir = output_dir
         self.codes_file = codes_file
         self.rules_path = rules_path
+        self.site_cache = site_cache
+        self.ask_site = ask_site
 
     def run(self) -> None:
         try:
-            self.done.emit(fill_raek_zip(self.db_path, self.zip_path, self.output_dir, self.codes_file, self.rules_path))
+            self.done.emit(
+                fill_raek_zip(
+                    self.db_path,
+                    self.zip_path,
+                    self.output_dir,
+                    self.codes_file,
+                    self.rules_path,
+                    self.site_cache,
+                    self.ask_site,
+                    progress=self.progress.emit,
+                )
+            )
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -387,6 +412,8 @@ class MainWindow(QMainWindow):
         self.open_new_products_summary_button = QPushButton("Открыть сводку")
         self.raek_zip_edit = QLineEdit()
         self.raek_zip_edit.setPlaceholderText("самый свежий архив РАЭК из «Загрузок»")
+        self.raek_site_check = QCheckBox("Сначала взять ссылки, картинки и сертификаты с сайта ensmas.ru (нужен интернет)")
+        self.raek_site_check.setChecked(True)
         self.raek_log = QTextEdit()
         self.raek_log.setReadOnly(True)
         self.last_raek_result: RaekResult | None = None
@@ -447,6 +474,8 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda: self.on_worker_finished(worker))
         worker.done.connect(done_handler)
         worker.failed.connect(failed_handler)
+        if isinstance(worker, RaekWorker):
+            worker.progress.connect(self.raek_log.append)
         if isinstance(worker, PriceImportWorker):
             worker.progress.connect(self.price_log.append)
             worker.downloaded.connect(self.on_price_downloaded)
@@ -628,6 +657,7 @@ class MainWindow(QMainWindow):
         choose.clicked.connect(self.choose_raek_zip)
         zip_row.addWidget(choose)
         form.addRow("Архив РАЭК", zip_row)
+        form.addRow("", self.raek_site_check)
 
         actions = QHBoxLayout()
         run_button = QPushButton("Заполнить архив РАЭК")
@@ -670,8 +700,12 @@ class MainWindow(QMainWindow):
             rules_path = ensure_default_rules(Path(work_text)) if work_text else None
             codes_text = self.codes_file_edit.text().strip()
             codes_path = latest_codes_file(codes_folders(work_text), Path(codes_text) if codes_text else None)
+            ask_site = self.raek_site_check.isChecked()
             self.raek_log.append(f"Заполняю {zip_path.name}...")
-            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path)
+            if ask_site:
+                self.raek_log.append("Сначала спрошу сайт ensmas.ru о товарах, которых нет в памяти: по 2–3 секунды на товар.")
+            site_cache = site_cache_path(Path(work_text)) if work_text else None
+            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site)
             self.start_worker(worker, self.on_raek_done, self.on_raek_failed)
         except Exception:
             self.on_raek_failed(traceback.format_exc())

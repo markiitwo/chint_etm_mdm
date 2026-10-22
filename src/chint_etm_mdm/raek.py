@@ -34,6 +34,8 @@ from .atomic_files import atomic_write_json
 from .db import ProductRecord, connect, fetch_products
 from .etm_categories import load_codes_file
 from .filler import normalize_article
+from .site_info import FOUND as SITE_FOUND
+from .site_info import SiteCache, SiteRecord, SiteResult, site_lines, update_site_cache
 from .upload_names import series_names
 from .value_matching import (
     LOGICAL_NO,
@@ -126,6 +128,7 @@ class RaekResult:
     names: list[list[object]] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)
     codes_file: Path | None = None
+    site: SiteResult | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,7 @@ class Sources:
     coded: dict[str, dict[str, str]]  # article -> ETIM feature code -> value (ETIM workbook import)
     settings: dict
     learned: dict
+    site: dict[str, SiteRecord] = field(default_factory=dict)  # article -> what ensmas.ru answered
     chz_articles: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -280,11 +284,15 @@ def is_eaeu_document(number: str) -> bool:
 
 def mandatory_certification(article: str, sources: Sources) -> Cell:
     """"Подлежит обязательному подтверждению соответствия" from the ЧЗ file's "Сертификат 1" column."""
+    document = sources.chz.get((article, "cert_number"), "")
+    if not document:
+        site = site_record(article, sources)
+        if site and is_eaeu_document(site.cert_number):
+            return Cell(CHECK, "Да", f"В файле ЧЗ данных нет, на сайте ensmas.ru у товара {site.cert_number}")
     if not sources.chz:
         return Cell(EMPTY, note="Нет файла ЧЗ: обязательна ли сертификация, неизвестно")
     if article not in sources.chz_articles:
         return Cell(EMPTY, note="Артикула нет в файле ЧЗ: обязательна ли сертификация, неизвестно")
-    document = sources.chz.get((article, "cert_number"), "")
     if not document:
         return Cell(EMPTY, note="В файле ЧЗ у артикула не указан сертификат")
     if is_eaeu_document(document):
@@ -292,6 +300,26 @@ def mandatory_certification(article: str, sources: Sources) -> Cell:
     if "не треб" in document.casefold():
         return Cell(FILLED, "Нет")
     return Cell(CHECK, "Нет", f"В файле ЧЗ вместо сертификата ЕАЭС документ «{document}», похоже на отказное письмо")
+
+
+def site_record(article: str, sources: Sources) -> SiteRecord | None:
+    record = sources.site.get(article)
+    return record if record and record.status == SITE_FOUND else None
+
+
+def site_missing_note(article: str, sources: Sources, what: str) -> str:
+    record = sources.site.get(article)
+    if record is None:
+        return f"{what}: сайт ensmas.ru по этому товару ещё не проверялся"
+    if record.status != SITE_FOUND:
+        return f"{what}: {record.note or 'товара нет на сайте ensmas.ru'}"
+    return f"{what}: на странице товара на ensmas.ru этого нет"
+
+
+def site_column(article: str, sources: Sources, attribute: str, what: str) -> Cell:
+    record = site_record(article, sources)
+    value = getattr(record, attribute) if record else ""
+    return Cell(FILLED, value) if value else Cell(EMPTY, note=site_missing_note(article, sources, what))
 
 
 def same_certificate(left: str, right: str) -> bool:
@@ -351,6 +379,10 @@ def column_value(header: str, article: str, product: ProductRecord, sources: Sou
         if mark in {"no", "n", "нет"}:
             return Cell(FILLED, "Нет")
         return Cell(EMPTY, note="В файле ЧЗ нет отметки о маркировке")
+    if key == canonical("Изображение"):
+        return site_column(article, sources, "image_url", "Нет картинки")
+    if key == canonical("Ссылка на сайте поставщика"):
+        return site_column(article, sources, "url", "Нет ссылки")
     cert = certificate(article, product, sources)
     if key in cert:
         return cert[key]
@@ -365,7 +397,9 @@ def certificate(article: str, product: ProductRecord, sources: Sources) -> dict[
     in_chz = sources.chz.get((article, "cert_number"), "")
     from_chz = in_chz if is_eaeu_document(in_chz) else ""
     from_db = next((attributes[name] for name in CERT_NUMBER_ATTRIBUTES if attributes.get(name)), "")
-    number = from_chz or from_db
+    site = site_record(article, sources)
+    from_site = site.cert_number if site and is_eaeu_document(site.cert_number) and not in_chz else ""
+    number = from_chz or from_db or from_site
     if not number:
         reason = f"Сертификата ЕАЭС нет: в файле ЧЗ «{in_chz}»" if in_chz else "Нет номера сертификата ни в файле ЧЗ, ни в базе"
         missing = Cell(EMPTY, note=reason)
@@ -594,8 +628,18 @@ def fill_raek_zip(
     output_dir: Path,
     codes_path: Path | None = None,
     rules_path: Path | None = None,
+    site_cache: Path | None = None,
+    ask_site: bool = False,
+    fetch=None,
+    progress=None,
 ) -> RaekResult:
+    """Fill the archive. With `ask_site`, ensmas.ru is asked first about articles it has no recent answer for."""
     articles = zip_articles(zip_path)
+    cache = SiteCache(site_cache)
+    site_result = None
+    if ask_site:
+        options = {"fetch": fetch} if fetch else {}
+        site_result = update_site_cache(cache, articles, progress=progress, **options)
     sources = Sources(
         products=fetch_products(db_path, articles),
         chz=load_codes_file(codes_path, CHZ_HEADERS) if codes_path else {},
@@ -603,9 +647,10 @@ def fill_raek_zip(
         coded=coded_attributes(db_path, articles),
         settings=load_settings(),
         learned=load_learned(rules_path),
+        site=cache.records,
     )
     output_path, report_path = output_paths(zip_path, output_dir)
-    result = RaekResult(output_path, report_path, products=len(articles), codes_file=codes_path)
+    result = RaekResult(output_path, report_path, products=len(articles), codes_file=codes_path, site=site_result)
     with zipfile.ZipFile(zip_path) as source, zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as target:
         for info in source.infolist():
             data = source.read(info)
@@ -734,6 +779,8 @@ def result_lines(result: RaekResult) -> list[str]:
         lines.append(f"Проверьте лист «Названия» в отчёте ({len(result.names)} строк): да/нет, и программа запомнит.")
     if result.codes_file:
         lines.append(f"Коды и штрих-коды взяты из файла {result.codes_file.name}.")
+    if result.site:
+        lines.extend(site_lines(result.site))
     lines.append(f"Архив для РАЭК: {result.output_path.name}")
     lines.append(f"Отчёт: {result.report_path.name}")
     return lines
