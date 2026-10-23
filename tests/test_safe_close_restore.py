@@ -387,3 +387,22 @@ class MappingReviewTests(CloseDuringOperationTests):
         workbook.save(report)
         rows = self.window.read_mapping_review_candidates(report)
         self.assertEqual(["Номинальный ток", "Ток расцепителя"], [row["source_attribute"] for row in rows])
+
+
+class EtmCertificatesTests(CloseDuringOperationTests):
+    def test_certificate_dates_from_the_etm_tab(self) -> None:
+        from PySide6.QtWidgets import QPushButton
+
+        box = self.window.build_materials_box()
+        labels = [button.text() for button in box.findChildren(QPushButton)]
+        self.assertIn("Таблица сертификатов", labels)
+        self.assertIn("Взять даты из файла...", labels)
+        base = Path(self.temp_dir.name) / "base.sqlite"
+        make_base(base, "x")
+        self.window.db_path_edit.setText(str(base))
+        self.window.work_dir_edit.setText(self.temp_dir.name)
+        with mock.patch.object(self.window, "start_worker") as start:
+            self.window.run_certificates_table(log=self.window.fill_log)
+        start.assert_called_once()
+        self.assertIn("Обновляю таблицу сертификатов", self.window.fill_log.toPlainText())
+        self.assertNotIn("Обновляю таблицу сертификатов", self.window.raek_log.toPlainText())

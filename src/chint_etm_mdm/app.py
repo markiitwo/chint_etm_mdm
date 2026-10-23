@@ -922,7 +922,16 @@ class MainWindow(QMainWindow):
         import_old = QPushButton("Взять описания из файла ЭТМ...")
         import_old.setToolTip("Файл описаний, который уже загружали в ЭТМ: тексты попадут в таблицу серий")
         import_old.clicked.connect(self.import_old_descriptions)
-        for button in (make, from_report, descriptions, import_old):
+        # The same certificates table as on the RAEK tab: dates typed or taken once serve both partners.
+        certificates = QPushButton("Таблица сертификатов")
+        certificates.setToolTip("Даты сертификатов и отказных писем: вписываются один раз на документ, общие с РАЭК")
+        certificates.clicked.connect(lambda: self.run_certificates_table(log=self.fill_log))
+        self.write_action_buttons.append(certificates)
+        certificate_dates = QPushButton("Взять даты из файла...")
+        certificate_dates.setToolTip("Даты из файла, заполненного раньше: столбцы «Номер сертификата», «Начало/Окончание действия»")
+        certificate_dates.clicked.connect(lambda: self.run_certificates_table(ask_file=True, log=self.fill_log))
+        self.write_action_buttons.append(certificate_dates)
+        for button in (make, from_report, descriptions, import_old, certificates, certificate_dates):
             row.addWidget(button)
         row.addStretch(1)
         return box
@@ -1269,7 +1278,8 @@ class MainWindow(QMainWindow):
         self.raek_log.append(details)
         QMessageBox.critical(self, "Ошибка", plain_error(details))
 
-    def run_certificates_table(self, ask_file: bool = False) -> None:
+    def run_certificates_table(self, ask_file: bool = False, log: QTextEdit | None = None) -> None:
+        self.certificates_log = log or self.raek_log
         dates_file = None
         if ask_file:
             path, _ = QFileDialog.getOpenFileName(self, "Файл с датами сертификатов", str(self.incoming()[0]), "Excel (*.xlsx)")
@@ -1287,15 +1297,20 @@ class MainWindow(QMainWindow):
                 return
             codes_text = self.codes_file_edit.text().strip()
             codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
-            self.raek_log.append("Обновляю таблицу сертификатов...")
+            self.certificates_log.append("Обновляю таблицу сертификатов...")
             worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE, dates_file)
-            self.start_worker(worker, self.on_certificates_done, self.on_raek_failed)
+            self.start_worker(worker, self.on_certificates_done, self.on_certificates_failed)
         except Exception:
-            self.on_raek_failed(traceback.format_exc())
+            self.on_certificates_failed(traceback.format_exc())
+
+    def on_certificates_failed(self, details: str) -> None:
+        self.certificates_log.append("Ошибка.")
+        self.certificates_log.append(details)
+        QMessageBox.critical(self, "Ошибка", plain_error(details))
 
     def on_certificates_done(self, result: TableResult) -> None:
         for line in table_lines(result):
-            self.raek_log.append(line)
+            self.certificates_log.append(line)
         self.open_path(result.path)
 
     def write_pm_requests(self) -> None:
