@@ -150,16 +150,24 @@ class CertificatesWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, codes_file: Path | None, table_path: Path, dates_file: Path | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        codes_file: Path | None,
+        table_path: Path,
+        dates_file: Path | None = None,
+        cert_folder: Path | None = None,
+    ) -> None:
         super().__init__()
         self.db_path = db_path
         self.codes_file = codes_file
         self.table_path = table_path
         self.dates_file = dates_file
+        self.cert_folder = cert_folder
 
     def run(self) -> None:
         try:
-            self.done.emit(update_table(self.db_path, self.codes_file, self.table_path, dates_file=self.dates_file))
+            self.done.emit(update_table(self.db_path, self.codes_file, self.table_path, dates_file=self.dates_file, register_folder=self.cert_folder))
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -180,8 +188,10 @@ class RaekWorker(QThread):
         ask_site: bool = False,
         certificates_table: Path | None = None,
         answers_file: Path | None = None,
+        cert_folder: Path | None = None,
     ) -> None:
         super().__init__()
+        self.cert_folder = cert_folder
         self.certificates_table = certificates_table
         self.answers_file = answers_file
         self.db_path = db_path
@@ -205,6 +215,7 @@ class RaekWorker(QThread):
                     self.ask_site,
                     progress=self.progress.emit,
                     certificates_table=self.certificates_table,
+                    cert_folder=self.cert_folder,
                     answers_path=self.answers_file,
                 )
             )
@@ -539,8 +550,10 @@ class MaterialsWorker(QThread):
         output_dir: Path,
         codes_path: Path | None,
         needs: ReportNeeds | None = None,
+        cert_folder: Path | None = None,
     ) -> None:
         super().__init__()
+        self.cert_folder = cert_folder
         self.db_path = db_path
         self.articles = articles
         self.work_dir = work_dir
@@ -560,6 +573,7 @@ class MaterialsWorker(QThread):
                     progress=self.progress.emit,
                     wanted=self.needs.wanted if self.needs else None,
                     codes_missing=self.needs.codes_missing if self.needs else None,
+                    cert_folder=self.cert_folder,
                 )
             )
         except Exception:
@@ -694,6 +708,8 @@ class MainWindow(QMainWindow):
         self.backup_file_edit = QLineEdit()
         self.class_templates_edit = QLineEdit(self.config.class_templates_dir or self.default_class_templates_dir())
         self.codes_file_edit = QLineEdit(self.config.codes_file)
+        self.cert_folder_edit = QLineEdit(self.config.cert_folder)
+        self.cert_folder_edit.setPlaceholderText("не задана")
         self.inbox_dir_edit = QLineEdit(self.config.inbox_dir)
         self.inbox_dir_edit.setPlaceholderText("не задана — только «Загрузки»")
         self.new_since_edit = QDateEdit()
@@ -872,6 +888,8 @@ class MainWindow(QMainWindow):
             ("Папка входящих", self.inbox_dir_edit, self.choose_inbox_dir, "Куда приходят файлы: архивы РАЭК, шаблоны ЭТМ, файл ЧЗ"),
             ("Шаблоны классов ЭТМ", self.class_templates_edit, self.choose_class_templates_dir, "Скачанные шаблоны программа забирает сюда сама"),
             ("Файл ЧЗ", self.codes_file_edit, self.choose_codes_file, "Коды, сертификаты и ссылки на реестр"),
+            ("Папка сертификатов", self.cert_folder_edit, self.choose_cert_folder,
+             "Папка с PDF документов и «Перечнем документов…xlsx»: даты и файлы для ЭТМ и РАЭК"),
         )
         for row, (label, edit, choose, tip) in enumerate(rows):
             caption = QLabel(label)
@@ -1004,7 +1022,7 @@ class MainWindow(QMainWindow):
                 self.fill_log.append(f"Готовлю материалы для {len(articles)} товаров...")
             else:
                 self.fill_log.append("Готовлю материалы по отчёту ЭТМ...")
-            worker = MaterialsWorker(db_path, articles, Path(work_text), output, codes_path, needs)
+            worker = MaterialsWorker(db_path, articles, Path(work_text), output, codes_path, needs, self.cert_folder())
             self.start_worker(worker, self.on_materials_done, self.on_fill_failed)
         except Exception:
             self.on_fill_failed(traceback.format_exc())
@@ -1295,7 +1313,9 @@ class MainWindow(QMainWindow):
             site_cache = site_cache_path(Path(work_text)) if work_text else None
             table = Path(work_text) / CERTIFICATES_TABLE if work_text else None
             answers = answers_path(Path(work_text)) if work_text else None
-            worker = RaekWorker(db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site, table, answers)
+            worker = RaekWorker(
+                db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site, table, answers, self.cert_folder()
+            )
             self.start_worker(worker, self.on_raek_done, self.on_raek_failed)
         except Exception:
             self.on_raek_failed(traceback.format_exc())
@@ -1337,7 +1357,7 @@ class MainWindow(QMainWindow):
             codes_text = self.codes_file_edit.text().strip()
             codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             self.certificates_log.append("Обновляю таблицу сертификатов...")
-            worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE, dates_file)
+            worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE, dates_file, self.cert_folder())
             self.start_worker(worker, self.on_certificates_done, self.on_certificates_failed)
         except Exception:
             self.on_certificates_failed(traceback.format_exc())
@@ -1670,6 +1690,16 @@ class MainWindow(QMainWindow):
             self.class_templates_edit.setText(path)
             self.save_current_config()
 
+    def choose_cert_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Папка сертификатов", self.cert_folder_edit.text().strip())
+        if path:
+            self.cert_folder_edit.setText(path)
+            self.save_current_config()
+
+    def cert_folder(self) -> Path | None:
+        text = self.cert_folder_edit.text().strip()
+        return Path(text) if text else None
+
     def choose_codes_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Файл ЧЗ с кодами ТН ВЭД и ОКПД2", "", "Excel (*.xlsx *.xlsm);;All files (*)"
@@ -1954,6 +1984,7 @@ class MainWindow(QMainWindow):
             last_new_since=self.config.last_new_since,
             last_etm_articles=self.config.last_etm_articles,
             inbox_dir=self.inbox_dir_edit.text().strip(),
+            cert_folder=self.cert_folder_edit.text().strip(),
         )
         if self.config.work_path:
             ensure_work_dirs(self.config.work_path)

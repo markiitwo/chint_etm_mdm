@@ -243,3 +243,49 @@ class EtmReportTests(MaterialsTests):
         self.assertNotIn(("616173", "Фото"), checks)  # the card has a photo: nothing asked
         codes = load_workbook(result.summary_path)["Коды в карточке"]
         self.assertEqual(("616173", "Код ТН ВЭД"), (codes["A2"].value, codes["C2"].value))
+
+
+def make_cert_folder(folder: Path, rows: list[list[object]], pdfs: list[str]) -> None:
+    """The certification team's folder: «Перечень документов….xlsx» and the PDFs in subfolders."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "LV"
+    sheet.append(["Производитель", "Серия", "Тип документа", "Номер сертификата ", "Выдан", "Действ. до ",
+                  "Название документа в папке VALID CERTIFICATES"])
+    for row in rows:
+        sheet.append(row)
+    folder.mkdir(parents=True, exist_ok=True)
+    workbook.save(folder / "Перечень документов upd 2026-10-12.xlsx")
+    for name in pdfs:
+        path = folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"%PDF-1.4 " + name.encode())
+
+
+class CertificatesFolderTests(MaterialsTests):
+    def test_dates_and_pdfs_from_the_certificates_folder(self) -> None:
+        workbook = load_workbook(self.chz)
+        workbook.active.append([777, "NXB", "ОР-25/06-0035", None, None, None])  # a refusal letter, no dates anywhere else
+        workbook.save(self.chz)
+        folder = self.root / "Сертификаты"
+        make_cert_folder(
+            folder,
+            [
+                ["CHINT", "NVF7", "ДС 004", NUMBER, dt.datetime(2024, 5, 6), dt.datetime(2029, 5, 5), "ДС 004 NVF7"],
+                ["CHINT", "LMI", "ОР 004", "ОР-25/06-0035", dt.datetime(2025, 6, 30), "бессрочно", "ОР_004 LMI механические блокировки"],
+            ],
+            ["Актуальные декларации ТР ТС/ДС 004 NVF7.pdf", "Отрицательные решения/ОР_004 LMI механические блокировки.pdf"],
+        )
+        result = m.make_materials(
+            self.db, ["616173", "777"], self.work, self.root / "out", self.chz, fetch_page=self.site,
+            fetch_file=self.fetch_file, today=dt.date(2026, 10, 22), site_delay=0, cert_folder=folder,
+        )
+        rows = {row["Расширенный артикул"]: row for row in read_csv(result.files["Сертификаты"])}
+        self.assertEqual(("06.05.2024", "05.05.2029"), (rows["616173"]["Начало срока действия"], rows["616173"]["Окончание срока действия"]))
+        letter = rows["777"]
+        self.assertEqual(("ПОТКАЗ", "", ""), (letter["Код типа сертификата"], letter["Код аккредитации"], letter["Ссылка на запись документа в реестре"]))
+        self.assertEqual(("30.06.2025", "30.06.2035"), (letter["Начало срока действия"], letter["Окончание срока действия"]))  # «бессрочно»: +10 years
+        files = result.output_dir / m.FILES_DIR
+        self.assertIn("ОР_004 LMI".encode(), (files / letter["Имя файла"]).read_bytes())
+        self.assertIn("ДС 004 NVF7".encode(), (files / rows["616173"]["Имя файла"]).read_bytes())  # the folder's file, not the site's
+        self.assertFalse(any(row.form == "Сертификаты" for row in result.checks))

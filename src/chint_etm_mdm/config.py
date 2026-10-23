@@ -25,6 +25,7 @@ class AppConfig:
     last_new_since: str = ""
     inbox_dir: str = ""  # where incoming files land: the RDP shared folder now, the company share later
     last_etm_articles: str = ""  # the products of the last ETM cards run, for "Повторить"
+    cert_folder: str = ""  # the certification team's folder: PDFs and «Перечень документов….xlsx»
 
     @property
     def work_path(self) -> Path | None:
@@ -86,6 +87,7 @@ def load_config() -> AppConfig:
         last_new_since=text_setting(raw, "last_new_since"),
         inbox_dir=text_setting(raw, "inbox_dir"),
         last_etm_articles=text_setting(raw, "last_etm_articles"),
+        cert_folder=text_setting(raw, "cert_folder"),
     )
 
 

@@ -36,10 +36,12 @@ from .certificates import (
     TABLE_NAME as CERTIFICATES_TABLE,
     as_date,
     is_eaeu_document,
+    folder_pdfs,
     is_refusal_letter,
     letter_date,
     number_key,
     read_chz,
+    register_documents,
     table_dates,
 )
 from .filler import normalize_article
@@ -406,6 +408,7 @@ def make_materials(
     site_delay: float | None = None,
     wanted: dict[str, set[str]] | None = None,
     codes_missing: dict[str, list[str]] | None = None,
+    cert_folder: Path | None = None,
 ) -> MaterialsResult:
     """The four ETM forms for the products, the files to upload with them and a summary.
 
@@ -482,7 +485,9 @@ def make_materials(
     # Certificates: number and registry link from ЧЗ, dates from the table, the PDF from the site.
     cert_rows = []
     chz = {row["article"]: row for row in read_chz(codes_path)}
-    dates = table_dates(work_dir / CERTIFICATES_TABLE)
+    register = register_documents(cert_folder)
+    dates = table_dates(work_dir / CERTIFICATES_TABLE, register)
+    folder_files = folder_pdfs(cert_folder) if register else {}
     pdf_by_number: dict[str, str] = {}
     for article in articles:
         record = records[article]
@@ -525,10 +530,21 @@ def make_materials(
             continue
         name = certificate_file_name(number)
         if key not in saved:
-            pdf = pdf_by_number.get(key, "")
-            saved[key] = bool(pdf) and download(pdf, files_dir / name, file_cache, fetch_file)
-            result.downloaded += saved[key]
-            if not saved[key]:
+            in_folder = folder_files.get(" ".join(register[key].file.split()).casefold()) if key in register else None
+            if in_folder is not None:
+                files_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(in_folder, files_dir / name)
+                saved[key] = True
+            else:
+                pdf = pdf_by_number.get(key, "")
+                saved[key] = bool(pdf) and download(pdf, files_dir / name, file_cache, fetch_file)
+                result.downloaded += saved[key]
+            if not saved[key] and key in register:
+                result.checks.append(
+                    CheckRow(article, "Сертификаты", f"в папке сертификатов нет файла «{register[key].file}.pdf» для «{number}»",
+                             f"поправьте имя в перечне или положите файл {name} в папку «{FILES_DIR}» сами")
+                )
+            elif not saved[key]:
                 result.checks.append(CheckRow(article, "Сертификаты", f"нет PDF документа «{number}» на сайте", f"положите файл {name} в папку «{FILES_DIR}» сами"))
         cert_rows.append(
             [MANUFACTURER_CODE, article, number, accreditation, kind, f"{start:%d.%m.%Y}", f"{end:%d.%m.%Y}", name, link]

@@ -8,6 +8,7 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from chint_etm_mdm.certificates import (
+    FROM_REGISTER,
     FROM_DB,
     FROM_FILE,
     FROM_USER,
@@ -136,6 +137,48 @@ class CertificateTableTests(unittest.TestCase):
         # Later updates without the file keep its dates.
         update_table(self.db, self.chz, self.table)
         self.assertEqual((dt.datetime(2023, 12, 22), dt.datetime(2028, 12, 21), FROM_FILE), self.rows()[CERT][2:5])
+
+    def test_register_of_the_certificates_folder(self) -> None:
+        from test_etm_materials import make_cert_folder
+
+        make_chz(self.chz)
+        folder = self.root / "Сертификаты"
+
+        def register(cert_end: dt.datetime) -> None:
+            make_cert_folder(
+                folder,
+                [
+                    ["CHINT", "NKB1", "СС 004", CERT, dt.datetime(2023, 12, 22), cert_end, "Пускатель NKB"],
+                    ["CHINT", "NVF7", "ДС 004", DECL, dt.datetime(2024, 7, 25), dt.datetime(2029, 7, 25), "ДС NVF7"],
+                    ["CHINT", "LMI", "ОР 004", "ОР-25/06-0035", dt.datetime(2025, 6, 30), "бессрочно", "ОР LMI"],
+                ],
+                [],
+            )
+
+        register(dt.datetime(2027, 12, 21))  # a mistake in the register: the registry says 2028
+        update_table(self.db, self.chz, self.table, register_folder=folder)
+        rows = self.rows()
+        self.assertEqual((dt.datetime(2023, 12, 22), dt.datetime(2027, 12, 21), FROM_REGISTER), rows[CERT][2:5])
+        self.assertEqual((dt.datetime(2025, 6, 30), None, FROM_REGISTER), rows["ОР-25/06-0035"][2:5])
+        self.assertIsNone(rows[DECL][9])
+
+        # The user checks the registry and types the right end date: it stays, the register's is shown beside it.
+        workbook = load_workbook(self.table)
+        for row in workbook["Сертификаты"].iter_rows(min_row=2):
+            if row[0].value == CERT:
+                row[3].value = dt.datetime(2028, 12, 21)
+        workbook.save(self.table)
+        result = update_table(self.db, self.chz, self.table, register_folder=folder)
+        rows = self.rows()
+        self.assertEqual((dt.datetime(2028, 12, 21), FROM_USER), rows[CERT][3:5])
+        self.assertEqual("в перечне: с 22.12.2023 до 21.12.2027 — проверьте в реестре", rows[CERT][9])
+        self.assertEqual(1, result.conflicts)
+
+        # The register is fixed: nothing to point at any more.
+        register(dt.datetime(2028, 12, 21))
+        result = update_table(self.db, self.chz, self.table, register_folder=folder)
+        self.assertIsNone(self.rows()[CERT][9])
+        self.assertEqual(0, result.conflicts)
 
     def test_date_column_names(self) -> None:
         def found(names):
