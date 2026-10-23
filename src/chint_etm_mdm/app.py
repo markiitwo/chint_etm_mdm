@@ -600,14 +600,6 @@ class DimensionClearWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
-def note(text: str) -> QLabel:
-    """A grey line that explains a block; the buttons say what they do."""
-    label = QLabel(text)
-    label.setWordWrap(True)
-    label.setProperty("note", True)
-    return label
-
-
 def plain_error(details: str) -> str:
     """The message for the user; the full traceback stays in the log."""
     if "PermissionError" in details:
@@ -703,17 +695,17 @@ class MainWindow(QMainWindow):
         self.class_templates_edit = QLineEdit(self.config.class_templates_dir or self.default_class_templates_dir())
         self.codes_file_edit = QLineEdit(self.config.codes_file)
         self.inbox_dir_edit = QLineEdit(self.config.inbox_dir)
-        self.inbox_dir_edit.setPlaceholderText("например, общая папка RDP; пусто — только «Загрузки»")
+        self.inbox_dir_edit.setPlaceholderText("не задана — только «Загрузки»")
         self.new_since_edit = QDateEdit()
         self.new_since_edit.setCalendarPopup(True)
         self.new_since_edit.setDisplayFormat("dd.MM.yyyy")
         last_since = QDate.fromString(self.config.last_new_since, "dd.MM.yyyy")
         self.new_since_edit.setDate(last_since if last_since.isValid() else QDate.currentDate().addDays(-30))
-        self.etm_new_mode = QRadioButton("Новинки, появившиеся после")
-        self.etm_list_mode = QRadioButton("Эти артикулы")
+        self.etm_new_mode = QRadioButton("Новинки с")
+        self.etm_list_mode = QRadioButton("Артикулы")
         self.etm_new_mode.setChecked(True)
         self.etm_articles_edit = QPlainTextEdit()
-        self.etm_articles_edit.setPlaceholderText("Артикулы через пробел, запятую или с новой строки")
+        self.etm_articles_edit.setPlaceholderText("через пробел, запятую или с новой строки")
         self.etm_articles_edit.setMaximumHeight(70)
         self.etm_articles_edit.textChanged.connect(lambda: self.etm_list_mode.setChecked(True))
         self.last_new_products_dir: Path | None = None
@@ -722,15 +714,16 @@ class MainWindow(QMainWindow):
         self.open_new_products_dir_button = QPushButton("Открыть папку")
         self.open_new_products_summary_button = QPushButton("Открыть итог")
         self.etm_pm_request_button = QPushButton("Запросить у продактов")
-        self.etm_again_button = QPushButton("Ещё раз для тех же товаров")
+        self.etm_again_button = QPushButton("Повторить")
         self.raek_zip_edit = QLineEdit()
-        self.raek_zip_edit.setPlaceholderText("самый свежий архив РАЭК из папки входящих или «Загрузок»")
-        self.raek_site_check = QCheckBox("Сначала взять ссылки, картинки и сертификаты с сайта ensmas.ru (нужен интернет)")
+        self.raek_zip_edit.setPlaceholderText("авто: самый свежий архив из входящих или «Загрузок»")
+        self.raek_site_check = QCheckBox("Дополнить данными с ensmas.ru")
         self.raek_site_check.setChecked(True)
+        self.raek_site_check.setToolTip("Сначала спросить сайт о ссылках, картинках и сертификатах товаров (нужен интернет)")
         self.raek_log = QTextEdit()
         self.raek_log.setReadOnly(True)
         self.last_raek_result: RaekResult | None = None
-        self.open_raek_dir_button = QPushButton("Открыть папку с архивом")
+        self.open_raek_dir_button = QPushButton("Открыть папку")
         self.open_raek_report_button = QPushButton("Открыть отчёт")
         self.pm_request_button = QPushButton("Запросить у продактов")
         self.coverage_table = QTableWidget(0, 8)
@@ -759,6 +752,8 @@ class MainWindow(QMainWindow):
         self.rules_log.setReadOnly(True)
         self.reference_log = QTextEdit()
         self.reference_log.setReadOnly(True)
+        for log in (self.fill_log, self.raek_log, self.price_log, self.reference_log):
+            log.setPlaceholderText("Журнал")
 
         self.setCentralWidget(self.build_ui())
         self.refresh_database_status()
@@ -859,7 +854,6 @@ class MainWindow(QMainWindow):
             " QGroupBox { font-weight: 600; margin-top: 12px; padding-top: 8px; }"
             " QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
             " QGroupBox QWidget { font-weight: normal; }"
-            ' QLabel[note="true"] { color: palette(placeholder-text); }'
         )
         layout = QVBoxLayout(root)
         layout.addWidget(self.tabs)
@@ -888,7 +882,7 @@ class MainWindow(QMainWindow):
             button = QPushButton("Выбрать...")
             button.clicked.connect(choose)
             form.addWidget(button, row, 2)
-        self.codes_file_edit.setPlaceholderText("пусто — самый свежий файл ЧЗ из папки входящих или «Загрузок»")
+        self.codes_file_edit.setPlaceholderText("авто: самый свежий из входящих или «Загрузок»")
 
         base_box = QGroupBox("База")
         base = QVBoxLayout(base_box)
@@ -933,27 +927,20 @@ class MainWindow(QMainWindow):
         return root
 
     def build_materials_box(self) -> QGroupBox:
-        """After the cards: photos, technical information, certificates and descriptions for the same products."""
-        box = QGroupBox("3. Материалы для карточек: фото, документы, сертификаты, описания")
-        layout = QVBoxLayout(box)
-        row = QHBoxLayout()
+        box = QGroupBox("Материалы")
+        row = QHBoxLayout(box)
         make = QPushButton("Сделать материалы")
         make.setProperty("primary", True)
-        make.setToolTip("Для товаров последних карточек (или вписанных артикулов): четыре формы ЭТМ и файлы к ним")
+        make.setToolTip("Фото, тех. информация, сертификаты и описания для товаров последних карточек — четыре формы ЭТМ")
         make.clicked.connect(lambda: self.run_materials())
         self.write_action_buttons.append(make)
         from_report = QPushButton("По отчёту ЭТМ...")
-        from_report.setToolTip(
-            "Список товаров ЭТМ («Наличие Фото», «Наличие описания»...) или отчёт по сертификатам: "
-            "материалы только для того, чего в карточках не хватает"
-        )
+        from_report.setToolTip("Отчёт из личного кабинета ЭТМ: материалы только для того, чего в карточках не хватает")
         from_report.clicked.connect(self.run_materials_from_report)
         self.write_action_buttons.append(from_report)
-        for button in (make, from_report):
-            row.addWidget(button)
+        row.addWidget(make)
+        row.addWidget(from_report)
         row.addStretch(1)
-        layout.addLayout(row)
-        layout.addWidget(note("Тексты описаний серий и даты сертификатов — на вкладке «Справочники»: вписываются один раз, общие для ЭТМ и РАЭК."))
         return box
 
     def materials_articles(self) -> list[str]:
@@ -1073,7 +1060,7 @@ class MainWindow(QMainWindow):
 
     def build_own_template_box(self) -> QGroupBox:
         """Filling a template the user picked by hand: a class the program did not choose, or any other file."""
-        outer = QGroupBox("Свой шаблон upload_goods (класс выбран вручную)")
+        outer = QGroupBox("Свой шаблон upload_goods")
         layout = QVBoxLayout(outer)
 
         box = QWidget()
@@ -1120,17 +1107,10 @@ class MainWindow(QMainWindow):
         return outer
 
     def build_etm_tab(self) -> QWidget:
-        """Cards for ETM, step by step: which products, the cards, the materials. Rare tools are folded below."""
         root = QWidget()
         layout = QVBoxLayout(root)
-        intro = QLabel(
-            "Программа подберёт товарам классы ЭТМ, заполнит шаблоны классов и соберёт всё в одну папку: "
-            "«Итог.xlsx» (что делать и что проверить), файлы для загрузки и файлы на проверку."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
 
-        box = QGroupBox("1. Товары")
+        box = QGroupBox("Товары")
         form = QGridLayout(box)
         form.addWidget(self.etm_new_mode, 0, 0)
         form.addWidget(self.new_since_edit, 0, 1)
@@ -1138,11 +1118,11 @@ class MainWindow(QMainWindow):
         form.addWidget(self.etm_articles_edit, 1, 1, 1, 2)
         form.setColumnStretch(2, 1)
 
-        cards = QGroupBox("2. Карточки")
-        cards_layout = QVBoxLayout(cards)
-        actions = QHBoxLayout()
+        cards = QGroupBox("Карточки")
+        grid = QGridLayout(cards)
         self.etm_run_button = run_button = QPushButton("Сделать карточки")
         run_button.setProperty("primary", True)
+        run_button.setToolTip("Подобрать классы ЭТМ, заполнить шаблоны классов, собрать папку с Итог.xlsx")
         run_button.clicked.connect(lambda: self.run_new_products())  # not the button's "checked" flag as articles
         self.etm_again_button.setToolTip("Те же товары, что в прошлый раз: например, когда пришли ответы продактов или шаблоны")
         self.etm_again_button.clicked.connect(self.run_etm_again)
@@ -1151,37 +1131,25 @@ class MainWindow(QMainWindow):
         self.open_new_products_summary_button.clicked.connect(self.open_new_products_summary)
         self.open_new_products_dir_button.setEnabled(False)
         self.open_new_products_summary_button.setEnabled(False)
-        for button in (run_button, self.etm_again_button):
-            actions.addWidget(button)
-        actions.addStretch(1)
-        for button in (self.open_new_products_summary_button, self.open_new_products_dir_button):
-            actions.addWidget(button)
-        cards_layout.addLayout(actions)
-
-        pm_actions = QHBoxLayout()
-        pm_actions.addWidget(QLabel("Пустые поля:"))
         self.etm_pm_request_button.setToolTip("Пустые поля карточек — Excel каждому продакту и черновик письма")
         self.etm_pm_request_button.clicked.connect(self.write_etm_pm_requests)
         # Also after a restart, for the newest run that has empty fields.
         self.etm_pm_request_button.setEnabled(self.saved_etm_needs() is not None)
-        pm_answers = QPushButton("Принять ответы продактов...")
+        pm_answers = QPushButton("Принять ответы...")
         pm_answers.setToolTip("Файлы-запросы, которые продакты прислали обратно: ответы идут в следующие карточки")
         pm_answers.clicked.connect(lambda: self.import_pm_answers(self.fill_log, offer_cards=True))
-        pm_actions.addWidget(self.etm_pm_request_button)
-        pm_actions.addWidget(pm_answers)
-        pm_actions.addStretch(1)
-        cards_layout.addLayout(pm_actions)
+        grid.addWidget(run_button, 0, 0)
+        grid.addWidget(self.etm_again_button, 0, 1)
+        grid.addWidget(self.etm_pm_request_button, 1, 0)
+        grid.addWidget(pm_answers, 1, 1)
+        grid.setColumnStretch(2, 1)
+        grid.addWidget(self.open_new_products_summary_button, 0, 3)
+        grid.addWidget(self.open_new_products_dir_button, 0, 4)
 
         layout.addWidget(box)
         layout.addWidget(cards)
         layout.addWidget(self.build_materials_box())
-        layout.addWidget(
-            self.folded(
-                "Дополнительно: свой шаблон upload_goods и ручные дозаполнения",
-                [self.build_own_template_box(), self.build_manual_import_box()],
-            )
-        )
-        layout.addWidget(QLabel("Журнал"))
+        layout.addWidget(self.folded("Свой шаблон и ручные правки", [self.build_own_template_box(), self.build_manual_import_box()]))
         layout.addWidget(self.fill_log, stretch=1)
         return root
 
@@ -1215,119 +1183,87 @@ class MainWindow(QMainWindow):
     def build_raek_tab(self) -> QWidget:
         root = QWidget()
         layout = QVBoxLayout(root)
-        intro = QLabel(
-            "Сохраните архив от менеджера РАЭК в папку входящих или в «Загрузки» и нажмите «Заполнить архив РАЭК». "
-            "Программа заполнит пустые клетки и положит рядом готовый архив для ответа и отчёт. Заполненное РАЭК не трогает."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
 
-        box = QGroupBox("1. Архив")
-        form = QFormLayout(box)
-        zip_row = QHBoxLayout()
-        zip_row.addWidget(self.raek_zip_edit)
+        box = QGroupBox("Архив")
+        grid = QGridLayout(box)
         choose = QPushButton("Выбрать...")
         choose.clicked.connect(self.choose_raek_zip)
-        zip_row.addWidget(choose)
-        form.addRow("Архив РАЭК", zip_row)
-        form.addRow("", self.raek_site_check)
-
-        fill = QGroupBox("2. Заполнение")
-        actions = QHBoxLayout(fill)
-        run_button = QPushButton("Заполнить архив РАЭК")
+        run_button = QPushButton("Заполнить архив")
         run_button.setProperty("primary", True)
+        run_button.setToolTip("Заполнить пустые клетки; готовый архив и отчёт лягут рядом. Заполненное РАЭК не меняется")
         run_button.clicked.connect(self.run_raek)
         self.write_action_buttons.append(run_button)
         self.open_raek_dir_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.output_path.parent))
         self.open_raek_report_button.clicked.connect(lambda: self.last_raek_result and self.open_path(self.last_raek_result.report_path))
         self.open_raek_dir_button.setEnabled(False)
         self.open_raek_report_button.setEnabled(False)
-        actions.addWidget(run_button)
-        actions.addStretch(1)
-        actions.addWidget(self.open_raek_report_button)
-        actions.addWidget(self.open_raek_dir_button)
+        grid.addWidget(self.raek_zip_edit, 0, 0, 1, 4)
+        grid.addWidget(choose, 0, 4)
+        grid.addWidget(self.raek_site_check, 1, 0, 1, 4)
+        grid.addWidget(run_button, 2, 0)
+        grid.setColumnStretch(1, 1)
+        grid.addWidget(self.open_raek_report_button, 2, 3)
+        grid.addWidget(self.open_raek_dir_button, 2, 4)
 
-        rest = QGroupBox("3. Что не заполнилось")
-        pm_actions = QHBoxLayout(rest)
+        rest = QGroupBox("Незаполненное")
+        row = QHBoxLayout(rest)
         self.pm_request_button.setToolTip("Excel-запрос каждому продакту о том, чего нет в базе, и черновик письма с ним")
         self.pm_request_button.clicked.connect(self.write_pm_requests)
         self.pm_request_button.setEnabled(False)
-        pm_answers = QPushButton("Принять ответы продактов...")
+        pm_answers = QPushButton("Принять ответы...")
         pm_answers.setToolTip("Файлы-запросы, которые продакты прислали обратно: ответы сразу идут в заполнение")
         pm_answers.clicked.connect(self.import_pm_answers)
         remember = QPushButton("Запомнить ответы из отчёта...")
-        remember.setToolTip("Ответы «да/нет» на листе «Названия» отчёта РАЭК: в следующий раз программа их не спросит")
+        remember.setToolTip("Ответы «да/нет» с листа «Названия» отчёта РАЭК: в следующий раз программа их не спросит")
         remember.clicked.connect(self.remember_raek_answers)
         for button in (self.pm_request_button, pm_answers, remember):
-            pm_actions.addWidget(button)
-        pm_actions.addStretch(1)
+            row.addWidget(button)
+        row.addStretch(1)
 
         layout.addWidget(box)
-        layout.addWidget(fill)
         layout.addWidget(rest)
-        layout.addWidget(QLabel("Журнал"))
         layout.addWidget(self.raek_log, stretch=1)
         return root
 
     def build_reference_tab(self) -> QWidget:
-        """Data kept once and used by both partners: certificate dates, series descriptions, ETM's lists."""
+        """Data kept once and used by both partners."""
         root = QWidget()
         layout = QVBoxLayout(root)
-        intro = QLabel("То, что заполняется один раз и дальше подставляется само — и в ЭТМ, и в РАЭК.")
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
-        certificates_box = QGroupBox("Сертификаты и отказные письма")
-        certificates_layout = QVBoxLayout(certificates_box)
-        certificates_layout.addWidget(
-            note("«Сертификаты.xlsx» в рабочей папке: строка на документ из файла ЧЗ. Даты вписываются один раз на документ.")
+        groups = (
+            (
+                "Сертификаты и отказные письма",
+                [
+                    ("Открыть таблицу", "Сертификаты.xlsx: документы из файла ЧЗ, даты вписываются один раз на документ",
+                     lambda: self.run_certificates_table(log=self.reference_log), True),
+                    ("Взять даты из файла...", "Файл, заполненный раньше: «Номер сертификата», «Начало/Окончание действия»",
+                     lambda: self.run_certificates_table(ask_file=True, log=self.reference_log), True),
+                ],
+            ),
+            (
+                "Описания серий",
+                [
+                    ("Открыть таблицу", "Описания серий.xlsx: текст на серию, новые серии добавляются пустыми строками",
+                     self.open_descriptions_table, False),
+                    ("Взять из файла ЭТМ...", "Файл описаний, который уже загружали в ЭТМ", self.import_old_descriptions, False),
+                ],
+            ),
+            (
+                "Справочник характеристик ЭТМ",
+                [("Загрузить...", "Файл «Справочник» из iPRO OneTeam: допустимые значения характеристик", self.import_etm_reference_file, False)],
+            ),
         )
-        row = QHBoxLayout()
-        certificates = QPushButton("Открыть таблицу сертификатов")
-        certificates.setToolTip("Обновить таблицу по свежему файлу ЧЗ и открыть: новые документы добавятся, вписанные даты останутся")
-        certificates.clicked.connect(lambda: self.run_certificates_table(log=self.reference_log))
-        self.write_action_buttons.append(certificates)
-        certificate_dates = QPushButton("Взять даты из файла...")
-        certificate_dates.setToolTip("Даты из файла, заполненного раньше: столбцы «Номер сертификата», «Начало/Окончание действия»")
-        certificate_dates.clicked.connect(lambda: self.run_certificates_table(ask_file=True, log=self.reference_log))
-        self.write_action_buttons.append(certificate_dates)
-        row.addWidget(certificates)
-        row.addWidget(certificate_dates)
-        row.addStretch(1)
-        certificates_layout.addLayout(row)
-
-        descriptions_box = QGroupBox("Описания серий для ЭТМ")
-        descriptions_layout = QVBoxLayout(descriptions_box)
-        descriptions_layout.addWidget(
-            note("«Описания серий.xlsx»: один текст на серию из каталога, программа ставит его всем товарам серии.")
-        )
-        row = QHBoxLayout()
-        descriptions = QPushButton("Открыть описания серий")
-        descriptions.setToolTip("Новые серии последних карточек добавятся пустыми строками")
-        descriptions.clicked.connect(self.open_descriptions_table)
-        import_old = QPushButton("Взять описания из файла ЭТМ...")
-        import_old.setToolTip("Файл описаний, который уже загружали в ЭТМ: тексты попадут в таблицу серий")
-        import_old.clicked.connect(self.import_old_descriptions)
-        row.addWidget(descriptions)
-        row.addWidget(import_old)
-        row.addStretch(1)
-        descriptions_layout.addLayout(row)
-
-        lists_box = QGroupBox("Справочник характеристик ЭТМ")
-        lists_layout = QVBoxLayout(lists_box)
-        lists_layout.addWidget(note("Допустимые значения характеристик из iPRO OneTeam: по ним программа подбирает значения в карточках."))
-        row = QHBoxLayout()
-        import_reference = QPushButton("Загрузить справочник ЭТМ...")
-        import_reference.setToolTip("Файл «Справочник» из iPRO OneTeam")
-        import_reference.clicked.connect(self.import_etm_reference_file)
-        row.addWidget(import_reference)
-        row.addStretch(1)
-        lists_layout.addLayout(row)
-
-        layout.addWidget(certificates_box)
-        layout.addWidget(descriptions_box)
-        layout.addWidget(lists_box)
-        layout.addWidget(QLabel("Журнал"))
+        for title, buttons in groups:
+            box = QGroupBox(title)
+            row = QHBoxLayout(box)
+            for text, tip, action, writes in buttons:
+                button = QPushButton(text)
+                button.setToolTip(tip)
+                button.clicked.connect(action)
+                if writes:
+                    self.write_action_buttons.append(button)
+                row.addWidget(button)
+            row.addStretch(1)
+            layout.addWidget(box)
         layout.addWidget(self.reference_log, stretch=1)
         return root
 
@@ -1503,7 +1439,7 @@ class MainWindow(QMainWindow):
                 return
         lines.append(
             "Ответы будут использованы при следующем заполнении архива РАЭК и карточек ЭТМ "
-            "(для карточек — кнопка «Ещё раз для тех же товаров»)."
+            "(для карточек — кнопка «Повторить»)."
         )
         for line in lines:
             log.append(line)
@@ -1545,44 +1481,44 @@ class MainWindow(QMainWindow):
         choose_filled = QPushButton("Выбрать...")
         choose_filled.clicked.connect(self.choose_manual_filled_file)
         filled_row.addWidget(choose_filled)
-        form.addRow("Дозаполненный _filled.xlsx", filled_row)
+        form.addRow("Файл _filled.xlsx", filled_row)
 
         actions = QHBoxLayout()
-        import_button = QPushButton("Импортировать ручные значения")
+        import_button = QPushButton("Импортировать правки")
         import_button.clicked.connect(self.run_manual_import)
         self.open_manual_report_button.clicked.connect(self.open_manual_report)
         self.open_manual_report_button.setEnabled(False)
         actions.addWidget(import_button)
-        actions.addWidget(self.open_manual_report_button)
         actions.addStretch(1)
-        form.addRow("Действия", actions)
+        actions.addWidget(self.open_manual_report_button)
+        form.addRow("", actions)
         return box
 
     def build_price_tab(self) -> QWidget:
         root = QWidget()
         layout = QVBoxLayout(root)
 
-        box = QGroupBox("1. Прайс-лист CHINT")
+        box = QGroupBox("Прайс-лист")
         form = QFormLayout(box)
         price_row = QHBoxLayout()
         price_row.addWidget(self.price_file_edit)
         choose_price = QPushButton("Выбрать...")
         choose_price.clicked.connect(self.choose_price_file)
         price_row.addWidget(choose_price)
-        form.addRow("Файл XLSX", price_row)
+        form.addRow("Файл", price_row)
         url_row = QHBoxLayout()
         url_row.addWidget(self.price_url_edit)
         find_price = QPushButton("Найти на сайте")
         find_price.setToolTip("Взять с ensmas.ru ссылку на самый свежий низковольтный прайс")
         find_price.clicked.connect(self.find_latest_price)
         url_row.addWidget(find_price)
-        form.addRow("или ссылка", url_row)
+        form.addRow("Ссылка", url_row)
 
         actions = QHBoxLayout()
         self.import_price_file_button = QPushButton("Импортировать файл")
         self.import_price_file_button.setProperty("primary", True)
         self.import_price_file_button.clicked.connect(self.run_price_import_from_file)
-        self.download_import_price_button = QPushButton("Скачать по ссылке и импортировать")
+        self.download_import_price_button = QPushButton("Скачать и импортировать")
         self.download_import_price_button.clicked.connect(self.run_price_import_from_url)
         self.open_price_file_button.clicked.connect(self.open_price_file)
         self.open_price_file_button.setEnabled(False)
@@ -1606,13 +1542,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(box)
         layout.addWidget(self.build_etim_box())
         layout.addWidget(check_box)
-        layout.addWidget(QLabel("Журнал обновления базы"))
         layout.addWidget(self.price_log, stretch=1)
         self.write_action_buttons += [self.audit_dimensions_button, self.import_price_file_button, self.download_import_price_button]
         return root
 
     def build_etim_box(self) -> QGroupBox:
-        box = QGroupBox("2. ETIM-файл: размеры и характеристики")
+        box = QGroupBox("ETIM")
         form = QFormLayout(box)
 
         etim_row = QHBoxLayout()
@@ -1620,7 +1555,7 @@ class MainWindow(QMainWindow):
         choose_etim = QPushButton("Выбрать...")
         choose_etim.clicked.connect(self.choose_etim_file)
         etim_row.addWidget(choose_etim)
-        form.addRow("Файл XLSX", etim_row)
+        form.addRow("Файл", etim_row)
 
         actions = QHBoxLayout()
         self.import_etim_button = QPushButton("Импортировать ETIM")
@@ -2530,7 +2465,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Прайс найден",
-            "Ссылка подставлена в поле.\nТеперь можно нажать «Скачать по ссылке и импортировать».",
+            "Ссылка подставлена в поле.\nТеперь можно нажать «Скачать и импортировать».",
         )
 
     def on_price_import_failed(self, details: str) -> None:

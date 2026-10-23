@@ -354,7 +354,7 @@ class SummaryUsabilityTests(CategoryTemplateTests):
 
         summary = load_workbook(run.summary_path)
         todo = "\n".join(str(row[0] or "") for row in summary["Что делать"].iter_rows(values_only=True))
-        self.assertIn("«Ещё раз для тех же товаров»", todo)  # not "Сделать карточки": the date has moved on
+        self.assertIn("«Повторить»", todo)  # not "Сделать карточки": the date has moved on
         self.assertNotIn("«Сделать карточки» ещё раз", todo)
         link = summary["Товары"]["F2"]
         self.assertTrue(link.value.startswith("На проверку/"))

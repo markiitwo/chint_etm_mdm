@@ -311,7 +311,7 @@ class EtmRequestsAfterRestartTests(CloseDuringOperationTests):
 class WriteButtonsTests(CloseDuringOperationTests):
     def test_buttons_of_every_tab_wait_for_the_operation(self) -> None:
         texts = {button.text() for button in self.window.write_action_buttons}
-        for text in ("Заполнить архив РАЭК", "Сделать материалы", "Откатить базу", "Копировать базу в рабочую папку", "Открыть таблицу сертификатов", "Импортировать ETIM"):
+        for text in ("Заполнить архив", "Сделать материалы", "Откатить базу", "Копировать базу в рабочую папку", "Открыть таблицу", "Импортировать ETIM"):
             self.assertIn(text, texts)
         self.window.worker = FakeRunningWorker()
         self.window.update_write_action_buttons()
@@ -395,7 +395,7 @@ class EtmCertificatesTests(CloseDuringOperationTests):
 
         tab = self.window.build_reference_tab()
         labels = [button.text() for button in tab.findChildren(QPushButton)]
-        self.assertIn("Открыть таблицу сертификатов", labels)
+        self.assertIn("Открыть таблицу", labels)
         self.assertIn("Взять даты из файла...", labels)
         base = Path(self.temp_dir.name) / "base.sqlite"
         make_base(base, "x")

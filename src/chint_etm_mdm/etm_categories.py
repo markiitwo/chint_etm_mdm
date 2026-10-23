@@ -564,7 +564,7 @@ def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library:
                 len(members),
                 examples,
                 f"Скачайте в личном кабинете ЭТМ шаблон класса {code} (upload_goods_category_template_{code}.xlsx) "
-                "в «Загрузки» или папку входящих и нажмите «Ещё раз для тех же товаров»",
+                "в «Загрузки» или папку входящих и нажмите «Повторить»",
             ]
         )
 
@@ -807,7 +807,7 @@ def todo_lines(run: CategoryRun) -> list[str]:
         count = sum(len(members) for members in run.missing_templates.values())
         lines.append(
             f"{step}. Для {count} товаров нет шаблона класса ({codes}): скачайте шаблоны в личном кабинете ЭТМ "
-            "в «Загрузки» или папку входящих (лист «Нет шаблона») и нажмите «Ещё раз для тех же товаров» — "
+            "в «Загрузки» или папку входящих (лист «Нет шаблона») и нажмите «Повторить» — "
             "программа сама заберёт их в папку шаблонов."
         )
         step += 1
@@ -816,7 +816,7 @@ def todo_lines(run: CategoryRun) -> list[str]:
         lines.append(
             f"{step}. Пустых полей: {len(run.missing_rows)} у {products} товаров (лист «Дозаполнить»). "
             "Нажмите «Запросить у продактов»: каждому продакту уйдёт Excel с этими полями. Когда ответы вернутся, "
-            "примите их и нажмите «Ещё раз для тех же товаров» — карточки соберутся с ответами."
+            "примите их и нажмите «Повторить» — карточки соберутся с ответами."
         )
         step += 1
     if run.unclassified:
@@ -851,7 +851,7 @@ def run_lines(run: CategoryRun) -> list[str]:
     for code, members in sorted(run.missing_templates.items()):
         lines.append(
             f"Нет шаблона класса {code} ({len(members)} товаров): скачайте его в личном кабинете ЭТМ "
-            "в «Загрузки» и нажмите «Ещё раз для тех же товаров»."
+            "в «Загрузки» и нажмите «Повторить»."
         )
     if run.unclassified:
         lines.append(f"Не удалось подобрать класс: {len(run.unclassified)} товаров, список в итоге.")

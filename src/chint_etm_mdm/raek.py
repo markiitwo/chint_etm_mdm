@@ -411,7 +411,7 @@ def certificate(article: str, product: ProductRecord, sources: Sources) -> dict[
     end = as_date(next((attributes[name] for name in CERT_TO_ATTRIBUTES if attributes.get(name)), "")) if dates_match else None
     if table_start or table_end:
         start, end = as_datetime(table_start), as_datetime(table_end)
-    no_dates = "Дат нет: впишите их один раз в таблицу сертификатов (вкладка «Справочники», «Открыть таблицу сертификатов»)"
+    no_dates = "Дат нет: впишите их один раз в таблицу сертификатов (вкладка «Справочники», «Сертификаты» → «Открыть таблицу»)"
     link = sources.chz.get((article, "cert_link"), "")
     kind = certificate_type(number)
     return {

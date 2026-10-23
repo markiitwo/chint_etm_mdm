@@ -24,7 +24,7 @@ class AppConfig:
     codes_file: str = ""
     last_new_since: str = ""
     inbox_dir: str = ""  # where incoming files land: the RDP shared folder now, the company share later
-    last_etm_articles: str = ""  # the products of the last ETM cards run, for "Ещё раз для тех же товаров"
+    last_etm_articles: str = ""  # the products of the last ETM cards run, for "Повторить"
 
     @property
     def work_path(self) -> Path | None:
