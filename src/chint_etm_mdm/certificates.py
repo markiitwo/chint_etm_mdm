@@ -32,6 +32,7 @@ SHEET = "Сертификаты"
 HEADERS = ["Номер документа", "Вид", "Действует с", "Действует до", "Откуда даты", "Товаров", "Серии", "Пример товара", "Ссылка на реестр"]
 NUMBER, KIND, START, END, SOURCE, COUNT, SERIES, EXAMPLE, LINK = range(len(HEADERS))
 FROM_USER, FROM_CHZ, FROM_DB, FROM_FILE = "вписано вручную", "файл ЧЗ", "база", "взято из файла"
+FROM_NUMBER = "дата из номера письма"
 EXPIRING_DAYS = 90
 LATIN = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
 FILL_EMPTY = PatternFill("solid", fgColor="FFF2CC")
@@ -49,7 +50,26 @@ def is_eaeu_document(number: str) -> bool:
     return "ЕАЭС" in compact or bool(re.match(r"\s*ТС\b", compact))
 
 
+def is_refusal_letter(number: str) -> bool:
+    """A refusal letter (the product needs no certificate): "24/11/0005", "29.05.2026-15ССП"..."""
+    text = str(number or "").strip()
+    return bool(re.search(r"\d", text)) and not is_eaeu_document(text) and not re.match(r"(?i)\s*(росс|poсс|pocc|гост)", text)
+
+
+def letter_date(number: str) -> dt.date | None:
+    """The date some letters carry in the number: "29.05.2026-15ССП" -> 29.05.2026."""
+    found = re.search(r"(?<!\d)(\d{2})\.(\d{2})\.(\d{4})(?!\d)", str(number or ""))
+    if not found:
+        return None
+    try:
+        return dt.date(int(found.group(3)), int(found.group(2)), int(found.group(1)))
+    except ValueError:
+        return None
+
+
 def document_kind(number: str) -> str:
+    if is_refusal_letter(number):
+        return "Отказное письмо"
     compact = str(number or "").replace(" ", "").upper().translate(LATIN)
     if "Д-" in compact:
         return "Декларация ЕАС"
@@ -261,7 +281,7 @@ def update_table(
     documents: dict[str, Document] = {}
     for item in read_chz(codes_path):
         number = str(item.get("number") or "").strip()
-        if not is_eaeu_document(number):
+        if not (is_eaeu_document(number) or is_refusal_letter(number)):
             continue
         doc = documents.setdefault(number_key(number), Document(number))
         doc.articles.add(item["article"])
@@ -272,6 +292,8 @@ def update_table(
         start, end = as_date(item.get("start")), as_date(item.get("end"))
         if (start or end) and not (doc.start or doc.end):
             doc.start, doc.end, doc.source = start, end, FROM_CHZ
+        elif not (doc.start or doc.end) and letter_date(number):
+            doc.start, doc.source = letter_date(number), FROM_NUMBER
     for key, (number, start, end, articles) in database_documents(db_path).items():
         doc = documents.setdefault(key, Document(number))
         doc.articles |= articles

@@ -76,11 +76,12 @@ class CertificateTableTests(unittest.TestCase):
         make_chz(self.chz)
         result = update_table(self.db, self.chz, self.table, today=dt.date(2026, 10, 22))
         rows = self.rows()
-        # Two ЕАЭС documents: the refusal letter and "не требуется" are not certificates.
-        self.assertEqual({DECL, CERT}, set(rows))
+        # Two ЕАЭС documents and the refusal letter (ETM wants its dates too); "не требуется" is no document.
+        self.assertEqual({DECL, CERT, "ОР-25/06-0035"}, set(rows))
+        self.assertEqual("Отказное письмо", rows["ОР-25/06-0035"][1])
         self.assertEqual(("Декларация ЕАС", dt.datetime(2024, 7, 25), dt.datetime(2029, 7, 25), FROM_DB, 2), rows[DECL][1:6])
         self.assertEqual(("Сертификат ЕАС", None, None, None, 2, "NKB1"), rows[CERT][1:7])  # Latin "C" is the same document
-        self.assertEqual((2, 1, 1, 2), (result.documents, result.with_dates, result.without_dates, result.added))
+        self.assertEqual((3, 1, 2, 3), (result.documents, result.with_dates, result.without_dates, result.added))
         self.assertTrue(any("жёлтые клетки" in line for line in table_lines(result)))
 
         # The user types the dates of the certificate; the next update keeps them and adds nothing.

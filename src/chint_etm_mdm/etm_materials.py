@@ -32,7 +32,16 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 
-from .certificates import TABLE_NAME as CERTIFICATES_TABLE, as_date, is_eaeu_document, number_key, read_chz, table_dates
+from .certificates import (
+    TABLE_NAME as CERTIFICATES_TABLE,
+    as_date,
+    is_eaeu_document,
+    is_refusal_letter,
+    letter_date,
+    number_key,
+    read_chz,
+    table_dates,
+)
 from .filler import normalize_article
 from .net import open_url
 from .site_info import USER_AGENT, SiteCache, SiteRecord, site_lines, update_site_cache
@@ -182,7 +191,7 @@ def certificate_type(number: str) -> str:
     """ETM's certificate type code from the document number; "" when it cannot be told."""
     compact = re.sub(r"\s+", " ", str(number).upper().translate(LATIN))
     if not is_eaeu_document(number):
-        return "ПОТКАЗ" if ("ПИСЬМО" in compact or "ОТКАЗ" in compact) else ""
+        return "ПОТКАЗ" if ("ПИСЬМО" in compact or "ОТКАЗ" in compact or is_refusal_letter(number)) else ""
     russian = " RU " in f" {compact} " or "N RU" in compact
     if re.search(r"\bД-", compact):
         return "ДТРЕАЭС" if russian else "ДТРЕАЭСбезРФ"
@@ -439,10 +448,7 @@ def make_materials(
         if record is None or not record.image_url:
             result.checks.append(CheckRow(article, "Фото", "на ensmas.ru нет фото товара", "добавьте фото в ЭТМ вручную"))
             continue
-        name = file_name_from_url(record.image_url)
-        if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
-            result.checks.append(CheckRow(article, "Фото", f"в имени файла «{name}» не только латиница и цифры", "переименуйте файл и загрузите его сами"))
-            continue
+        name = file_name_from_url(record.image_url)  # Cyrillic, "+" and spaces are fine: ETM takes the link
         photo_rows.append([ADD, MANUFACTURER_CODE, article, BRAND, name, "", record.image_url])
 
     # Technical information: the documents on the site, files downloaded.
@@ -506,7 +512,7 @@ def make_materials(
             continue
         key = number_key(number)
         start, end = dates.get(key, (None, None))
-        start = start or as_date(row.get("start"))
+        start = start or as_date(row.get("start")) or letter_date(number)
         end = end or as_date(row.get("end"))
         if start is None:
             result.checks.append(CheckRow(article, "Сертификаты", f"нет даты начала для «{number}»", "впишите даты в «Сертификаты.xlsx» (вкладка РАЭК)"))

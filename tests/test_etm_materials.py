@@ -93,10 +93,12 @@ class MaterialsTests(unittest.TestCase):
         self.assertIn("40 градусов Цельсия", description["Описание"])
         self.assertEqual("CHINT", description["Бренд"])
 
-        # The test page's photo is named in Cyrillic: ETM wants Latin names, so it is listed, not uploaded.
-        self.assertNotIn("Фото", result.files)
+        # The test page's photo is named in Cyrillic: ETM takes it by the link all the same.
+        photos = read_csv(result.files["Фото"])
+        self.assertEqual(["616173"], [row["Расширенный артикул"] for row in photos])
+        self.assertEqual("Фото T7 LED.jpg", photos[0]["Основное Изображение"])
         checks = {(row.article, row.form) for row in result.checks}
-        self.assertIn(("616173", "Фото"), checks)
+        self.assertNotIn(("616173", "Фото"), checks)
         self.assertIn(("777", "Фото"), checks)
         self.assertIn(("777", "Описание"), checks)  # series NXB has no text yet
         # "3D NVF7.rar" has no ETM type: listed for a look.

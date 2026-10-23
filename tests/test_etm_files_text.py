@@ -88,5 +88,23 @@ class PlainErrorTests(unittest.TestCase):
         self.assertEqual("ValueError: x", plain_error("ValueError: x"))
 
 
+
+class RefusalLetterTests(unittest.TestCase):
+    """Accessories need no certificate: the ЧЗ file carries the number of a refusal letter."""
+
+    def test_letters_as_in_the_chz_file(self) -> None:
+        from chint_etm_mdm.certificates import document_kind, letter_date
+        from chint_etm_mdm.etm_materials import accreditation_code, certificate_type
+
+        for number in ("24/11/0005", "25/01/29-42", "29.05.2026-15ССП", "05.11.2025-1ЦЭТИ", "ОР-25/06-0035"):
+            self.assertEqual("ПОТКАЗ", certificate_type(number), number)
+            self.assertEqual("Отказное письмо", document_kind(number), number)
+        self.assertEqual("", certificate_type("не требуется"))
+        self.assertEqual("СТРЕАЭС", certificate_type("ЕАЭС RU С-CN.НВ12.В.00413/23"))
+        self.assertEqual(dt.date(2026, 5, 29), letter_date("29.05.2026-15ССП"))
+        self.assertIsNone(letter_date("24/11/0005"))
+        self.assertEqual("", accreditation_code("24/11/0005"))
+
+
 if __name__ == "__main__":
     unittest.main()
