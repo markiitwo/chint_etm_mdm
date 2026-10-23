@@ -198,12 +198,14 @@ def analyze_config_field(
         ]
         if candidates:
             candidate_count += 1
+            # Every possible source counts, not only the first: the user picks among all of them.
+            for other_name, other_value in candidates:
+                candidate_counter[other_name] += 1
+                if other_value not in candidate_values[other_name]:
+                    candidate_values[other_name].append(other_value)
+                if product.article not in candidate_articles[other_name]:
+                    candidate_articles[other_name].append(product.article)
             source_name, value = candidates[0]
-            candidate_counter[source_name] += 1
-            if value not in candidate_values[source_name]:
-                candidate_values[source_name].append(value)
-            if product.article not in candidate_articles[source_name]:
-                candidate_articles[source_name].append(product.article)
             example_rows.append([class81_code, field, source_name, product.article, value, "candidate"])
             article_issues.append(
                 ArticleIssue(
@@ -450,7 +452,7 @@ def write_mapping_report(
                     "уже утверждено",
                 ]
             )
-            continue
+            # Products the approved source does not cover still get their candidates below.
         for candidate in item.candidate_details:
             rules_sheet.append(
                 [

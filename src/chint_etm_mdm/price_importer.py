@@ -7,6 +7,7 @@ import posixpath
 import re
 import sqlite3
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -141,30 +142,53 @@ class PriceLinkParser(html.parser.HTMLParser):
         self._current_text = []
 
 
+PRICE_NAME_MARK = "price-list-chint"
+LINK_DATE_RE = re.compile(r"(\d{1,2})[-._](\d{1,2})[-._](\d{4})")
+
+
+def price_link_candidates(links: list[tuple[str, str]], base_url: str) -> list[str]:
+    """Links to the CHINT price list, best first: the low-voltage one, then the newest date, then page order."""
+    found: list[tuple[int, dt.date, int, str]] = []
+    for order, (href, text) in enumerate(links):
+        path = urllib.parse.unquote(urllib.parse.urlsplit(href).path).casefold()
+        if PRICE_NAME_MARK not in path or not path.endswith((".xlsx", ".xlsm")):
+            continue
+        match = LINK_DATE_RE.search(path)
+        try:
+            day = dt.date(int(match.group(3)), int(match.group(2)), int(match.group(1))) if match else dt.date.min
+        except ValueError:
+            day = dt.date.min
+        low_voltage = LOW_VOLTAGE_PRICE_LABEL in text.casefold()
+        found.append((0 if low_voltage else 1, -day.toordinal(), order, urllib.parse.urljoin(base_url, href)))
+    return [url for *_rest, url in sorted(found)]
+
+
 def find_latest_price_url(source_url: str = DEFAULT_PRICE_SOURCE_URL) -> str:
     source_url = source_url.strip() or DEFAULT_PRICE_SOURCE_URL
     request = urllib.request.Request(source_url, headers={"User-Agent": "CHINT ETM MDM"})
-    with open_url(request, timeout=30) as response:
-        raw_html = response.read()
-        encoding = response.headers.get_content_charset() or "utf-8"
+    try:
+        with open_url(request, timeout=30) as response:
+            raw_html = response.read()
+            encoding = response.headers.get_content_charset() or "utf-8"
+            # Links are relative to the page the site ended on after redirects, not the one asked for.
+            final_url = response.geturl() if hasattr(response, "geturl") else source_url
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise ValueError(
+            f"Не удалось открыть страницу {source_url}: {reason}. Проверьте интернет; "
+            "если сайт открывается в браузере, скачайте прайс там и импортируйте файл кнопкой «Импортировать выбранный XLSX»."
+        ) from exc
     page_html = raw_html.decode(encoding, errors="replace")
 
     parser = PriceLinkParser()
     parser.feed(page_html)
-
-    price_links: list[str] = []
-    for href, text in parser.links:
-        normalized_text = text.casefold()
-        if LOW_VOLTAGE_PRICE_LABEL in normalized_text and "Price-list-CHINT" in href:
-            return urllib.parse.urljoin(source_url, href)
-        if "Price-list-CHINT" in href and href.lower().endswith((".xlsx", ".xlsm")):
-            price_links.append(href)
-        elif "Price-list-CHINT" in href and ".xlsx" in href.lower():
-            price_links.append(href)
-
-    if price_links:
-        return urllib.parse.urljoin(source_url, price_links[0])
-    raise ValueError("Не удалось найти ссылку на прайс-лист CHINT на сайте.")
+    candidates = price_link_candidates(parser.links, final_url or source_url)
+    if candidates:
+        return candidates[0]
+    raise ValueError(
+        f"На странице {source_url} не нашлось ссылки на файл «Price-list-CHINT…xlsx». Возможно, сайт поменялся: "
+        "скачайте прайс в браузере и импортируйте файл кнопкой «Импортировать выбранный XLSX»."
+    )
 
 
 def download_price_file(url: str, downloads_dir: Path) -> Path:

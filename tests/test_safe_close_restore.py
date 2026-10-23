@@ -118,13 +118,24 @@ class CloseDuringOperationTests(unittest.TestCase):
         self.env.start()
         self.home = mock.patch("pathlib.Path.home", return_value=home)
         self.home.start()
+        from PySide6.QtWidgets import QMessageBox
+
         from chint_etm_mdm.app import MainWindow
 
+        # A dialog nobody answers would hang the test run: by default every dialog returns at once.
+        self.dialogs = [
+            mock.patch.object(QMessageBox, name, return_value=QMessageBox.StandardButton.No)
+            for name in ("warning", "information", "critical", "question")
+        ]
+        for dialog in self.dialogs:
+            dialog.start()
         self.window = MainWindow()
 
     def tearDown(self) -> None:
         self.window.worker = None
         self.window.close()
+        for dialog in self.dialogs:
+            dialog.stop()
         self.home.stop()
         self.env.stop()
         self.temp_dir.cleanup()
@@ -226,7 +237,7 @@ class ChosenPathsTests(CloseDuringOperationTests):
 
     def test_apply_etim_always_offers_a_choice(self) -> None:
         base = Path(self.temp_dir.name) / "base.sqlite"
-        base.write_bytes(b"")
+        make_base(base, "x")
         self.window.db_path_edit.setText(str(base))
         last = Path(self.temp_dir.name) / "last.xlsx"
         last.write_bytes(b"")
@@ -257,7 +268,7 @@ class RulesDuringOperationTests(CloseDuringOperationTests):
 class EtmTabTests(CloseDuringOperationTests):
     def test_typed_articles_and_again(self) -> None:
         base = Path(self.temp_dir.name) / "base.sqlite"
-        base.write_bytes(b"")
+        make_base(base, "x")
         self.window.db_path_edit.setText(str(base))
         self.window.class_templates_edit.setText(str(Path(self.temp_dir.name) / "templates"))
         self.window.etm_articles_edit.setPlainText("586772, 625288")
@@ -305,3 +316,74 @@ class WriteButtonsTests(CloseDuringOperationTests):
         self.window.worker = FakeRunningWorker()
         self.window.update_write_action_buttons()
         self.assertFalse(any(button.isEnabled() for button in self.window.write_action_buttons))
+
+
+class BaseProblemTests(unittest.TestCase):
+    def test_plain_reasons(self) -> None:
+        from chint_etm_mdm.db_utils import base_problem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            good = root / "good.sqlite"
+            make_base(good, "x")
+            self.assertEqual("", base_problem(good))
+            empty = root / "empty.sqlite"
+            empty.write_bytes(b"")
+            self.assertIn("не база программы", base_problem(empty))
+            text = root / "price.sqlite"
+            text.write_bytes(b"PK\x03\x04 not sqlite" * 50)
+            self.assertIn("не похож на базу SQLite", base_problem(text))
+
+
+class CopyBaseTests(CloseDuringOperationTests):
+    def test_copy_in_the_background_keeps_the_old_one(self) -> None:
+        from chint_etm_mdm.app import CopyBaseWorker
+
+        root = Path(self.temp_dir.name)
+        source = root / "Загрузки" / "chint_mdm.sqlite"
+        source.parent.mkdir()
+        make_base(source, "new")
+        target = root / "work" / "database" / "chint_mdm.sqlite"
+        target.parent.mkdir(parents=True)
+        make_base(target, "old")
+        copied = []
+        worker = CopyBaseWorker(source, target)
+        worker.done.connect(copied.append)
+        worker.failed.connect(self.fail)
+        worker.run()
+        self.assertEqual([target], copied)
+        self.assertEqual("new", product_name(target))
+        backups = list(target.parent.glob("*before_copy*"))
+        self.assertEqual(1, len(backups))
+        self.assertEqual("old", product_name(backups[0]))
+
+    def test_window_does_not_copy_the_base_onto_itself(self) -> None:
+        root = Path(self.temp_dir.name)
+        base = root / "work" / "database" / "chint_mdm.sqlite"
+        base.parent.mkdir(parents=True)
+        make_base(base, "x")
+        self.window.db_path_edit.setText(str(base))
+        self.window.work_dir_edit.setText(str(root / "work"))
+        with mock.patch.object(self.window, "start_worker") as start:
+            self.window.copy_db_to_workspace()
+        start.assert_not_called()
+
+
+class MappingReviewTests(CloseDuringOperationTests):
+    def test_both_sheets_reach_the_rules_tab(self) -> None:
+        from openpyxl import Workbook
+
+        report = Path(self.temp_dir.name) / "mapping_review.xlsx"
+        workbook = Workbook()
+        rules = workbook.active
+        rules.title = "Правила"
+        rules.append(["81 класс", "Поле шаблона", "Кандидат источника", "Покрытие кандидата", "Примеры значений", "Примеры артикулов", "Действие"])
+        rules.append(["C1", "Конфиг:Ток", "Ток, А", 3, "16", "1", "уже утверждено"])
+        rules.append(["C1", "Конфиг:Ток", "Номинальный ток", 2, "25", "2", "проверить"])
+        choice = workbook.create_sheet("Выбор источника")
+        choice.append(["Категория", "Артикул", "Поле шаблона", "Возможный источник", "Значение", "Комментарий"])
+        choice.append(["C1", "2", "Конфиг:Ток", "Номинальный ток", "25", ""])
+        choice.append(["C1", "3", "Конфиг:Ток", "Ток расцепителя", "32", ""])
+        workbook.save(report)
+        rows = self.window.read_mapping_review_candidates(report)
+        self.assertEqual(["Номинальный ток", "Ток расцепителя"], [row["source_attribute"] for row in rows])

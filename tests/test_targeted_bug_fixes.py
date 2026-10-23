@@ -400,3 +400,42 @@ class EmptyOnlyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PriceLinkTests(unittest.TestCase):
+    """NET-03: the price link is found whatever its spelling, the newest first, relative to the final page."""
+
+    def test_candidates(self) -> None:
+        from chint_etm_mdm.price_importer import price_link_candidates
+
+        links = [
+            ("/upload/old/Price-list-CHINT_01-09-2026.xlsx", "Прайс"),
+            ("/upload/PRICE-LIST-CHINT_22-10-2026.xlsx?v=1792687118", "Прайс"),
+            ("/upload/price-list/date/Price-list-CHINT_15-10-2026.xlsx?v=1", "Низковольтное оборудование"),
+            ("/upload/Price-list-CHINT_30-10-2026.pdf", "PDF"),
+            ("/price-list/", "Прайс-лист"),
+        ]
+        self.assertEqual(
+            [
+                "https://ensmas.ru/upload/price-list/date/Price-list-CHINT_15-10-2026.xlsx?v=1",
+                "https://ensmas.ru/upload/PRICE-LIST-CHINT_22-10-2026.xlsx?v=1792687118",
+                "https://ensmas.ru/upload/old/Price-list-CHINT_01-09-2026.xlsx",
+            ],
+            price_link_candidates(links, "https://ensmas.ru/"),
+        )
+
+    def test_relative_link_follows_the_redirect(self) -> None:
+        page = b'<a href="files/Price-list-CHINT_22-10-2026.xlsx">x</a>'
+        response = FakeResponse(page)
+        response.geturl = lambda: "https://new.ensmas.ru/catalog/"
+        with patch("urllib.request.urlopen", return_value=response):
+            url = find_latest_price_url("https://ensmas.ru/")
+        self.assertEqual("https://new.ensmas.ru/catalog/files/Price-list-CHINT_22-10-2026.xlsx", url)
+
+    def test_plain_messages(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Name or service not known")):
+            with self.assertRaisesRegex(ValueError, "Проверьте интернет"):
+                find_latest_price_url("https://ensmas.ru/")
+        with patch("urllib.request.urlopen", return_value=FakeResponse(b"<a href='/x.xlsx'>x</a>")):
+            with self.assertRaisesRegex(ValueError, "не нашлось ссылки"):
+                find_latest_price_url("https://ensmas.ru/")
