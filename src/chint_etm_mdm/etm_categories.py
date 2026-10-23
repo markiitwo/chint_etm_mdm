@@ -215,7 +215,7 @@ def suggest_classes(
     return choices
 
 
-CODES_FILE_RE = re.compile(r"чз|честн", re.IGNORECASE)
+CODES_FILE_RE = re.compile(r"чз|честн|hsign|honest", re.IGNORECASE)
 NAME_DATE_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
 
 
