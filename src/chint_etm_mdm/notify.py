@@ -153,5 +153,5 @@ def send_summary(
         except Exception as exc:
             report.append(f"Почта: не отправилось ({exc}).")
     if not report:
-        report.append("Сводку некуда отправить: настройте почту или Telegram (вкладка «База», кнопка «Сводка на почту и в Telegram»).")
+        report.append("Сводку некуда отправить: настройте почту или Telegram (вкладка «Настройки и база», кнопка «Сводка на почту и в Telegram»).")
     return report

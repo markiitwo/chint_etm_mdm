@@ -176,7 +176,7 @@ def find_latest_price_url(source_url: str = DEFAULT_PRICE_SOURCE_URL) -> str:
         reason = getattr(exc, "reason", exc)
         raise ValueError(
             f"Не удалось открыть страницу {source_url}: {reason}. Проверьте интернет; "
-            "если сайт открывается в браузере, скачайте прайс там и импортируйте файл кнопкой «Импортировать выбранный XLSX»."
+            "если сайт открывается в браузере, скачайте прайс там и импортируйте файл кнопкой «Импортировать файл»."
         ) from exc
     page_html = raw_html.decode(encoding, errors="replace")
 
@@ -187,7 +187,7 @@ def find_latest_price_url(source_url: str = DEFAULT_PRICE_SOURCE_URL) -> str:
         return candidates[0]
     raise ValueError(
         f"На странице {source_url} не нашлось ссылки на файл «Price-list-CHINT…xlsx». Возможно, сайт поменялся: "
-        "скачайте прайс в браузере и импортируйте файл кнопкой «Импортировать выбранный XLSX»."
+        "скачайте прайс в браузере и импортируйте файл кнопкой «Импортировать файл»."
     )
 
 

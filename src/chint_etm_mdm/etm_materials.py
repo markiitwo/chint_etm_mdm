@@ -515,7 +515,7 @@ def make_materials(
         start = start or as_date(row.get("start")) or letter_date(number)
         end = end or as_date(row.get("end"))
         if start is None:
-            result.checks.append(CheckRow(article, "Сертификаты", f"нет даты начала для «{number}»", "впишите даты в «Сертификаты.xlsx» (вкладка РАЭК)"))
+            result.checks.append(CheckRow(article, "Сертификаты", f"нет даты начала для «{number}»", "впишите даты в «Сертификаты.xlsx» (вкладка «Справочники»)"))
             continue
         end = end or plus_ten_years(start)  # ETM's rule for a document without an end date
         link = str(row.get("link") or "").strip()
