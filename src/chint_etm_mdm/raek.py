@@ -32,7 +32,7 @@ from openpyxl.styles import Font
 
 from . import partners
 from .atomic_files import atomic_write_json
-from .certificates import is_eaeu_document, number_key, table_dates
+from .certificates import is_eaeu_document, number_key, register_documents, table_dates
 from .db import ProductRecord, connect, fetch_products
 from .etm_categories import load_codes_file
 from .filler import normalize_article
@@ -671,6 +671,7 @@ def fill_raek_zip(
     progress=None,
     certificates_table: Path | None = None,
     answers_path: Path | None = None,
+    cert_folder: Path | None = None,
 ) -> RaekResult:
     """Fill the archive. With `ask_site`, ensmas.ru is asked first about articles it has no recent answer for."""
     articles = zip_articles(zip_path)
@@ -687,7 +688,7 @@ def fill_raek_zip(
         settings=load_settings(),
         learned=load_learned(rules_path),
         site=cache.records,
-        cert_dates=table_dates(certificates_table),
+        cert_dates=table_dates(certificates_table, register_documents(cert_folder)),
         answers=load_answers(answers_path),
     )
     output_path, report_path = output_paths(zip_path, output_dir)

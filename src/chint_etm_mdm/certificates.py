@@ -29,10 +29,16 @@ from .filler import normalize_article
 
 TABLE_NAME = "Сертификаты.xlsx"
 SHEET = "Сертификаты"
-HEADERS = ["Номер документа", "Вид", "Действует с", "Действует до", "Откуда даты", "Товаров", "Серии", "Пример товара", "Ссылка на реестр"]
-NUMBER, KIND, START, END, SOURCE, COUNT, SERIES, EXAMPLE, LINK = range(len(HEADERS))
+HEADERS = [
+    "Номер документа", "Вид", "Действует с", "Действует до", "Откуда даты", "Товаров", "Серии", "Пример товара",
+    "Ссылка на реестр", "Расхождение",
+]
+NUMBER, KIND, START, END, SOURCE, COUNT, SERIES, EXAMPLE, LINK, CONFLICT = range(len(HEADERS))
 FROM_USER, FROM_CHZ, FROM_DB, FROM_FILE = "вписано вручную", "файл ЧЗ", "база", "взято из файла"
 FROM_NUMBER = "дата из номера письма"
+FROM_REGISTER = "перечень документов"
+# The certification team's list of documents in the certificates folder: number, dates, file name.
+REGISTER_GLOB = "Перечень документов*.xlsx"
 EXPIRING_DAYS = 90
 LATIN = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
 FILL_EMPTY = PatternFill("solid", fgColor="FFF2CC")
@@ -102,6 +108,8 @@ class Document:
     articles: set[str] = field(default_factory=set)
     series: Counter = field(default_factory=Counter)
     example: str = ""
+    file: str = ""  # the PDF's name in the certificates folder (from the register)
+    conflict: str = ""  # the register says otherwise: shown to the user, never decided silently
 
 
 @dataclass
@@ -112,6 +120,7 @@ class TableResult:
     without_dates: int = 0
     added: int = 0
     from_file: int = 0
+    conflicts: int = 0
     expiring: list[tuple[str, dt.date]] = field(default_factory=list)
     expired: list[tuple[str, dt.date]] = field(default_factory=list)
 
@@ -241,6 +250,77 @@ def read_dates_file(path: Path) -> dict[str, Document]:
     return {key: doc for key, doc in documents.items() if doc.start or doc.end}
 
 
+def latest_register(folder: Path | None) -> Path | None:
+    """The newest «Перечень документов….xlsx» right in the certificates folder."""
+    if folder is None or not folder.is_dir():
+        return None
+    found = [path for path in folder.glob(REGISTER_GLOB) if not path.name.startswith("~$")]
+    return max(found, key=lambda path: (path.name, path.stat().st_mtime), default=None)
+
+
+def read_register(path: Path | None) -> dict[str, Document]:
+    """Documents of the register: number, issue date, valid-until ("бессрочно" is no end date), PDF name."""
+    if path is None:
+        return {}
+    workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
+    documents: dict[str, Document] = {}
+    try:
+        for sheet in workbook.worksheets:
+            rows = sheet.iter_rows(values_only=True)
+            columns: dict[str, int] = {}
+            for _, row in zip(range(10), rows):
+                names = [" ".join(str(cell or "").split()).casefold() for cell in row]
+                number = next((i for i, name in enumerate(names) if name.startswith("номер сертификата")), None)
+                if number is None:
+                    continue
+                columns = {"number": number}
+                for idx, name in enumerate(names):
+                    if "start" not in columns and name in {"выдан", "дата выдачи", "действует с"}:
+                        columns["start"] = idx
+                    elif "end" not in columns and re.match(r"действ(\.|ует)? до", name):
+                        columns["end"] = idx
+                    elif "file" not in columns and name.startswith("название документа в папке"):
+                        columns["file"] = idx
+                break
+            if "start" not in columns:
+                continue
+            for row in rows:
+                cells = {key: (row[idx] if idx < len(row) else None) for key, idx in columns.items()}
+                number = " ".join(str(cells["number"] or "").split())
+                if not (is_eaeu_document(number) or is_refusal_letter(number)):
+                    continue
+                doc = documents.setdefault(number_key(number), Document(number, source=FROM_REGISTER))
+                if not doc.start:
+                    doc.start, doc.end = as_date(cells.get("start")), as_date(cells.get("end"))
+                doc.file = doc.file or str(cells.get("file") or "").strip()
+    finally:
+        workbook.close()
+    return {key: doc for key, doc in documents.items() if doc.start}
+
+
+def register_documents(folder: Path | None) -> dict[str, Document]:
+    return read_register(latest_register(folder))
+
+
+def folder_pdfs(folder: Path | None) -> dict[str, Path]:
+    """PDFs of the certificates folder by name without extension (lower case), the first found wins."""
+    if folder is None or not folder.is_dir():
+        return {}
+    found: dict[str, Path] = {}
+    for path in sorted(folder.rglob("*")):
+        if path.suffix.lower() == ".pdf" and path.is_file():
+            found.setdefault(" ".join(path.stem.split()).casefold(), path)
+    return found
+
+
+def register_conflict(doc: Document, entry: Document) -> str:
+    """What the register says when it disagrees with the dates in use; "" when it agrees."""
+    if doc.start == entry.start and (entry.end is None or doc.end == entry.end):
+        return ""
+    end = f"{entry.end:%d.%m.%Y}" if entry.end else "бессрочно"
+    return f"в перечне: с {entry.start:%d.%m.%Y} до {end} — проверьте в реестре"
+
+
 def read_table(path: Path) -> dict[str, Document]:
     """Documents of an existing table, with the dates written in it."""
     if not path.exists():
@@ -262,15 +342,21 @@ def read_table(path: Path) -> dict[str, Document]:
         workbook.close()
 
 
-def table_dates(path: Path | None) -> dict[str, tuple[dt.date | None, dt.date | None]]:
-    """Dates by document key, for partner files."""
-    if path is None:
-        return {}
-    return {key: (doc.start, doc.end) for key, doc in read_table(path).items() if doc.start or doc.end}
+def table_dates(path: Path | None, register: dict[str, Document] | None = None) -> dict[str, tuple[dt.date | None, dt.date | None]]:
+    """Dates by document key, for partner files: the table first, the register for what the table lacks."""
+    dates = {key: (doc.start, doc.end) for key, doc in (register or {}).items()}
+    if path is not None:
+        dates.update({key: (doc.start, doc.end) for key, doc in read_table(path).items() if doc.start or doc.end})
+    return dates
 
 
 def update_table(
-    db_path: Path, codes_path: Path | None, path: Path, today: dt.date | None = None, dates_file: Path | None = None
+    db_path: Path,
+    codes_path: Path | None,
+    path: Path,
+    today: dt.date | None = None,
+    dates_file: Path | None = None,
+    register_folder: Path | None = None,
 ) -> TableResult:
     """Create or refresh the table. Dates already in the table always win: the user may have typed them.
 
@@ -278,6 +364,7 @@ def update_table(
     """
     today = today or dt.date.today()
     old = read_table(path)
+    register = register_documents(register_folder)
     documents: dict[str, Document] = {}
     for item in read_chz(codes_path):
         number = str(item.get("number") or "").strip()
@@ -304,6 +391,9 @@ def update_table(
         doc = documents.setdefault(key, Document(previous.number))
         if not (previous.start or previous.end):
             continue
+        entry = register.get(key)
+        if previous.source == FROM_REGISTER and entry and (previous.start, previous.end) == (entry.start, entry.end):
+            continue  # taken from the register last time and not changed since: the register gives it again
         if previous.source == FROM_FILE:
             doc.start, doc.end, doc.source = previous.start, previous.end, FROM_FILE
         elif (previous.start, previous.end) != (doc.start, doc.end) or previous.source == FROM_USER:
@@ -318,6 +408,15 @@ def update_table(
             if (doc.start, doc.end) != (found.start, found.end):
                 result.from_file += 1
             doc.start, doc.end, doc.source = found.start, found.end, FROM_FILE
+    for key, entry in register.items():
+        doc = documents.get(key)
+        if doc is None:
+            continue  # the register lists documents of products the ЧЗ file does not have
+        if doc.source in {"", FROM_CHZ, FROM_DB, FROM_NUMBER}:
+            doc.start, doc.end, doc.source = entry.start, entry.end, FROM_REGISTER
+        else:
+            doc.conflict = register_conflict(doc, entry)
+        result.conflicts += bool(doc.conflict)
     result.added = len(set(documents) - set(old))
     write_table(path, documents, today, result)
     return result
@@ -343,6 +442,7 @@ def write_table(path: Path, documents: dict[str, Document], today: dt.date, resu
                 ", ".join(name for name, _ in doc.series.most_common(5)),
                 doc.example,
                 doc.link,
+                doc.conflict,
             ]
         )
         row = sheet.max_row
@@ -360,12 +460,15 @@ def write_table(path: Path, documents: dict[str, Document], today: dt.date, resu
         elif doc.end and (doc.end - today).days <= EXPIRING_DAYS:
             result.expiring.append((doc.number, doc.end))
             sheet.cell(row, END + 1).fill = FILL_EXPIRED
+        if doc.conflict:
+            for col in (START, END, CONFLICT):
+                sheet.cell(row, col + 1).fill = FILL_EXPIRED
     result.documents = len(ordered)
     dates = DataValidation(type="date", operator="greaterThan", formula1="DATE(2000,1,1)", allow_blank=True)
     dates.error = "Впишите дату, например 21.03.2025"
     sheet.add_data_validation(dates)
     dates.add(f"C2:D{max(sheet.max_row, 2)}")
-    for col, width in zip("ABCDEFGHI", (34, 16, 13, 13, 16, 9, 24, 50, 50)):
+    for col, width in zip("ABCDEFGHIJ", (34, 16, 13, 13, 20, 9, 24, 50, 50, 50)):
         sheet.column_dimensions[col].width = width
     sheet.freeze_panes = "A2"
     note = workbook.create_sheet("Как заполнять")
@@ -374,6 +477,8 @@ def write_table(path: Path, documents: dict[str, Document], today: dt.date, resu
         "Даты достаточно вписать один раз на документ: программа сама поставит их всем товарам с этим сертификатом.",
         "Вписанные даты программа не перезаписывает. Новые сертификаты из файла ЧЗ она добавляет сама при обновлении таблицы.",
         "Красным отмечены сертификаты, которые истекли или истекают в ближайшие 90 дней.",
+        "«Расхождение»: в перечне документов из папки сертификатов другие даты. Проверьте в реестре и поправьте"
+        " ту сторону, что неверна: даты таблицы или перечень.",
     ):
         note.append([line])
     note.column_dimensions["A"].width = 110
@@ -390,6 +495,8 @@ def table_lines(result: TableResult) -> list[str]:
     ]
     if result.from_file:
         lines.append(f"Из выбранного файла взяты даты для {result.from_file} документов. Вписанные вручную даты не тронуты.")
+    if result.conflicts:
+        lines.append(f"Перечень документов расходится с датами таблицы у {result.conflicts} документов: колонка «Расхождение».")
     if result.without_dates:
         lines.append("Впишите даты в жёлтые клетки, сохраните файл: дальше программа поставит их сама.")
     for number, end in sorted(result.expired, key=lambda item: item[1]):
