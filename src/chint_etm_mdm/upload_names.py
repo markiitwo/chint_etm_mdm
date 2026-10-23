@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import sqlite3
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from contextlib import closing
@@ -97,8 +98,9 @@ def run_folder(base: Path, title: str, when: dt.datetime | None = None) -> Path:
 
 # Signs ETM's Win-1251 files cannot hold; without this they turn into "?" in the card.
 CP1251_SUBSTITUTES = {
-    "²": "2", "³": "3", "≤": "<=", "≥": ">=", "×": "x", "Ø": "диам.", "ø": "диам.", "⌀": "диам.",
-    "\u03a9": "Ом", "\u2126": "Ом", "−": "-", "‐": "-", "‑": "-", "≈": "прибл.", "φ": "фи", "½": "1/2", "¼": "1/4", "¾": "3/4",
+    "²": "2", "³": "3", "≤": "<=", "≥": ">=", "×": "x", "−": "-", "‐": "-", "‑": "-", "≈": "прибл.",
+    # The diameter in names: "Φ22 мм", "Ø 6 мм" -> "Ф22 мм", as Russian catalogs write it.
+    "Ø": "Ф", "ø": "Ф", "⌀": "Ф", "Φ": "Ф", "φ": "Ф", "\u03a9": "Ом", "\u2126": "Ом",
 }
 
 
@@ -110,4 +112,18 @@ def cp1251_text(text: str) -> str:
         text.encode("cp1251")
         return text
     except UnicodeEncodeError:
-        return "".join(CP1251_SUBSTITUTES.get(char, char) for char in text)
+        return "".join(CP1251_SUBSTITUTES.get(char) or cp1251_char(char) for char in text)
+
+
+def cp1251_char(char: str) -> str:
+    """Full-width signs of Chinese texts ("（", "～") and fractions ("½") have plain forms."""
+    try:
+        char.encode("cp1251")
+        return char
+    except UnicodeEncodeError:
+        plain = unicodedata.normalize("NFKC", char).replace("⁄", "/")
+        try:
+            plain.encode("cp1251")
+            return plain
+        except UnicodeEncodeError:
+            return char

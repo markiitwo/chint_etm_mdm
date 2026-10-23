@@ -21,7 +21,10 @@ class Cp1251Tests(unittest.TestCase):
     """ETM takes Win-1251 files: signs it lacks used to turn into "?" in the card."""
 
     def test_signs_are_spelled(self) -> None:
-        self.assertEqual("2,5 мм2, ток <= 63 А, 18x80 мм, диам. 6 мм", cp1251_text("2,5 мм², ток ≤ 63 А, 18×80 мм, Ø 6 мм"))
+        self.assertEqual("2,5 мм2, ток <= 63 А, 18x80 мм, Ф6 мм", cp1251_text("2,5 мм², ток ≤ 63 А, 18×80 мм, Ø6 мм"))
+        # As they come in the ЧЗ file.
+        self.assertEqual("Звонок ND16-22F Ф22 мм", cp1251_text("Звонок ND16-22F Φ22 мм"))
+        self.assertEqual("AC380~415В, 50 кВАр(CHINT), 1/2", cp1251_text("AC380～415В, 50 кВАр（CHINT）, ½"))
         self.assertEqual("обычный текст ±5 °C", cp1251_text("обычный текст ±5 °C"))
 
     def test_description_file(self) -> None:
