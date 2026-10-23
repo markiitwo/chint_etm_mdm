@@ -32,7 +32,7 @@ from .db import ProductRecord, connect, fetch_products
 from .export_templates import PartnerTemplate, clean_product_name, load_partner_template, partner_template_text
 from .filler import FillReportRow, FillResult, fill_xlsx_template, normalize_article, normalize_header
 from .pm_requests import Need, load_answer_attributes, load_answers
-from .upload_names import check_path_for, report_path_for, series_names, upload_csv_path
+from .upload_names import check_path_for, cp1251_text, report_path_for, series_names, upload_csv_path
 from .value_matching import canonical
 
 TEMPLATE_SHEET = "Шаблон"
@@ -370,7 +370,7 @@ def csv_text(value: object) -> str:
         return str(value)
     if isinstance(value, float):
         return str(int(value)) if value.is_integer() else f"{value:.9f}".rstrip("0").rstrip(".")
-    return str(value)
+    return cp1251_text(str(value))
 
 
 def export_upload_csv(xlsx_path: Path, csv_path: Path, articles: frozenset[str] | None = None) -> int:
@@ -387,7 +387,7 @@ def export_upload_csv(xlsx_path: Path, csv_path: Path, articles: frozenset[str] 
     written = 0
     with csv_path.open("w", encoding=CSV_ENCODING, errors="replace", newline="") as handle:
         writer = csv.writer(handle, delimiter=";", lineterminator="\r\n")
-        writer.writerow(headers[:width])
+        writer.writerow([cp1251_text(name) for name in headers[:width]])
         for row in rows[1:]:
             article = normalize_article(row[article_idx])
             if article and (articles is None or article in articles):

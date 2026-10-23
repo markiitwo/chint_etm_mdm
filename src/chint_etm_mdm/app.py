@@ -51,9 +51,10 @@ from .etm_materials import (
     import_description_file,
     make_materials,
     materials_lines,
+    product_names,
     update_descriptions_table,
 )
-from .upload_names import series_names
+from .upload_names import run_folder, series_names
 from .dimension_audit import AuditResult, ClearResult, audit_dimensions, audit_lines, clear_lines, clear_wrong_dimensions
 from .etm_categories import (
     CategoryRun,
@@ -598,6 +599,16 @@ class DimensionClearWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+def plain_error(details: str) -> str:
+    """The message for the user; the full traceback stays in the log."""
+    if "PermissionError" in details:
+        return (
+            "Файл занят другой программой — скорее всего, открыт в Excel. Закройте его и повторите.\n\n"
+            + details.strip().splitlines()[-1]
+        )
+    return details
+
+
 class CopyBaseWorker(QThread):
     """Copies the base into the work folder in the background: a big base takes a while."""
 
@@ -972,7 +983,7 @@ class MainWindow(QMainWindow):
                 return
             codes_text = self.codes_file_edit.text().strip()
             codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
-            output = Path(work_text) / "output" / f"ЭТМ материалы {dt.datetime.now().strftime('%Y-%m-%d %H-%M')}"
+            output = run_folder(Path(work_text) / "output", "ЭТМ материалы")
             if needs is None:
                 self.fill_log.append(f"Готовлю материалы для {len(articles)} товаров...")
             else:
@@ -1004,7 +1015,7 @@ class MainWindow(QMainWindow):
         table = Path(work_text) / DESCRIPTIONS_TABLE
         articles = self.materials_articles()
         try:
-            update_descriptions_table(table, series_names(db_path, articles), {})
+            update_descriptions_table(table, series_names(db_path, articles), product_names(db_path, articles))
         except PermissionError:
             QMessageBox.warning(self, "Файл открыт", f"Закройте «{table.name}» в Excel и нажмите ещё раз.")
             return
@@ -1256,7 +1267,7 @@ class MainWindow(QMainWindow):
     def on_raek_failed(self, details: str) -> None:
         self.raek_log.append("Ошибка.")
         self.raek_log.append(details)
-        QMessageBox.critical(self, "Ошибка", details)
+        QMessageBox.critical(self, "Ошибка", plain_error(details))
 
     def run_certificates_table(self, ask_file: bool = False) -> None:
         dates_file = None
@@ -1642,7 +1653,7 @@ class MainWindow(QMainWindow):
             codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
             base = Path(work_text) / "output" if work_text else Path(templates_text).parent
             since = self.new_since_edit.date().toPython()
-            output_dir = base / f"ЭТМ карточки {dt.datetime.now().strftime('%Y-%m-%d %H-%M')}"
+            output_dir = run_folder(base, "ЭТМ карточки")
             rules_path = ensure_default_rules(Path(work_text)) if work_text else None
             if articles is None:
                 self.new_products_log.append(f"Ищу новинки после {since:%d.%m.%Y}...")
@@ -1703,7 +1714,7 @@ class MainWindow(QMainWindow):
     def on_new_products_failed(self, details: str) -> None:
         self.new_products_log.append("Ошибка.")
         self.new_products_log.append(details)
-        QMessageBox.critical(self, "Ошибка", details)
+        QMessageBox.critical(self, "Ошибка", plain_error(details))
 
     def choose_work_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Выберите рабочую папку")
@@ -2009,7 +2020,7 @@ class MainWindow(QMainWindow):
     def on_restore_failed(self, details: str) -> None:
         self.price_log.append("Откат не выполнен.")
         self.price_log.append(details)
-        QMessageBox.critical(self, "Откат не выполнен", details)
+        QMessageBox.critical(self, "Откат не выполнен", plain_error(details))
 
     def on_restore_done(self, backup_path: Path, safety_backup: Path) -> None:
         self.price_log.append(f"База восстановлена из бэкапа: {backup_path}")
@@ -2405,17 +2416,17 @@ class MainWindow(QMainWindow):
     def on_price_import_failed(self, details: str) -> None:
         self.price_log.append("Ошибка обновления базы.")
         self.price_log.append(details)
-        QMessageBox.critical(self, "Ошибка обновления базы", details)
+        QMessageBox.critical(self, "Ошибка обновления базы", plain_error(details))
 
     def on_fill_failed(self, details: str) -> None:
         self.fill_log.append("Ошибка заполнения.")
         self.fill_log.append(details)
-        QMessageBox.critical(self, "Ошибка", details)
+        QMessageBox.critical(self, "Ошибка", plain_error(details))
 
     def on_action_failed(self, details: str) -> None:
         self.fill_log.append("Ошибка.")
         self.fill_log.append(details)
-        QMessageBox.critical(self, "Ошибка", details)
+        QMessageBox.critical(self, "Ошибка", plain_error(details))
 
     def load_mapping_review(self) -> None:
         path_text = self.mapping_review_path_edit.text().strip()
