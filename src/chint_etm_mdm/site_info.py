@@ -82,6 +82,12 @@ def absolute(url: str) -> str:
     return urllib.parse.urljoin(BASE_URL + "/", url.strip()) if url else ""
 
 
+def product_photo(url: str) -> bool:
+    """A photo of the product itself. Pages without one carry the site logo in og:image
+    (/upload/dev2fun_opengraph/); only pictures of the catalogue (/upload/iblock/) count."""
+    return "/upload/iblock/" in urllib.parse.unquote(urllib.parse.urlsplit(url).path)
+
+
 def classes(attrs: dict[str, str | None]) -> set[str]:
     return set((attrs.get("class") or "").split())
 
@@ -251,7 +257,8 @@ def parse_product(html: str, article: str) -> SiteRecord:
             properties.setdefault(clean(str(item["name"])), clean(str(item.get("value", ""))))
     sku = normalize_article(first_text(product.get("sku")) or re.sub(r"(?i)^\s*артикул\s*:?\s*", "", parser.articul))
     url = absolute(parser.og_url or parser.canonical or first_text(product.get("url")))
-    image = absolute(parser.gallery[0] if parser.gallery else first_text(product.get("image")) or parser.og_image)
+    candidates = [*parser.gallery, first_text(product.get("image")), parser.og_image]
+    image = next((url for url in map(absolute, candidates) if url and product_photo(url)), "")
     cert_number = next((value for name, value in properties.items() if name.casefold() == CERTIFICATE_PROPERTY), "")
     cert_pdf = next(
         (doc["url"] for doc in parser.documents if CERTIFICATE_SECTION in doc["section"].casefold() and doc["url"].lower().endswith(".pdf")),
@@ -293,7 +300,8 @@ def look_up(article: str, fetch: Fetch, pause: Callable[[], None]) -> SiteRecord
     pause()
     record = parse_product(fetch(card.url), article)
     record.url = record.url or card.url
-    record.image_url = record.image_url or card.image
+    if not record.image_url and product_photo(card.image):
+        record.image_url = card.image
     return record
 
 
@@ -306,7 +314,10 @@ class SiteCache:
         if path and path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
             for article, item in data.get("products", {}).items():
-                self.records[article] = SiteRecord(**item)
+                record = SiteRecord(**item)
+                if record.image_url and not product_photo(record.image_url):
+                    record.image_url = ""
+                self.records[article] = record
 
     def fresh(self, article: str, today: dt.date) -> bool:
         record = self.records.get(article)
