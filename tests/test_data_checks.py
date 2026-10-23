@@ -51,6 +51,12 @@ class CodesFileTests(unittest.TestCase):
             self.assertEqual(old, latest_codes_file([root / "нет"], old))
             self.assertIsNone(latest_codes_file([root / "нет"]))
 
+    def test_english_name_of_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Price_list_CHINT_the_list_of_products_HSign_updated_22.10.2026.xlsx"
+            path.write_bytes(b"")
+            self.assertEqual(path, latest_codes_file([Path(tmp)]))
+
 
 if __name__ == "__main__":
     unittest.main()

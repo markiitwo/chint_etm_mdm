@@ -32,7 +32,7 @@ from .db import ProductRecord, connect, fetch_products
 from .export_templates import PartnerTemplate, clean_product_name, load_partner_template, partner_template_text
 from .filler import FillReportRow, FillResult, fill_xlsx_template, normalize_article, normalize_header
 from .pm_requests import Need, load_answer_attributes, load_answers
-from .upload_names import check_path_for, report_path_for, series_names, upload_csv_path
+from .upload_names import check_path_for, cp1251_text, report_path_for, series_names, upload_csv_path
 from .value_matching import canonical
 
 TEMPLATE_SHEET = "Шаблон"
@@ -215,7 +215,7 @@ def suggest_classes(
     return choices
 
 
-CODES_FILE_RE = re.compile(r"чз|честн", re.IGNORECASE)
+CODES_FILE_RE = re.compile(r"чз|честн|hsign|honest", re.IGNORECASE)
 NAME_DATE_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
 
 
@@ -370,7 +370,7 @@ def csv_text(value: object) -> str:
         return str(value)
     if isinstance(value, float):
         return str(int(value)) if value.is_integer() else f"{value:.9f}".rstrip("0").rstrip(".")
-    return str(value)
+    return cp1251_text(str(value))
 
 
 def export_upload_csv(xlsx_path: Path, csv_path: Path, articles: frozenset[str] | None = None) -> int:
@@ -387,7 +387,7 @@ def export_upload_csv(xlsx_path: Path, csv_path: Path, articles: frozenset[str] 
     written = 0
     with csv_path.open("w", encoding=CSV_ENCODING, errors="replace", newline="") as handle:
         writer = csv.writer(handle, delimiter=";", lineterminator="\r\n")
-        writer.writerow(headers[:width])
+        writer.writerow([cp1251_text(name) for name in headers[:width]])
         for row in rows[1:]:
             article = normalize_article(row[article_idx])
             if article and (articles is None or article in articles):
@@ -564,7 +564,7 @@ def write_summary(run: CategoryRun, products: dict[str, ProductRecord], library:
                 len(members),
                 examples,
                 f"Скачайте в личном кабинете ЭТМ шаблон класса {code} (upload_goods_category_template_{code}.xlsx) "
-                "в «Загрузки» или папку входящих и нажмите «Ещё раз для тех же товаров»",
+                "в «Загрузки» или папку входящих и нажмите «Повторить»",
             ]
         )
 
@@ -807,7 +807,7 @@ def todo_lines(run: CategoryRun) -> list[str]:
         count = sum(len(members) for members in run.missing_templates.values())
         lines.append(
             f"{step}. Для {count} товаров нет шаблона класса ({codes}): скачайте шаблоны в личном кабинете ЭТМ "
-            "в «Загрузки» или папку входящих (лист «Нет шаблона») и нажмите «Ещё раз для тех же товаров» — "
+            "в «Загрузки» или папку входящих (лист «Нет шаблона») и нажмите «Повторить» — "
             "программа сама заберёт их в папку шаблонов."
         )
         step += 1
@@ -816,7 +816,7 @@ def todo_lines(run: CategoryRun) -> list[str]:
         lines.append(
             f"{step}. Пустых полей: {len(run.missing_rows)} у {products} товаров (лист «Дозаполнить»). "
             "Нажмите «Запросить у продактов»: каждому продакту уйдёт Excel с этими полями. Когда ответы вернутся, "
-            "примите их и нажмите «Ещё раз для тех же товаров» — карточки соберутся с ответами."
+            "примите их и нажмите «Повторить» — карточки соберутся с ответами."
         )
         step += 1
     if run.unclassified:
@@ -851,7 +851,7 @@ def run_lines(run: CategoryRun) -> list[str]:
     for code, members in sorted(run.missing_templates.items()):
         lines.append(
             f"Нет шаблона класса {code} ({len(members)} товаров): скачайте его в личном кабинете ЭТМ "
-            "в «Загрузки» и нажмите «Ещё раз для тех же товаров»."
+            "в «Загрузки» и нажмите «Повторить»."
         )
     if run.unclassified:
         lines.append(f"Не удалось подобрать класс: {len(run.unclassified)} товаров, список в итоге.")

@@ -32,11 +32,20 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 
-from .certificates import TABLE_NAME as CERTIFICATES_TABLE, as_date, is_eaeu_document, number_key, read_chz, table_dates
+from .certificates import (
+    TABLE_NAME as CERTIFICATES_TABLE,
+    as_date,
+    is_eaeu_document,
+    is_refusal_letter,
+    letter_date,
+    number_key,
+    read_chz,
+    table_dates,
+)
 from .filler import normalize_article
 from .net import open_url
 from .site_info import USER_AGENT, SiteCache, SiteRecord, site_lines, update_site_cache
-from .upload_names import series_label, series_names
+from .upload_names import cp1251_text, series_label, series_names
 
 MANUFACTURER_CODE = "2019"
 BRAND = "CHINT"
@@ -66,7 +75,8 @@ DESCRIPTION_FIELDS = [
     "Сфера применения", "Дополнительная информация",
 ]
 DESCRIPTION_HEADERS = ["Статус", "Код производителя", "Расширенный артикул", "Бренд", *DESCRIPTION_FIELDS]
-TABLE_HEADERS = ["Серия", *DESCRIPTION_FIELDS, "Откуда", "Товаров", "Пример товара"]
+INFO_FIELDS = ["Откуда", "Товаров", "Пример товара"]
+TABLE_HEADERS = ["Серия", *DESCRIPTION_FIELDS, *INFO_FIELDS]
 YELLOW = PatternFill("solid", fgColor="FFF2CC")
 LATIN = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
 FORBIDDEN_IN_FILE_NAME = re.compile(r"[:/?#\[\]@!$&'()*+,;=\\\"<>|]")
@@ -181,7 +191,7 @@ def certificate_type(number: str) -> str:
     """ETM's certificate type code from the document number; "" when it cannot be told."""
     compact = re.sub(r"\s+", " ", str(number).upper().translate(LATIN))
     if not is_eaeu_document(number):
-        return "ПОТКАЗ" if ("ПИСЬМО" in compact or "ОТКАЗ" in compact) else ""
+        return "ПОТКАЗ" if ("ПИСЬМО" in compact or "ОТКАЗ" in compact or is_refusal_letter(number)) else ""
     russian = " RU " in f" {compact} " or "N RU" in compact
     if re.search(r"\bД-", compact):
         return "ДТРЕАЭС" if russian else "ДТРЕАЭСбезРФ"
@@ -223,7 +233,7 @@ def clean_text(text: str) -> str:
     text = text.replace("°", " градусов")
     text = re.sub("[«»“”„\"]", "''", text)
     text = text.replace(":", " -")
-    return re.sub(r" {2,}", " ", text).strip()
+    return re.sub(r" {2,}", " ", cp1251_text(text)).strip()
 
 
 def description_problems(fields: dict[str, str]) -> list[str]:
@@ -264,7 +274,7 @@ def read_descriptions(path: Path) -> dict[str, dict[str, str]]:
         values = {name: str(row[idx] or "").strip() for idx, name in enumerate(header) if idx < len(row) and name}
         series = values.get("Серия", "")
         if series:
-            found[series.upper()] = {name: values.get(name, "") for name in DESCRIPTION_FIELDS + ["Откуда"]}
+            found[series.upper()] = {name: values.get(name, "") for name in DESCRIPTION_FIELDS + INFO_FIELDS}
     return found
 
 
@@ -278,7 +288,13 @@ def write_descriptions(path: Path, texts: dict[str, dict[str, str]], counts: dic
     for series in sorted(texts):
         values = texts[series]
         sheet.append(
-            [series, *(values.get(name, "") for name in DESCRIPTION_FIELDS), values.get("Откуда", ""), counts.get(series, ""), examples.get(series, "")]
+            [
+                series,
+                *(values.get(name, "") for name in DESCRIPTION_FIELDS),
+                values.get("Откуда", ""),
+                counts.get(series) or as_count(values.get("Товаров")),
+                examples.get(series) or values.get("Пример товара", ""),
+            ]
         )
         if not values.get("Описание"):
             sheet.cell(sheet.max_row, 2).fill = YELLOW
@@ -292,8 +308,15 @@ def write_descriptions(path: Path, texts: dict[str, dict[str, str]], counts: dic
     temp.replace(path)
 
 
+def as_count(value: object) -> int | str:
+    text = str(value or "").strip()
+    return int(float(text)) if re.fullmatch(r"\d+(\.0)?", text) else ""
+
+
 def update_descriptions_table(path: Path, series_of: dict[str, str], names: dict[str, str]) -> int:
-    """Add a row for every series of these products that the table does not have yet; returns how many."""
+    """Add a row for every series of these products that the table does not have yet; returns how many.
+
+    The file is rewritten only when a series is added, so a table open in Excel stays as it is."""
     texts = read_descriptions(path)
     counts: dict[str, int] = {}
     examples: dict[str, str] = {}
@@ -307,7 +330,8 @@ def update_descriptions_table(path: Path, series_of: dict[str, str], names: dict
         if key not in texts:
             texts[key] = {name: "" for name in DESCRIPTION_FIELDS}
             added += 1
-    write_descriptions(path, texts, counts, examples)
+    if added or not path.exists():
+        write_descriptions(path, texts, counts, examples)
     return added
 
 
@@ -361,7 +385,7 @@ def write_csv(path: Path, header: list[str], rows: list[list[object]]) -> None:
     with path.open("w", encoding=CSV_ENCODING, errors="replace", newline="") as handle:
         writer = csv.writer(handle, delimiter=";", lineterminator="\r\n")
         writer.writerow(header)
-        writer.writerows(rows)
+        writer.writerows([[cp1251_text(value) if isinstance(value, str) else value for value in row] for row in rows])
 
 
 def csv_name(kind: str, series: Iterable[str], when: dt.date) -> str:
@@ -424,10 +448,7 @@ def make_materials(
         if record is None or not record.image_url:
             result.checks.append(CheckRow(article, "Фото", "на ensmas.ru нет фото товара", "добавьте фото в ЭТМ вручную"))
             continue
-        name = file_name_from_url(record.image_url)
-        if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
-            result.checks.append(CheckRow(article, "Фото", f"в имени файла «{name}» не только латиница и цифры", "переименуйте файл и загрузите его сами"))
-            continue
+        name = file_name_from_url(record.image_url)  # Cyrillic, "+" and spaces are fine: ETM takes the link
         photo_rows.append([ADD, MANUFACTURER_CODE, article, BRAND, name, "", record.image_url])
 
     # Technical information: the documents on the site, files downloaded.
@@ -491,10 +512,10 @@ def make_materials(
             continue
         key = number_key(number)
         start, end = dates.get(key, (None, None))
-        start = start or as_date(row.get("start"))
+        start = start or as_date(row.get("start")) or letter_date(number)
         end = end or as_date(row.get("end"))
         if start is None:
-            result.checks.append(CheckRow(article, "Сертификаты", f"нет даты начала для «{number}»", "впишите даты в «Сертификаты.xlsx» (вкладка РАЭК)"))
+            result.checks.append(CheckRow(article, "Сертификаты", f"нет даты начала для «{number}»", "впишите даты в «Сертификаты.xlsx» (вкладка «Справочники»)"))
             continue
         end = end or plus_ten_years(start)  # ETM's rule for a document without an end date
         link = str(row.get("link") or "").strip()
@@ -515,7 +536,12 @@ def make_materials(
 
     # Descriptions: one text per series from the table.
     table = work_dir / DESCRIPTIONS_TABLE
-    update_descriptions_table(table, {article: value for article, value in series.items() if wants("Описание", article)}, names)
+    try:
+        update_descriptions_table(table, {article: value for article, value in series.items() if wants("Описание", article)}, names)
+    except PermissionError:
+        result.checks.append(
+            CheckRow("", "Описание", f"«{DESCRIPTIONS_TABLE}» открыт в Excel: новые серии в него не добавлены", "закройте файл и соберите материалы заново")
+        )
     texts = read_descriptions(table)
     description_rows, held_rows = [], []
     for article in articles:

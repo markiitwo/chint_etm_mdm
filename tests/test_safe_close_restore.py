@@ -277,7 +277,7 @@ class EtmTabTests(CloseDuringOperationTests):
             self.window.run_new_products()
         worker = start.call_args[0][0]
         self.assertEqual(["586772", "625288"], worker.articles)
-        self.assertEqual("ЭТМ", self.window.tabs.tabText(1))
+        self.assertEqual("ЭТМ", self.window.tabs.tabText(0))
 
         self.window.config.last_etm_articles = "111 222"
         with mock.patch.object(self.window, "start_worker") as start:
@@ -311,7 +311,7 @@ class EtmRequestsAfterRestartTests(CloseDuringOperationTests):
 class WriteButtonsTests(CloseDuringOperationTests):
     def test_buttons_of_every_tab_wait_for_the_operation(self) -> None:
         texts = {button.text() for button in self.window.write_action_buttons}
-        for text in ("Заполнить архив РАЭК", "Сделать материалы", "Откатить базу из бэкапа", "Импортировать ETIM"):
+        for text in ("Заполнить архив", "Сделать материалы", "Откатить базу", "Копировать базу в рабочую папку", "Открыть таблицу", "Импортировать ETIM"):
             self.assertIn(text, texts)
         self.window.worker = FakeRunningWorker()
         self.window.update_write_action_buttons()
@@ -387,3 +387,30 @@ class MappingReviewTests(CloseDuringOperationTests):
         workbook.save(report)
         rows = self.window.read_mapping_review_candidates(report)
         self.assertEqual(["Номинальный ток", "Ток расцепителя"], [row["source_attribute"] for row in rows])
+
+
+class EtmCertificatesTests(CloseDuringOperationTests):
+    def test_certificate_dates_on_the_reference_tab(self) -> None:
+        from PySide6.QtWidgets import QPushButton
+
+        tab = self.window.build_reference_tab()
+        labels = [button.text() for button in tab.findChildren(QPushButton)]
+        self.assertIn("Открыть таблицу", labels)
+        self.assertIn("Взять даты из файла...", labels)
+        base = Path(self.temp_dir.name) / "base.sqlite"
+        make_base(base, "x")
+        self.window.db_path_edit.setText(str(base))
+        self.window.work_dir_edit.setText(self.temp_dir.name)
+        with mock.patch.object(self.window, "start_worker") as start:
+            self.window.run_certificates_table(log=self.window.reference_log)
+        start.assert_called_once()
+        self.assertIn("Обновляю таблицу сертификатов", self.window.reference_log.toPlainText())
+        self.assertNotIn("Обновляю таблицу сертификатов", self.window.raek_log.toPlainText())
+
+    def test_without_a_base_the_program_opens_on_the_settings(self) -> None:
+        self.assertEqual("", self.window.db_path_edit.text())
+        self.assertIs(self.window.settings_tab, self.window.tabs.currentWidget())
+        self.assertEqual(
+            ["ЭТМ", "РАЭК", "Справочники", "Обновление базы", "Правила маппинга", "Настройки и база"],
+            [self.window.tabs.tabText(index) for index in range(self.window.tabs.count())],
+        )

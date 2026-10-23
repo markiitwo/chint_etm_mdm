@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import sqlite3
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from contextlib import closing
@@ -83,3 +84,46 @@ def report_path_for(csv_path: Path) -> Path:
 def check_path_for(csv_path: Path) -> Path:
     """Rows or cards held back for review: upload them only after a look."""
     return csv_path.with_name(f"{csv_path.stem}_check{csv_path.suffix}")
+
+
+def run_folder(base: Path, title: str, when: dt.datetime | None = None) -> Path:
+    """A new folder for one run, "<title> YYYY-MM-DD HH-MM"; a second run in the same minute gets " (2)"."""
+    stem = f"{title} {(when or dt.datetime.now()).strftime('%Y-%m-%d %H-%M')}"
+    candidate, number = base / stem, 1
+    while candidate.exists():
+        number += 1
+        candidate = base / f"{stem} ({number})"
+    return candidate
+
+
+# Signs ETM's Win-1251 files cannot hold; without this they turn into "?" in the card.
+CP1251_SUBSTITUTES = {
+    "²": "2", "³": "3", "≤": "<=", "≥": ">=", "×": "x", "−": "-", "‐": "-", "‑": "-", "≈": "прибл.",
+    # The diameter in names: "Φ22 мм", "Ø 6 мм" -> "Ф22 мм", as Russian catalogs write it.
+    "Ø": "Ф", "ø": "Ф", "⌀": "Ф", "Φ": "Ф", "φ": "Ф", "\u03a9": "Ом", "\u2126": "Ом",
+}
+
+
+def cp1251_text(text: str) -> str:
+    """The text with signs Win-1251 lacks spelled in letters it has (мм² -> мм2, ≤ -> <=)."""
+    if not text:
+        return text
+    try:
+        text.encode("cp1251")
+        return text
+    except UnicodeEncodeError:
+        return "".join(CP1251_SUBSTITUTES.get(char) or cp1251_char(char) for char in text)
+
+
+def cp1251_char(char: str) -> str:
+    """Full-width signs of Chinese texts ("（", "～") and fractions ("½") have plain forms."""
+    try:
+        char.encode("cp1251")
+        return char
+    except UnicodeEncodeError:
+        plain = unicodedata.normalize("NFKC", char).replace("⁄", "/")
+        try:
+            plain.encode("cp1251")
+            return plain
+        except UnicodeEncodeError:
+            return char

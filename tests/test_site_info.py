@@ -11,6 +11,7 @@ from chint_etm_mdm.site_info import (
     SiteCache,
     parse_product,
     parse_search,
+    product_photo,
     site_lines,
     update_site_cache,
 )
@@ -56,6 +57,32 @@ class SiteInfoTests(unittest.TestCase):
         self.assertEqual("270х466х268.1", record.properties["Габариты"])
         self.assertEqual("IP20", record.properties["Степень защиты IP"])
         self.assertEqual("NVF7", record.properties["Серия"])
+
+    def test_site_logo_is_not_a_product_photo(self) -> None:
+        # A product without its own photo: the site puts its logo into og:image.
+        logo = "https://ensmas.ru/upload/dev2fun_opengraph/b45/logo.png"
+        page = (
+            f'<html><head><meta property="og:image" content="{logo}" />'
+            '<script type="application/ld+json">'
+            f'{{"@type": "Product", "sku": "616173", "name": "NH40", "image": "{logo}"}}'
+            "</script></head><body></body></html>"
+        )
+        self.assertEqual("", parse_product(page, "616173").image_url)
+        search = SEARCH.replace("/upload/iblock/90b/", "/upload/dev2fun_opengraph/90b/")
+        site = FakeSite({"https://ensmas.ru/catalog/?q=616173": search, PAGE_URL: page})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "site.json"
+            cache = SiteCache(path)
+            update_site_cache(cache, ["616173"], fetch=site, delay=0)
+            self.assertEqual(FOUND, cache.records["616173"].status)
+            self.assertEqual("", cache.records["616173"].image_url)
+
+            # A logo remembered by an older version is forgotten when the cache is read.
+            cache.records["616173"].image_url = logo
+            cache.save()
+            self.assertEqual("", SiteCache(path).records["616173"].image_url)
+        self.assertTrue(product_photo("https://ensmas.ru/upload/iblock/90b/o40txcjc/%D0%A4%D0%BE%D1%82%D0%BE.jpg"))
+        self.assertFalse(product_photo(logo))
 
     def test_page_of_another_article_is_not_used(self) -> None:
         record = parse_product(PRODUCT, "616172")
