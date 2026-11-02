@@ -415,11 +415,11 @@ class _ArticleCollector:
         for name, seen in self.attribute_seen.items():
             if len(seen) <= 1:
                 continue
+            attributes.pop(name, None)
             if name in self.dimension_columns:
                 # A size column: already reported as a size, and its text must not contradict the base either.
-                attributes.pop(name, None)
                 continue
-            notes.conflicts.append(FileConflict(self.article, name, tuple(seen), self.attributes[name]))
+            notes.conflicts.append(FileConflict(self.article, name, tuple(seen), ""))
         return EtimArticleData(
             article=self.article,
             sheet_name=self.sheet,
@@ -1117,7 +1117,7 @@ def result_lines(result: EtimImportResult) -> list[str]:
     if result.file_conflicts:
         lines.append(
             f"Разные значения в самом файле: {result.file_conflicts} (лист «Разное в файле»; "
-            "разные габариты одного товара в базу не записаны)"
+            "спорные значения в базу не записаны; прежние данные сохранены)"
         )
     if result.unknown_articles:
         lines.append(f"Артикулов в файле, которых нет в базе: {result.unknown_articles} (лист «Нет в базе»)")

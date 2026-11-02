@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -96,6 +97,26 @@ class ScanAllSheetsTests(unittest.TestCase):
         found = self.scan([DETAILED, ("Копия", DETAILED[1])], notes=notes)["A-1"]
         self.assertEqual(100.0, found.dimensions["length_mm"])
         self.assertEqual([], notes.conflicts)
+
+    def test_real_448129_conflicting_temperature_and_warranty_are_not_imported(self) -> None:
+        # Unchanged cells from Лист8, rows 458 and 1472 of the user's ETIM export.
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "etim_448129_conflicts.json").read_text(encoding="utf-8")
+        )
+        notes = etim_importer.ScanNotes()
+        found = self.scan([(fixture["sheet"], fixture["rows"])], articles=("448129",), notes=notes)["448129"]
+        for field in fixture["rows"][0][1:3]:
+            with self.subTest(field=field):
+                self.assertNotIn(field, found.attributes)
+                self.assertNotIn(field, found.attribute_sheets)
+                conflict = next(item for item in notes.conflicts if item.field == field)
+                self.assertEqual("", conflict.kept)
+                column = fixture["rows"][0].index(field)
+                self.assertEqual(
+                    {str(fixture["rows"][row][column]) for row in (1, 3)},
+                    {value for value, _sheet, _row in conflict.values},
+                )
+        self.assertEqual(fixture["rows"][1][3], found.attributes["Наименование"])
 
 
 class ImportSafetyTests(unittest.TestCase):
