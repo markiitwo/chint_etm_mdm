@@ -57,6 +57,90 @@ class AssignmentTests(unittest.TestCase):
         self.assertEqual("", manager_for("NXB", assignment))
 
 
+def make_export(path: Path) -> None:
+    """The company's export: a tree sheet first, the table with a series column on the second."""
+    workbook = Workbook()
+    tree = workbook.active
+    tree.title = "PM by PG master cat"
+    tree.append(["ОБОРУДОВАНИЕ НИЗКОГО НАПРЯЖЕНИЯ", None])
+    tree.append(["NTE8", "Левин Илья"])
+    sheet = workbook.create_sheet("PM by PG prod piramide")
+    sheet.append(["Группы Аналитического учета ", "Группы товарных категорий", "Товарная категория", "Серия", "Ответственный PM"])
+    sheet.append(["Оборудование низкого напряжения", "Оборудование сигнализации", "Реле задержки времени", "NTE8", "Левин Илья"])
+    sheet.append(["Оборудование низкого напряжения", "Оборудование защиты", "Автоматические выключатели", "NXB-63", "Власова Светлана/ Тимофеев Артем"])
+    sheet.append(["Оборудование низкого напряжения", "Оборудование защиты", "Автоматические выключатели", "NB1", "Брежнева Галина / Ремизов Алексей"])
+    sheet.append(["Оборудование низкого напряжения", "Оборудование защиты", "Автоматические выключатели", "NB1", "Брежнева Галина / Ремизов Алексей"])
+    sheet.append(["Оборудование низкого напряжения", "Оборудование защиты", "Автоматические выключатели", "NB8", None])
+    workbook.save(path)
+
+
+class ExportFormatTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_file_names_found(self) -> None:
+        from chint_etm_mdm.pm_requests import ASSIGNMENT_RE
+
+        for name in ("Закрепление ПМ", "выгрузка по ответственным ПМ 2", "Ответственные PM"):
+            self.assertTrue(ASSIGNMENT_RE.search(name), name)
+        self.assertFalse(ASSIGNMENT_RE.search("Почты продактов"))
+
+    def test_export_read_like_the_old_file(self) -> None:
+        path = self.root / "выгрузка по ответственным ПМ 2.xlsx"
+        make_export(path)
+        assignment = load_assignment(path)
+        self.assertEqual(
+            [
+                ("NTE8", "Левин Илья", "Реле задержки времени"),
+                ("NXB-63", "Власова Светлана / Тимофеев Артем", "Автоматические выключатели"),
+                ("NB1", "Брежнева Галина / Ремизов Алексей", "Автоматические выключатели"),
+                ("NB1", "Брежнева Галина / Ремизов Алексей", "Автоматические выключатели"),
+            ],
+            [(item.series, item.manager, item.line) for item in assignment],
+        )
+        self.assertEqual("Левин Илья", manager_for("NTE8", assignment))
+        self.assertEqual("Власова Светлана / Тимофеев Артем", manager_for("NXB-63 (H)", assignment))
+        self.assertEqual("", manager_for("NB8", assignment))  # a series with no manager is not asked for
+
+    def test_emails_follow_the_person_when_the_name_is_written_anew(self) -> None:
+        from chint_etm_mdm.pm_requests import find_email, update_contacts
+
+        path = self.root / CONTACTS_NAME
+        book = Workbook()
+        sheet = book.active
+        sheet.append(["Продакт", "Почта"])
+        sheet.append(["Левин И.", "levin@example.com"])
+        sheet.append(["Власова С.", "vlasova@example.com"])
+        sheet.append(["Казнаховский В.", "kaz@example.com"])
+        book.save(path)
+        export = self.root / "выгрузка по ответственным ПМ.xlsx"
+        make_export(export)
+        contacts = update_contacts(path, load_assignment(export))
+        self.assertEqual("levin@example.com", find_email("Левин Илья", contacts))
+        self.assertEqual("vlasova@example.com", find_email("Власова Светлана", contacts))
+        self.assertEqual("", find_email("Тимофеев Артем", contacts))  # no address yet: the row waits to be filled
+        self.assertEqual("kaz@example.com", find_email("Казнаховский В.", contacts))  # a person who left the file keeps the address
+        rows = [(row[0], row[1]) for row in load_workbook(path).active.iter_rows(min_row=2, values_only=True)]
+        self.assertIn(("Левин Илья", "levin@example.com"), rows)
+        self.assertIn(("Казнаховский В.", "kaz@example.com"), rows)
+        self.assertNotIn(("Левин И.", "levin@example.com"), rows)
+
+    def test_same_person(self) -> None:
+        from chint_etm_mdm.pm_requests import same_person
+
+        self.assertTrue(same_person("Левин И.", "Левин Илья"))
+        self.assertTrue(same_person("Дмитрий Докучаев", "Докучаев Д."))
+        self.assertFalse(same_person("Левин И.", "Левин Игорь Петрович"))
+        self.assertFalse(same_person("Власова С.", "Власов С."))
+        self.assertFalse(same_person("Левин И.", "Лебедев И."))
+
+
 class RequestRoundTripTests(unittest.TestCase):
     setUp = test_raek.RaekTests.setUp
     tearDown = test_raek.RaekTests.tearDown

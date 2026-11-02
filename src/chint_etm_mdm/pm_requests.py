@@ -32,7 +32,11 @@ from .atomic_files import atomic_write_json
 from .filler import normalize_article
 from .value_matching import LOGICAL_NO, LOGICAL_YES, Characteristic, canonical, match_value
 
-ASSIGNMENT_RE = re.compile(r"закреплени\w*\s*пм", re.IGNORECASE)
+# «Закрепление ПМ.xlsx» and the company's export «выгрузка по ответственным ПМ.xlsx» (PM may be typed in Latin).
+ASSIGNMENT_RE = re.compile(r"закреплени\w*\s*(пм|pm)|ответственн\w*\s*(пм|pm)", re.IGNORECASE)
+SERIES_HEADER = "серия"
+MANAGER_HEADERS = ("ответственный пм", "ответственный pm")
+CATEGORY_HEADER = "товарная категория"
 CONTACTS_NAME = "Почты продактов.xlsx"
 MARK = "CHINT-MDM-REQUEST"
 META_SHEET = "_chint"
@@ -119,16 +123,51 @@ def latest_assignment_file(folders: list[Path]) -> Path | None:
     return max(found, key=lambda path: path.stat().st_mtime) if found else None
 
 
-def load_assignment(path: Path) -> list[Assignment]:
-    """Series → manager from «Закрепление ПМ.xlsx»: blocks of three columns (series | Ответственный ПМ | note).
+def table_columns(rows: list[list]) -> tuple[int, int, int, int | None] | None:
+    """(header row, series column, manager column, category column) of a plain table «Серия … Ответственный PM»."""
+    for number, row in enumerate(rows[:3]):
+        names = [canonical(str(value or "")) for value in row]
+        series = [idx for idx, name in enumerate(names) if name == SERIES_HEADER]
+        managers = [idx for idx, name in enumerate(names) if name in MANAGER_HEADERS]
+        if len(series) == 1 and len(managers) == 1:
+            return number, series[0], managers[0], names.index(CATEGORY_HEADER) if CATEGORY_HEADER in names else None
+    return None
 
-    A row with a name and no manager is a product line heading for the rows below it.
+
+def load_assignment_table(rows: list[list], columns: tuple[int, int, int, int | None]) -> list[Assignment]:
+    """The company's export: one row per series with its manager and product category.
+
+    Several managers of one series are written in one cell ("A / B"); the same pair is always spelled the same way,
+    so one pair gets one request file.
+    """
+    header, series_col, manager_col, category_col = columns
+    result = []
+    for row in rows[header + 1 :]:
+        cells = list(row) + [None] * (max(series_col, manager_col, category_col or 0) + 1)
+        series, manager = str(cells[series_col] or "").strip(), str(cells[manager_col] or "").strip()
+        if not series or not manager:
+            continue
+        category = str(cells[category_col] or "").strip() if category_col is not None else ""
+        result.append(Assignment(series, " / ".join(people(manager)), category, ""))
+    return result
+
+
+def load_assignment(path: Path) -> list[Assignment]:
+    """Series → manager, from the company's export (a table «Серия | Ответственный PM», any sheet)
+    or from the older «Закрепление ПМ.xlsx»: blocks of three columns (series | Ответственный ПМ | note).
+
+    In the blocks, a row with a name and no manager is a product line heading for the rows below it.
     """
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
-        rows = [list(row) for row in workbook.worksheets[0].iter_rows(values_only=True)]
+        sheets = [[list(row) for row in sheet.iter_rows(values_only=True)] for sheet in workbook.worksheets]
     finally:
         workbook.close()
+    for sheet_rows in sheets:
+        columns = table_columns(sheet_rows)
+        if columns:
+            return load_assignment_table(sheet_rows, columns)
+    rows = sheets[0] if sheets else []
     blocks = []
     for row in rows[:3]:
         for idx, value in enumerate(row):
@@ -170,23 +209,60 @@ def people(manager: str) -> list[str]:
     return [name.strip() for name in re.split(r"[,/;]", manager) if name.strip()]
 
 
-def load_contacts(path: Path) -> dict[str, str]:
+def contact_rows(path: Path) -> list[tuple[str, str]]:
+    """(name, email) of every row that has an email, as typed."""
     if not path.exists():
-        return {}
+        return []
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
-        return {
-            canonical(str(row[0])): str(row[1]).strip()
+        return [
+            (str(row[0]).strip(), str(row[1]).strip())
             for row in workbook.worksheets[0].iter_rows(min_row=2, values_only=True)
             if row and row[0] and len(row) > 1 and row[1] and "@" in str(row[1])
-        }
+        ]
     finally:
         workbook.close()
 
 
+def load_contacts(path: Path) -> dict[str, str]:
+    return {canonical(name): email for name, email in contact_rows(path)}
+
+
+def name_words(name: str) -> list[str]:
+    return re.findall(r"\w+", canonical(name))
+
+
+def same_person(first: str, second: str) -> bool:
+    """"Левин Илья", "Илья Левин" and "Левин И." are one person; so are "Власова Светлана" and "Власова С."."""
+    words_a, words_b = name_words(first), name_words(second)
+    if not words_a or not words_b:
+        return False
+    if set(words_a) == set(words_b):
+        return True
+    for short, full in ((words_a, words_b), (words_b, words_a)):
+        initials = [word for word in short if len(word) == 1]
+        if len(short) == 2 and len(initials) == 1 and len(full) == 2:
+            surname = next(word for word in short if len(word) > 1)
+            rest = [word for word in full if word != surname]
+            if len(rest) == 1 and rest[0].startswith(initials[0]):
+                return True
+    return False
+
+
+def find_email(person: str, contacts: dict[str, str]) -> str:
+    """The email of a person by the name in the assignment file, whichever way the name is written there."""
+    email = contacts.get(canonical(person))
+    if email:
+        return email
+    return next((email for name, email in contacts.items() if same_person(person, name)), "")
+
+
 def update_contacts(path: Path, assignment: list[Assignment]) -> dict[str, str]:
-    """The emails table: one row per person of the assignment file; emails typed there are kept."""
-    known = load_contacts(path)
+    """The emails table: one row per person of the assignment file; emails typed there are kept,
+    also when the file now writes the name another way ("Левин И." → "Левин Илья").
+    A row of a person who is not in the file any more stays at the bottom: the address is not lost."""
+    rows = contact_rows(path)
+    known = {canonical(name): email for name, email in rows}
     names = sorted({person for item in assignment for person in people(item.manager)})
     workbook = Workbook()
     sheet = workbook.active
@@ -194,14 +270,18 @@ def update_contacts(path: Path, assignment: list[Assignment]) -> dict[str, str]:
     sheet.append(["Продакт", "Почта"])
     sheet["A1"].font = sheet["B1"].font = Font(bold=True)
     for name in names:
-        sheet.append([name, known.get(canonical(name), "")])
-        if not known.get(canonical(name)):
+        email = find_email(name, known)
+        sheet.append([name, email])
+        if not email:
             sheet.cell(sheet.max_row, 2).fill = YELLOW
+    for name, email in rows:
+        if not any(same_person(name, person) for person in names):
+            sheet.append([name, email])
     sheet.column_dimensions["A"].width = 28
     sheet.column_dimensions["B"].width = 36
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
-    return known
+    return load_contacts(path)
 
 
 # --- the journal of what was asked ---------------------------------------------------------------
@@ -302,8 +382,8 @@ def write_requests(
         stem = f"Запрос_{safe_name(manager)}_{today.isoformat()}"
         path = unique(output_dir / f"{stem}.xlsx")
         write_request_file(path, manager, items, request_id, reason, today)
-        emails = [contacts[canonical(person)] for person in people(manager) if canonical(person) in contacts]
-        missing = [person for person in people(manager) if canonical(person) not in contacts and manager != NO_MANAGER]
+        emails = [email for email in (find_email(person, contacts) for person in people(manager)) if email]
+        missing = [person for person in people(manager) if not find_email(person, contacts) and manager != NO_MANAGER]
         result.missing_emails.extend(person for person in missing if person not in result.missing_emails)
         request = RequestFile(manager, path, len(items), emails)
         if manager != NO_MANAGER:
