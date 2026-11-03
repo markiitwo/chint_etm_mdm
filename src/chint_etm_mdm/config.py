@@ -31,9 +31,6 @@ class AppConfig:
     def work_path(self) -> Path | None:
         return Path(self.work_dir) if self.work_dir else None
 
-    @property
-    def database_path(self) -> Path | None:
-        return Path(self.db_path) if self.db_path else None
 
 
 def user_config_path() -> Path:

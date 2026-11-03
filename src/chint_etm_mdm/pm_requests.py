@@ -497,17 +497,6 @@ def write_draft(attachment: Path, emails: list[str], items: int, reason: str) ->
 # --- reading answers -----------------------------------------------------------------------------
 
 
-def is_request_file(path: Path) -> bool:
-    try:
-        workbook = load_workbook(path, read_only=True)
-    except Exception:
-        return False
-    try:
-        return META_SHEET in workbook.sheetnames and workbook[META_SHEET]["A1"].value == MARK
-    finally:
-        workbook.close()
-
-
 def checked_answer(label: str, kind: str, allowed: tuple[str, ...], answer: str) -> tuple[str, str]:
     """(value to keep, why rejected). An answer outside a closed list is matched to the list's wording."""
     plain = PLAIN_CHECKS.get(canonical(label))

@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from .db_utils import connect_database, create_sqlite_backup, sha256_file
 from .net import open_url
@@ -301,18 +301,6 @@ def publish_unique_path(temp_path: Path, path: Path) -> Path:
         if os.name != "nt":
             temp_path.unlink()
         return candidate
-    raise ValueError(f"Не удалось подобрать свободное имя файла для {path}")
-
-
-def unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    for index in range(1, 1000):
-        candidate = path.with_name(f"{stem}_{index}{suffix}")
-        if not candidate.exists():
-            return candidate
     raise ValueError(f"Не удалось подобрать свободное имя файла для {path}")
 
 
