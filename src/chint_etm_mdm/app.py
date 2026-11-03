@@ -2848,10 +2848,6 @@ class MainWindow(QMainWindow):
         self.remove_matching_rule_row(row_data)
         return changed
 
-    def save_rule_from_row(self, row_idx: int) -> bool:
-        row_data = self.row_data(row_idx)
-        return self.save_rule_data(row_data) if row_data is not None else False
-
     def reject_rule_data(self, row_data: dict[str, str]) -> bool:
         if self.rules_locked():
             return False
@@ -2871,10 +2867,6 @@ class MainWindow(QMainWindow):
         )
         self.remove_matching_rule_row(row_data)
         return changed
-
-    def reject_rule_from_row(self, row_idx: int) -> bool:
-        row_data = self.row_data(row_idx)
-        return self.reject_rule_data(row_data) if row_data is not None else False
 
     def save_selected_rules(self) -> None:
         if self.rules_locked():
