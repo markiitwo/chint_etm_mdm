@@ -455,7 +455,7 @@ sqlite3 -readonly /tmp/mdm_copy.sqlite "select count(*) from product_attribute_v
 | C3 | S | оркестратор | #32 | ☑ | минус 337 строк |
 | F-site | S | оркестратор | #37 | ☑ | 300 товаров: ~15 → ~8 мин |
 | S1 | M | | | ☐ | app.py 2992 → ? |
-| S2 | M | | | ☐ | |
+| S2 | M | оркестратор | #44 | ☑ | книга открывается 1 раз; app.py 2992 → 2842 |
 | F-perf | M | | | ☐ | 3,9 с → ? |
 | D1 | S | | | ☐ | |
 | D2 | S | | | ☐ | |
