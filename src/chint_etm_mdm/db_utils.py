@@ -3,12 +3,16 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import os
+import re
 import sqlite3
 import tempfile
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+
+# Backups of one base with one label kept in the folder; older ones are removed after a good new one.
+KEEP_BACKUPS = 5
 
 # Tables every CHINT ETM MDM database has; a file without them is not a backup of this program's base.
 CHINT_TABLES = ("products", "price_snapshots", "price_snapshot_items")
@@ -101,6 +105,17 @@ def remove_sqlite_sidecars(db_path: Path) -> None:
             raise OSError(f"Could not remove SQLite sidecar file {sidecar}: {exc}") from exc
 
 
+def remove_old_backups(backup_dir: Path, db_name: str, label: str) -> None:
+    """Leave the KEEP_BACKUPS newest; only files named the way create_sqlite_backup names them are touched."""
+    name = re.compile(re.escape(f"{db_name}.{label}_") + r"\d{8}T\d{6}\.\d{6}Z_[0-9a-f]{8}")
+    backups = sorted(path for path in backup_dir.iterdir() if name.fullmatch(path.name) and path.is_file())
+    for path in backups[:-KEEP_BACKUPS]:
+        try:
+            path.unlink()
+        except OSError:
+            pass  # a copy held open elsewhere stays until the next backup
+
+
 def create_sqlite_backup(db_path: Path, backup_dir: Path | None = None, label: str = "bak") -> BackupResult:
     if not db_path.exists():
         raise FileNotFoundError(f"SQLite database not found: {db_path}")
@@ -128,6 +143,7 @@ def create_sqlite_backup(db_path: Path, backup_dir: Path | None = None, label: s
         final_path = backup_dir / f"{db_path.name}.{label}_{stamp}_{digest[:8]}"
         os.replace(temp_path, final_path)
         temp_name = ""
+        remove_old_backups(backup_dir, db_path.name, label)
         return BackupResult(final_path, digest, created_at, True)
     finally:
         if temp_name:

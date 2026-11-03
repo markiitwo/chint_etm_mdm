@@ -26,6 +26,16 @@ class SqliteBackupTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_only_the_newest_backups_of_the_label_are_kept(self) -> None:
+        old = [self.root / f"source.sqlite.bak_202610{day:02d}T120000.000000Z_0123abcd" for day in range(1, 8)]
+        others = [self.root / "source.sqlite.before_restore_20261001T120000.000000Z_0123abcd", self.root / "source.sqlite.bak_копия"]
+        for path in old + others:
+            path.write_bytes(b"x")
+        backup = create_sqlite_backup(self.db_path)
+        self.assertTrue(backup.path.exists())
+        self.assertEqual(old[-4:], [path for path in old if path.exists()])
+        self.assertTrue(all(path.exists() for path in others))
+
     @staticmethod
     def read_value(db_path: Path) -> str:
         with closing(sqlite3.connect(db_path)) as conn:
