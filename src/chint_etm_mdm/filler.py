@@ -703,8 +703,11 @@ def fill_xlsx_template(
     template: PartnerTemplate | None = None,
     fallback_values: dict[tuple[str, str], str | tuple[str, str]] | None = None,
     extra_attributes: dict[str, dict[str, str]] | None = None,
+    products: dict[str, ProductRecord] | None = None,
 ) -> FillResult:
-    """`fallback_values` ((article, header) -> value or (value, source)) fill what the database leaves empty."""
+    """`fallback_values` ((article, header) -> value or (value, source)) fill what the database leaves empty.
+
+    `products` already read from the database spare reading them again."""
     from .manual_values import load_manual_values
 
     template = partner_template(template)
@@ -731,7 +734,10 @@ def fill_xlsx_template(
         if article_idx < len(row):
             articles.append(normalize_article(row[article_idx].value))
 
-    products = fetch_products(db_path, articles)
+    if products is None:
+        products = fetch_products(db_path, articles)
+    else:
+        products = {article: products[article] for article in articles if article in products}
     for article, extra in (extra_attributes or {}).items():
         product = products.get(article)
         if product is not None and extra:
