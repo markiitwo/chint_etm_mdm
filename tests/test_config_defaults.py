@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from chint_etm_mdm.config import AppConfig, first_run_defaults
+from chint_etm_mdm.config import AppConfig, database_place_warning, first_run_defaults
 
 
 class FirstRunDefaultsTests(unittest.TestCase):
@@ -25,6 +25,19 @@ class FirstRunDefaultsTests(unittest.TestCase):
             self.assertEqual("", first_run_defaults(AppConfig(), Path(tmp)).db_path)
 
 
+
+
+class DatabasePlaceTests(unittest.TestCase):
+    def test_warning_unless_in_work_folder(self) -> None:
+        home = Path("/home/u")
+        work = "/home/u/CHINT ETM MDM Work"
+        self.assertEqual("", database_place_warning(Path(work) / "database" / "chint_mdm.sqlite", work, home))
+        self.assertIn("«Загрузках»", database_place_warning(home / "Downloads" / "chint_mdm.sqlite", work, home))
+        self.assertIn("«Загрузках»", database_place_warning(home / "Загрузки" / "old" / "chint_mdm.sqlite", work, home))
+        self.assertEqual(
+            "База не в рабочей папке — перенесите её в рабочую папку",
+            database_place_warning(Path("/mnt/share/chint_mdm.sqlite"), work, home),
+        )
 
 
 class InboxFolderTests(unittest.TestCase):

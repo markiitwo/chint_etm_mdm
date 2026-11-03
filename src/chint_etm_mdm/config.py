@@ -105,6 +105,19 @@ def first_run_defaults(config: AppConfig, home: Path | None = None) -> AppConfig
     return replace(config, work_dir=work_dir, db_path=db_path)
 
 
+def database_place_warning(db_path: Path, work_dir: str, home: Path | None = None) -> str:
+    """One line for the database status when the base is not in <work folder>/database/; "" when it is."""
+    home = home or Path.home()
+    folder = db_path.resolve().parent
+    if work_dir and folder == (Path(work_dir) / "database").resolve():
+        return ""
+    if folder in {(home / "Downloads").resolve(), (home / "Загрузки").resolve()} or any(
+        folder.is_relative_to((home / name).resolve()) for name in ("Downloads", "Загрузки")
+    ):
+        return "База в «Загрузках» — перенесите её в рабочую папку"
+    return "База не в рабочей папке — перенесите её в рабочую папку"
+
+
 def incoming_folders(inbox_dir: str = "", home: Path | None = None) -> list[Path]:
     """Where new files from colleagues and partners are looked for: the inbox folder first, then Downloads."""
     home = home or Path.home()

@@ -40,7 +40,7 @@ from openpyxl import load_workbook
 
 from . import __version__
 from .analyzer import analyze_template_mapping
-from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
+from .config import LOAD_PROBLEMS as config_load_problems, AppConfig, database_place_warning, ensure_work_dirs, first_run_defaults, incoming_folders, load_config, save_config
 from .db import get_stats
 from .db_utils import BackupRejected, base_problem, copy_sqlite_database, create_sqlite_backup
 from .etm_materials import (
@@ -2141,9 +2141,11 @@ class MainWindow(QMainWindow):
         if work_text:
             rules_text = str(workdir_rules_path(Path(work_text)))
 
+        place = database_place_warning(db_path, work_text)
         self.status_text.setPlainText(
             "\n".join(
-                [
+                ([place] if place else [])
+                + [
                     f"Файл: {db_path}",
                     f"Файл правил: {rules_text}",
                     f"Товаров: {stats.products_count}",
