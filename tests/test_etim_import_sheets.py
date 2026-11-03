@@ -187,6 +187,18 @@ class ImportSafetyTests(unittest.TestCase):
         report.close()
         self.assertTrue(any("Внимание: Отчёт сохранён" in line for line in etim_importer.result_lines(result)))
 
+    def test_same_file_twice_is_refused_unless_asked(self) -> None:
+        path = write_etim(self.root / "etim.xlsx", [DETAILED])
+        first = etim_importer.import_etim_workbook(path, self.db, make_backup=False, report_dir=self.reports)
+        before = rows(self.db, "SELECT COUNT(*) FROM product_attribute_values")
+        self.assertEqual((first.import_id, mock.ANY), etim_importer.etim_already_imported(path, self.db))
+        with self.assertRaisesRegex(ValueError, "уже импортирован"):
+            etim_importer.import_etim_workbook(path, self.db, make_backup=False, report_dir=self.reports)
+        self.assertEqual(before, rows(self.db, "SELECT COUNT(*) FROM product_attribute_values"))
+        self.assertEqual(1, len(rows(self.db, "SELECT * FROM dimension_imports")))
+        again = etim_importer.import_etim_workbook(path, self.db, make_backup=False, report_dir=self.reports, allow_repeat=True)
+        self.assertNotEqual(first.import_id, again.import_id)
+
     def test_broken_file_stops_before_backup_and_tables(self) -> None:
         broken = self.root / "etim.xlsx"
         broken.write_bytes(b"not a workbook")

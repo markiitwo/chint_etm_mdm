@@ -13,7 +13,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 
-from .db_utils import CHINT_TABLES, connect_database, restore_sqlite_backup
+from .db_utils import CHINT_TABLES, connect_database, restore_sqlite_backup, sha256_file
 from .excel_files import readable_xlsx
 from .number_parsing import parse_number
 from .price_importer import backup_database
@@ -482,6 +482,27 @@ def scan_etim_workbook(
     return {article: collector.finish(notes) for article, collector in collected.items()}
 
 
+def has_etim_hash_column(conn: sqlite3.Connection) -> bool:
+    return any(row[1] == "content_sha256" for row in conn.execute("PRAGMA table_info(dimension_imports)"))
+
+
+def imported_etim_for(conn: sqlite3.Connection, digest: str) -> tuple[int, str] | None:
+    """(import id, date) of the import this exact file content already went into, if any."""
+    has_table = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dimension_imports'").fetchone()
+    if not has_table or not has_etim_hash_column(conn):
+        return None
+    row = conn.execute(
+        "SELECT id, COALESCE(created_at, '') FROM dimension_imports WHERE content_sha256 = ? ORDER BY id DESC LIMIT 1",
+        (digest,),
+    ).fetchone()
+    return (int(row[0]), str(row[1])) if row else None
+
+
+def etim_already_imported(etim_path: Path, db_path: Path) -> tuple[int, str] | None:
+    with closing(connect_database(db_path)) as conn:
+        return imported_etim_for(conn, sha256_file(etim_path))
+
+
 def ensure_etim_import_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -495,6 +516,8 @@ def ensure_etim_import_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    if not has_etim_hash_column(conn):  # an added empty column: older versions keep working with the base
+        conn.execute("ALTER TABLE dimension_imports ADD COLUMN content_sha256 TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS product_dimensions_raw (
@@ -834,6 +857,7 @@ def import_etim_workbook(
     db_path: Path,
     make_backup: bool = True,
     report_dir: Path | None = None,
+    allow_repeat: bool = False,
 ) -> EtimImportResult:
     """Read and check the file first, write the report before the commit, then publish it.
 
@@ -845,8 +869,12 @@ def import_etim_workbook(
     if not db_path.exists():
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
+    digest = sha256_file(etim_path)
     readable = readable_xlsx(etim_path, "ETIM-файл")  # before the backup: an unreadable file changes nothing
     with closing(connect_database(db_path)) as conn:
+        earlier = imported_etim_for(conn, digest)
+        if earlier and not allow_repeat:
+            raise ValueError(f"Этот ETIM-файл уже импортирован (импорт id {earlier[0]}). База не изменена.")
         articles = fetch_all_articles(conn)
     scanned_articles = len(articles)
     notes = ScanNotes()
@@ -870,14 +898,15 @@ def import_etim_workbook(
             cur = conn.cursor()
             cur.execute(
                 """
-                INSERT INTO dimension_imports (source_kind, local_file, workbook_name, notes)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO dimension_imports (source_kind, local_file, workbook_name, notes, content_sha256)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     SOURCE_KIND,
                     str(etim_path),
                     etim_path.name,
                     f"ETIM import {dt.datetime.now().isoformat(timespec='seconds')}",
+                    digest,
                 ),
             )
             import_id = int(cur.lastrowid)
