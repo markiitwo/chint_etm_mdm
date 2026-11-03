@@ -1,3 +1,5 @@
+> Архив. Актуальное — CHANGELOG.md и docs/REFACTOR_PLAN.md
+
 # Аудит багов и план исправлений CHINT ETM MDM
 
 Дата: 09.09.2026. Основание: код на коммите `62a918c` (`Handle price headers after metadata rows`).
