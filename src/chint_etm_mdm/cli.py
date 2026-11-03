@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .analyzer import analyze_template_mapping
 from .config import incoming_folders, load_config
+from .inputs import bring_in, input_folders
 from .db import get_stats
 from .etm_categories import fill_new_products, latest_codes_file, new_articles_since
 from .etim_importer import (
@@ -164,7 +165,7 @@ def main() -> None:
             if rules_path is None:
                 parser.error("--rules is required for --pm-requests")
             work = rules_path.parent.parent
-            assignment_file = latest_assignment_file(incoming_folders(load_config().inbox_dir) + [work / "input", work])
+            assignment_file = bring_in(latest_assignment_file(incoming_folders(load_config().inbox_dir) + input_folders(work) + [work]), work, "закрепление ПМ")
             if assignment_file is None:
                 parser.error("«Закрепление ПМ.xlsx» not found in Downloads or the work folder")
             requests = write_requests(
