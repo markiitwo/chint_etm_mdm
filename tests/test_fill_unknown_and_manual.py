@@ -85,6 +85,18 @@ class UnknownProductTests(unittest.TestCase):
         self.assertIsNone(sheet["C2"].value)
         self.assertEqual(1, result.filled_cells)
 
+    def test_given_products_are_not_read_again(self) -> None:
+        template = write_book(self.root / "template.xlsx", [["A-1", None, None, None]])
+        given = {"A-1": ProductRecord(article="A-1", name="Из базы"), "B-2": ProductRecord(article="B-2")}
+        with patch("chint_etm_mdm.filler.fetch_products") as fetch:
+            result = fill_xlsx_template(
+                self.root / "db.sqlite", template, self.root / "out", products=given,
+                extra_attributes={"A-1": {"Цвет": "белый"}},
+            )
+        fetch.assert_not_called()
+        self.assertEqual("Из базы", load_workbook(result.output_path).active["B2"].value)
+        self.assertIsNone(given["A-1"].attributes)  # the caller's records stay as they were
+
 
 class PutBaseValueBackTests(unittest.TestCase):
     def setUp(self) -> None:

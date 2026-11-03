@@ -86,8 +86,8 @@ def cell_text(value: object) -> str:
     return normalize_header(value)
 
 
-def read_category_template(path: Path) -> CategoryTemplate:
-    workbook = load_workbook(path)
+def read_category_template(path: Path, workbook: Workbook | None = None) -> CategoryTemplate:
+    workbook = workbook or load_workbook(path)
     if TEMPLATE_SHEET not in workbook.sheetnames:
         raise ValueError(f"В файле {path.name} нет листа «{TEMPLATE_SHEET}».")
     sheet = workbook[TEMPLATE_SHEET]
@@ -336,9 +336,13 @@ def series_default_values(
     return values
 
 
-def prepare_input(category: CategoryTemplate, articles: list[str], target: Path) -> None:
-    """A copy of the category template with one row per article (style of ETM's first row)."""
-    workbook = load_workbook(category.path)
+def prepare_input(
+    category: CategoryTemplate, articles: list[str], target: Path, workbook: Workbook | None = None
+) -> None:
+    """A copy of the category template with one row per article (style of ETM's first row).
+
+    `workbook` is the already loaded template; it is changed in place."""
+    workbook = workbook or load_workbook(category.path)
     sheet = workbook[TEMPLATE_SHEET]
     workbook.active = workbook.sheetnames.index(TEMPLATE_SHEET)
     headers = [normalize_header(cell.value) for cell in sheet[1]]
@@ -378,9 +382,11 @@ def export_upload_csv(xlsx_path: Path, csv_path: Path, articles: frozenset[str] 
 
     With `articles`, only those products' rows are written.
     """
-    workbook = load_workbook(xlsx_path, data_only=True)
-    sheet = workbook[TEMPLATE_SHEET]
-    rows = list(sheet.iter_rows(values_only=True))
+    workbook = load_workbook(xlsx_path, read_only=True, data_only=True)
+    try:
+        rows = list(workbook[TEMPLATE_SHEET].iter_rows(values_only=True))
+    finally:
+        workbook.close()
     headers = [normalize_header(value) for value in rows[0]]
     width = max(idx for idx, name in enumerate(headers) if name) + 1
     article_idx = headers.index("Артикул")
@@ -685,12 +691,13 @@ def fill_new_products(
         if code not in library:
             run.missing_templates[code] = members
             continue
-        category = read_category_template(library[code])
+        template_book = load_workbook(library[code])  # one load for reading and for the input copy
+        category = read_category_template(library[code], template_book)
         for header_key, values in category.dropdowns.items():
             run.allowed[(code, header_key)] = values
         tech_dir.mkdir(parents=True, exist_ok=True)
         input_path = tech_dir / f"новинки_{code}.xlsx"
-        prepare_input(category, members, input_path)
+        prepare_input(category, members, input_path, template_book)
         member_set = set(members)
         given = shared_answers(answers, member_set, category.headers)
         given.update(
@@ -706,6 +713,7 @@ def fill_new_products(
             template=replace(template, dropdowns=category.dropdowns),
             fallback_values=fallback,
             extra_attributes={article: answered_features[article] for article in members if article in answered_features},
+            products=products,
         )
         # The name is made unique against the working files, which every class keeps.
         name = upload_csv_path(tech_dir, "new", (series.get(article, "") for article in members), code).name
