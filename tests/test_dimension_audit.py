@@ -154,18 +154,19 @@ if __name__ == "__main__":
 
 class AuditWindowTests(unittest.TestCase):
     def test_workers_report_and_clear(self) -> None:
-        from chint_etm_mdm.app import DimensionAuditWorker, DimensionClearWorker
+        from chint_etm_mdm.app import Worker
+        from chint_etm_mdm.dimension_audit import audit_dimensions, clear_wrong_dimensions
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "chint_mdm.sqlite"
             make_base(db)
             audits = []
-            worker = DimensionAuditWorker(db, Path(tmp) / "reports")
+            worker = Worker(audit_dimensions, db, Path(tmp) / "reports")
             worker.done.connect(audits.append)
             worker.failed.connect(self.fail)
             worker.run()
             cleared = []
-            clear = DimensionClearWorker(db, audits[0].fixable)
+            clear = Worker(clear_wrong_dimensions, db, audits[0].fixable)
             clear.done.connect(cleared.append)
             clear.failed.connect(self.fail)
             clear.run()

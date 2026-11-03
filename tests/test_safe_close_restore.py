@@ -277,18 +277,18 @@ class EtmTabTests(CloseDuringOperationTests):
         with mock.patch.object(self.window, "start_worker") as start:
             self.window.run_new_products()
         worker = start.call_args[0][0]
-        self.assertEqual(["586772", "625288"], worker.articles)
+        self.assertEqual(["586772", "625288"], worker.kwargs["articles"])
         self.assertEqual("ЭТМ", self.window.tabs.tabText(0))
 
         self.window.config.last_etm_articles = "111 222"
         with mock.patch.object(self.window, "start_worker") as start:
             self.window.run_etm_again()
-        self.assertEqual(["111", "222"], start.call_args[0][0].articles)
+        self.assertEqual(["111", "222"], start.call_args[0][0].kwargs["articles"])
 
         self.window.etm_new_mode.setChecked(True)
         with mock.patch.object(self.window, "start_worker") as start:
             self.window.etm_run_button.click()  # through the button, as the user does
-        self.assertIsNone(start.call_args[0][0].articles)
+        self.assertIsNone(start.call_args[0][0].kwargs["articles"])
 
 
 class EtmRequestsAfterRestartTests(CloseDuringOperationTests):
@@ -338,23 +338,26 @@ class BaseProblemTests(unittest.TestCase):
 
 class WorkerSignalsTests(CloseDuringOperationTests):
     def test_materials_and_price_download_start_and_report(self) -> None:
-        from chint_etm_mdm.app import MaterialsWorker, PriceImportWorker
+        from chint_etm_mdm.app import PriceImportWorker, Worker
+        from chint_etm_mdm.etm_materials import make_materials
 
         root = Path(self.temp_dir.name)
-        materials = MaterialsWorker(root / "base.sqlite", [], root, root, None)
+        materials = Worker(make_materials, root / "base.sqlite", [], root, root, None, report_progress=True)
         with mock.patch.object(materials, "start"):
-            self.assertTrue(self.window.start_worker(materials, lambda _result: None, self.fail))
+            self.assertTrue(self.window.start_worker(materials, lambda _result: None, self.fail, self.window.fill_log))
+        materials.progress.emit("шаг")
+        self.assertIn("шаг", self.window.fill_log.toPlainText())
         self.window.on_worker_finished(materials)
         price = PriceImportWorker(root / "base.sqlite", None, "https://example.test/price.xlsx", root)
         with mock.patch.object(price, "start"):
-            self.assertTrue(self.window.start_worker(price, lambda _result: None, self.fail))
+            self.assertTrue(self.window.start_worker(price, lambda _result: None, self.fail, self.window.price_log))
         price.downloaded.emit(root / "price.xlsx")
         self.assertEqual(str(root / "price.xlsx"), self.window.price_file_edit.text())
 
 
 class CopyBaseTests(CloseDuringOperationTests):
     def test_copy_in_the_background_keeps_the_old_one(self) -> None:
-        from chint_etm_mdm.app import CopyBaseWorker
+        from chint_etm_mdm.app import Worker, copy_base
 
         root = Path(self.temp_dir.name)
         source = root / "Загрузки" / "chint_mdm.sqlite"
@@ -364,7 +367,7 @@ class CopyBaseTests(CloseDuringOperationTests):
         target.parent.mkdir(parents=True)
         make_base(target, "old")
         copied = []
-        worker = CopyBaseWorker(source, target)
+        worker = Worker(copy_base, source, target)
         worker.done.connect(copied.append)
         worker.failed.connect(self.fail)
         worker.run()

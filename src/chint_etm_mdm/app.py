@@ -108,132 +108,26 @@ from .price_importer import (
 )
 
 
+class Worker(QThread):
+    """Runs fn(*args, **kwargs) off the window thread: done gets the result, failed the traceback."""
 
-
-class FillWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        db_path: Path,
-        template_path: Path,
-        output_dir: Path,
-        rules_path: Path | None,
-        manual_values_file: Path | None,
-    ) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.template_path = template_path
-        self.output_dir = output_dir
-        self.rules_path = rules_path
-        self.manual_values_file = manual_values_file
-
-    def run(self) -> None:
-        try:
-            self.done.emit(
-                fill_template(
-                    self.db_path,
-                    self.template_path,
-                    self.output_dir,
-                    self.rules_path,
-                    self.manual_values_file,
-                )
-            )
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class CertificatesWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        db_path: Path,
-        codes_file: Path | None,
-        table_path: Path,
-        dates_file: Path | None = None,
-        cert_folder: Path | None = None,
-    ) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.codes_file = codes_file
-        self.table_path = table_path
-        self.dates_file = dates_file
-        self.cert_folder = cert_folder
-
-    def run(self) -> None:
-        try:
-            self.done.emit(update_table(self.db_path, self.codes_file, self.table_path, dates_file=self.dates_file, register_folder=self.cert_folder))
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class RaekWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
     progress = Signal(str)
 
-    def __init__(
-        self,
-        db_path: Path,
-        zip_path: Path,
-        output_dir: Path,
-        codes_file: Path | None,
-        rules_path: Path | None,
-        site_cache: Path | None = None,
-        ask_site: bool = False,
-        certificates_table: Path | None = None,
-        answers_file: Path | None = None,
-        cert_folder: Path | None = None,
-    ) -> None:
+    def __init__(self, fn, *args, report_progress: bool = False, **kwargs) -> None:
         super().__init__()
-        self.cert_folder = cert_folder
-        self.certificates_table = certificates_table
-        self.answers_file = answers_file
-        self.db_path = db_path
-        self.zip_path = zip_path
-        self.output_dir = output_dir
-        self.codes_file = codes_file
-        self.rules_path = rules_path
-        self.site_cache = site_cache
-        self.ask_site = ask_site
+        if report_progress:
+            kwargs["progress"] = self.progress.emit
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
 
     def run(self) -> None:
         try:
-            self.done.emit(
-                fill_raek_zip(
-                    self.db_path,
-                    self.zip_path,
-                    self.output_dir,
-                    self.codes_file,
-                    self.rules_path,
-                    self.site_cache,
-                    self.ask_site,
-                    progress=self.progress.emit,
-                    certificates_table=self.certificates_table,
-                    cert_folder=self.cert_folder,
-                    answers_path=self.answers_file,
-                )
-            )
+            self.done.emit(self.fn(*self.args, **self.kwargs))
         except Exception:
             self.failed.emit(traceback.format_exc())
-
-
-class SummaryWorker(QThread):
-    """Sends a run summary in the background: a slow mail server must not freeze the window."""
-
-    done = Signal(object)
-
-    def __init__(self, settings: NotifySettings, title: str, lines: list[str]) -> None:
-        super().__init__()
-        self.settings = settings
-        self.title = title
-        self.lines = lines
-
-    def run(self) -> None:
-        self.done.emit(send_summary(self.settings, self.title, self.lines))
 
 
 class NotifyDialog(QDialog):
@@ -323,120 +217,40 @@ def codes_folders(work_dir: str, inbox_dir: str = "") -> list[Path]:
     return folders
 
 
-class NewProductsWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        db_path: Path,
-        since: dt.date,
-        templates_dir: Path,
-        output_dir: Path,
-        rules_path: Path | None,
-        manual_values_file: Path | None,
-        codes_file: Path | None,
-        articles: list[str] | None = None,
-        answers_file: Path | None = None,
-        incoming: list[Path] | None = None,
-    ) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.since = since
-        self.templates_dir = templates_dir
-        self.output_dir = output_dir
-        self.rules_path = rules_path
-        self.manual_values_file = manual_values_file
-        self.codes_file = codes_file
-        self.articles = articles
-        self.answers_file = answers_file
-        self.incoming = incoming or []
-
-    def run(self) -> None:
-        try:
-            articles = self.articles if self.articles is not None else new_articles_since(self.db_path, self.since)
-            if not articles:
-                self.done.emit(None)
-                return
-            copied = collect_templates(self.incoming, self.templates_dir)
-            run = fill_new_products(
-                self.db_path,
-                articles,
-                self.templates_dir,
-                self.output_dir,
-                self.rules_path,
-                self.manual_values_file,
-                self.codes_file,
-                answers_file=self.answers_file,
-            )
-            run.copied_templates = copied
-            self.done.emit(run)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
+def find_and_fill_new_products(
+    db_path: Path,
+    since: dt.date,
+    templates_dir: Path,
+    output_dir: Path,
+    rules_path: Path | None,
+    manual_values_file: Path | None,
+    codes_file: Path | None,
+    articles: list[str] | None = None,
+    answers_file: Path | None = None,
+    incoming: list[Path] | None = None,
+):
+    """New ETM cards for the given articles or the ones new since the date; None when there are none."""
+    articles = articles if articles is not None else new_articles_since(db_path, since)
+    if not articles:
+        return None
+    copied = collect_templates(incoming or [], templates_dir)
+    run = fill_new_products(
+        db_path,
+        articles,
+        templates_dir,
+        output_dir,
+        rules_path,
+        manual_values_file,
+        codes_file,
+        answers_file=answers_file,
+    )
+    run.copied_templates = copied
+    return run
 
 
-class AnalyzeWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
+class PriceImportWorker(Worker):
+    """Downloads the price first when given a link; the window learns the downloaded file at once."""
 
-    def __init__(
-        self, db_path: Path, template_path: Path, output_dir: Path, rules_path: Path | None
-    ) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.template_path = template_path
-        self.output_dir = output_dir
-        self.rules_path = rules_path
-
-    def run(self) -> None:
-        try:
-            self.done.emit(
-                analyze_template_mapping(
-                    self.db_path, self.template_path, self.output_dir, self.rules_path
-                )
-            )
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class ManualImportWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        db_path: Path,
-        filled_path: Path,
-        values_path: Path,
-        output_dir: Path,
-        rules_path: Path | None,
-    ) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.filled_path = filled_path
-        self.values_path = values_path
-        self.output_dir = output_dir
-        self.rules_path = rules_path
-
-    def run(self) -> None:
-        try:
-            self.done.emit(
-                import_manual_completions(
-                    self.db_path,
-                    self.filled_path,
-                    self.values_path,
-                    self.output_dir,
-                    self.rules_path,
-                )
-            )
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class PriceImportWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
-    progress = Signal(str)
     downloaded = Signal(object)
 
     def __init__(
@@ -447,7 +261,7 @@ class PriceImportWorker(QThread):
         downloads_dir: Path,
         allow_repeat: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(None)  # run() below does the work: it may download the file first
         self.db_path = db_path
         self.price_path = price_path
         self.price_url = price_url
@@ -478,142 +292,6 @@ class PriceImportWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
-class PriceFindWorker(QThread):
-    done = Signal(str)
-    failed = Signal(str)
-
-    def __init__(self, source_url: str) -> None:
-        super().__init__()
-        self.source_url = source_url
-
-    def run(self) -> None:
-        try:
-            self.done.emit(find_latest_price_url(self.source_url))
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class EtimImportWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, db_path: Path, etim_path: Path, report_dir: Path, allow_repeat: bool = False) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.etim_path = etim_path
-        self.report_dir = report_dir
-        self.allow_repeat = allow_repeat
-
-    def run(self) -> None:
-        try:
-            self.done.emit(
-                import_etim_workbook(
-                    self.etim_path,
-                    self.db_path,
-                    make_backup=True,
-                    report_dir=self.report_dir,
-                    allow_repeat=self.allow_repeat,
-                )
-            )
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class EtimDecisionWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, db_path: Path, report_path: Path) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.report_path = report_path
-
-    def run(self) -> None:
-        try:
-            self.done.emit(apply_etim_conflict_decisions(self.report_path, self.db_path))
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class MaterialsWorker(QThread):
-    """Photos, documents, certificates and descriptions for ETM cards: asks the site, downloads files."""
-
-    done = Signal(object)
-    failed = Signal(str)
-    progress = Signal(str)
-
-    def __init__(
-        self,
-        db_path: Path,
-        articles: list[str],
-        work_dir: Path,
-        output_dir: Path,
-        codes_path: Path | None,
-        needs: ReportNeeds | None = None,
-        cert_folder: Path | None = None,
-    ) -> None:
-        super().__init__()
-        self.cert_folder = cert_folder
-        self.db_path = db_path
-        self.articles = articles
-        self.work_dir = work_dir
-        self.output_dir = output_dir
-        self.codes_path = codes_path
-        self.needs = needs
-
-    def run(self) -> None:
-        try:
-            self.done.emit(
-                make_materials(
-                    self.db_path,
-                    self.articles,
-                    self.work_dir,
-                    self.output_dir,
-                    self.codes_path,
-                    progress=self.progress.emit,
-                    wanted=self.needs.wanted if self.needs else None,
-                    codes_missing=self.needs.codes_missing if self.needs else None,
-                    cert_folder=self.cert_folder,
-                )
-            )
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class DimensionAuditWorker(QThread):
-    """Reads the base and lists sizes earlier ETIM imports wrote from wrong columns."""
-
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, db_path: Path, report_dir: Path) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.report_dir = report_dir
-
-    def run(self) -> None:
-        try:
-            self.done.emit(audit_dimensions(self.db_path, self.report_dir))
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class DimensionClearWorker(QThread):
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, db_path: Path, findings) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.findings = findings
-
-    def run(self) -> None:
-        try:
-            self.done.emit(clear_wrong_dimensions(self.db_path, self.findings))
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
 def plain_error(details: str) -> str:
     """The message for the user; the full traceback stays in the log."""
     if "PermissionError" in details:
@@ -624,41 +302,23 @@ def plain_error(details: str) -> str:
     return details
 
 
-class CopyBaseWorker(QThread):
-    """Copies the base into the work folder in the background: a big base takes a while."""
-
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, source: Path, target: Path) -> None:
-        super().__init__()
-        self.source = source
-        self.target = target
-
-    def run(self) -> None:
-        try:
-            if self.target.exists():
-                create_sqlite_backup(self.target, label="before_copy")
-            copy_sqlite_database(self.source, self.target)
-            self.done.emit(self.target)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
+def copy_base(source: Path, target: Path) -> Path:
+    """Copies the base into the work folder; a base already there is kept as a backup first."""
+    if target.exists():
+        create_sqlite_backup(target, label="before_copy")
+    copy_sqlite_database(source, target)
+    return target
 
 
-class RestoreWorker(QThread):
-    """Rolls the base back in the background: a big base takes a while and the window must not look frozen."""
-
-    done = Signal(object)
-    failed = Signal(str)
+class RestoreWorker(Worker):
+    """Rolls the base back in the background, with its own plain messages: the base may be left half-replaced."""
 
     def __init__(self, db_path: Path, backup_path: Path) -> None:
-        super().__init__()
-        self.db_path = db_path
-        self.backup_path = backup_path
+        super().__init__(restore_database_backup, db_path, backup_path)
 
     def run(self) -> None:
         try:
-            self.done.emit(restore_database_backup(self.db_path, self.backup_path))
+            self.done.emit(self.fn(*self.args))
         except BackupRejected as exc:
             self.failed.emit(f"База не изменена.\n\n{exc}")
         except Exception:
@@ -674,25 +334,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"CHINT ETM MDM {__version__}")
         self.resize(980, 680)
         self.config = first_run_defaults(load_config())
-        self.worker: (
-            FillWorker
-            | NewProductsWorker
-            | RaekWorker
-            | AnalyzeWorker
-            | ManualImportWorker
-            | PriceImportWorker
-            | PriceFindWorker
-            | EtimImportWorker
-            | EtimDecisionWorker
-            | RestoreWorker
-            | DimensionAuditWorker
-            | MaterialsWorker
-            | CopyBaseWorker
-            | DimensionClearWorker
-            | None
-        ) = None
+        self.worker: Worker | None = None
         self.close_when_done = False
-        self.summary_worker: SummaryWorker | None = None
+        self.summary_worker: Worker | None = None
         self.write_action_buttons: list[QPushButton] = []
         self.tabs: QTabWidget | None = None
 
@@ -792,9 +436,10 @@ class MainWindow(QMainWindow):
 
     def start_worker(
         self,
-        worker: QThread,
+        worker: Worker,
         done_handler,
         failed_handler,
+        log: QTextEdit | None = None,
     ) -> bool:
         if self.worker is not None:
             QMessageBox.warning(
@@ -807,13 +452,10 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda: self.on_worker_finished(worker))
         worker.done.connect(done_handler)
         worker.failed.connect(failed_handler)
-        if isinstance(worker, RaekWorker):
-            worker.progress.connect(self.raek_log.append)
+        if log is not None:
+            worker.progress.connect(log.append)
         if isinstance(worker, PriceImportWorker):
-            worker.progress.connect(self.price_log.append)
             worker.downloaded.connect(self.on_price_downloaded)
-        if isinstance(worker, MaterialsWorker):
-            worker.progress.connect(self.fill_log.append)
         self.update_write_action_buttons()
         worker.start()
         return True
@@ -1021,8 +663,19 @@ class MainWindow(QMainWindow):
                 self.fill_log.append(f"Готовлю материалы для {len(articles)} товаров...")
             else:
                 self.fill_log.append("Готовлю материалы по отчёту ЭТМ...")
-            worker = MaterialsWorker(db_path, articles, Path(work_text), output, codes_path, needs, self.cert_folder())
-            self.start_worker(worker, self.on_materials_done, self.on_fill_failed)
+            worker = Worker(
+                make_materials,
+                db_path,
+                articles,
+                Path(work_text),
+                output,
+                codes_path,
+                wanted=needs.wanted if needs else None,
+                codes_missing=needs.codes_missing if needs else None,
+                cert_folder=self.cert_folder(),
+                report_progress=True,
+            )
+            self.start_worker(worker, self.on_materials_done, self.on_fill_failed, self.fill_log)
         except Exception:
             self.on_fill_failed(traceback.format_exc())
 
@@ -1311,10 +964,21 @@ class MainWindow(QMainWindow):
             site_cache = site_cache_path(Path(work_text)) if work_text else None
             table = Path(work_text) / CERTIFICATES_TABLE if work_text else None
             answers = answers_path(Path(work_text)) if work_text else None
-            worker = RaekWorker(
-                db_path, zip_path, output_dir, codes_path, rules_path, site_cache, ask_site, table, answers, self.cert_folder()
+            worker = Worker(
+                fill_raek_zip,
+                db_path,
+                zip_path,
+                output_dir,
+                codes_path,
+                rules_path,
+                site_cache,
+                ask_site,
+                certificates_table=table,
+                answers_path=answers,
+                cert_folder=self.cert_folder(),
+                report_progress=True,
             )
-            self.start_worker(worker, self.on_raek_done, self.on_raek_failed)
+            self.start_worker(worker, self.on_raek_done, self.on_raek_failed, self.raek_log)
         except Exception:
             self.on_raek_failed(traceback.format_exc())
 
@@ -1354,7 +1018,14 @@ class MainWindow(QMainWindow):
                 return
             codes_path = self.codes_file(work_text)
             self.certificates_log.append("Обновляю таблицу сертификатов...")
-            worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE, dates_file, self.cert_folder())
+            worker = Worker(
+                update_table,
+                db_path,
+                codes_path,
+                Path(work_text) / CERTIFICATES_TABLE,
+                dates_file=dates_file,
+                register_folder=self.cert_folder(),
+            )
             self.start_worker(worker, self.on_certificates_done, self.on_certificates_failed)
         except Exception:
             self.on_certificates_failed(traceback.format_exc())
@@ -1741,7 +1412,8 @@ class MainWindow(QMainWindow):
             else:
                 self.new_products_log.append(f"Делаю карточки для {len(articles)} артикулов...")
             self.etm_new_products_mode = articles is None
-            worker = NewProductsWorker(
+            worker = Worker(
+                find_and_fill_new_products,
                 db_path,
                 since,
                 Path(templates_text),
@@ -1958,7 +1630,7 @@ class MainWindow(QMainWindow):
         settings = load_notify_settings()
         if not settings.send_after_run:
             return
-        self.summary_worker = SummaryWorker(settings, title, lines)
+        self.summary_worker = Worker(send_summary, settings, title, lines)
         self.summary_worker.done.connect(lambda report: [log.append(line) for line in report])
         self.summary_worker.start()
 
@@ -2011,7 +1683,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.price_log.append(f"Копирую базу в рабочую папку: {target}")
-        self.start_worker(CopyBaseWorker(source, target), self.on_base_copied, self.on_price_import_failed)
+        self.start_worker(Worker(copy_base, source, target), self.on_base_copied, self.on_price_import_failed)
 
     def on_base_copied(self, target: Path) -> None:
         self.db_path_edit.setText(str(target))
@@ -2059,7 +1731,7 @@ class MainWindow(QMainWindow):
             return
         self.price_log.append("Проверяю размеры в базе...")
         self.start_worker(
-            DimensionAuditWorker(db_path, self.etim_report_dir()), self.on_dimension_audit_done, self.on_price_import_failed
+            Worker(audit_dimensions, db_path, self.etim_report_dir()), self.on_dimension_audit_done, self.on_price_import_failed
         )
 
     def on_dimension_audit_done(self, result: AuditResult) -> None:
@@ -2089,7 +1761,7 @@ class MainWindow(QMainWindow):
     def start_dimension_clear(self, result: AuditResult) -> None:
         self.price_log.append("Очищаю неверные размеры...")
         self.start_worker(
-            DimensionClearWorker(result.db_path, result.fixable), self.on_dimension_clear_done, self.on_price_import_failed
+            Worker(clear_wrong_dimensions, result.db_path, result.fixable), self.on_dimension_clear_done, self.on_price_import_failed
         )
 
     def on_dimension_clear_done(self, result: ClearResult) -> None:
@@ -2162,7 +1834,8 @@ class MainWindow(QMainWindow):
             db_path, template_path, output_dir, rules_path = paths
 
             self.fill_log.append("Запуск заполнения...")
-            worker = FillWorker(
+            worker = Worker(
+                fill_template,
                 db_path,
                 template_path,
                 output_dir,
@@ -2198,7 +1871,8 @@ class MainWindow(QMainWindow):
             work_text = self.work_dir_edit.text().strip()
             rules_path = ensure_default_rules(Path(work_text)) if work_text else None
             self.fill_log.append("Импортирую ручные дозаполнения...")
-            worker = ManualImportWorker(
+            worker = Worker(
+                import_manual_completions,
                 db_path,
                 filled_path,
                 manual_path,
@@ -2218,7 +1892,7 @@ class MainWindow(QMainWindow):
             db_path, template_path, output_dir, rules_path = paths
 
             self.fill_log.append("Анализирую желтые поля и кандидаты маппинга...")
-            worker = AnalyzeWorker(db_path, template_path, output_dir, rules_path)
+            worker = Worker(analyze_template_mapping, db_path, template_path, output_dir, rules_path)
             self.start_worker(worker, self.on_mapping_analysis_done, self.on_action_failed)
         except Exception:
             self.on_action_failed(traceback.format_exc())
@@ -2321,14 +1995,14 @@ class MainWindow(QMainWindow):
             worker = PriceImportWorker(
                 db_path, price_path, "", self.price_download_dir(), allow_repeat=earlier is not None
             )
-            self.start_worker(worker, self.on_price_import_done, self.on_price_import_failed)
+            self.start_worker(worker, self.on_price_import_done, self.on_price_import_failed, self.price_log)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
     def find_latest_price(self) -> None:
         try:
             self.price_log.append(f"Ищу свежий прайс на {DEFAULT_PRICE_SOURCE_URL}...")
-            worker = PriceFindWorker(DEFAULT_PRICE_SOURCE_URL)
+            worker = Worker(find_latest_price_url, DEFAULT_PRICE_SOURCE_URL)
             self.start_worker(worker, self.on_price_found, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
@@ -2345,7 +2019,7 @@ class MainWindow(QMainWindow):
             downloads_dir = self.price_download_dir()
             self.price_log.append(f"Скачиваю прайс в {downloads_dir}...")
             worker = PriceImportWorker(db_path, None, price_url, downloads_dir)
-            self.start_worker(worker, self.on_price_import_done, self.on_price_import_failed)
+            self.start_worker(worker, self.on_price_import_done, self.on_price_import_failed, self.price_log)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
 
@@ -2375,7 +2049,14 @@ class MainWindow(QMainWindow):
                 if answer != QMessageBox.StandardButton.Yes:
                     return
             self.price_log.append("Импортирую ETIM-файл...")
-            worker = EtimImportWorker(db_path, etim_path, self.etim_report_dir(), allow_repeat=earlier is not None)
+            worker = Worker(
+                import_etim_workbook,
+                etim_path,
+                db_path,
+                make_backup=True,
+                report_dir=self.etim_report_dir(),
+                allow_repeat=earlier is not None,
+            )
             self.start_worker(worker, self.on_etim_import_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
@@ -2400,7 +2081,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
             self.price_log.append(f"Применяю решения из ETIM-отчета: {report_path}")
-            worker = EtimDecisionWorker(db_path, report_path)
+            worker = Worker(apply_etim_conflict_decisions, report_path, db_path)
             self.start_worker(worker, self.on_etim_decisions_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())
