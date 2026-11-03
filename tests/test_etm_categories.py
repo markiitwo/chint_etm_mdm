@@ -208,11 +208,11 @@ class CategoryTemplateTests(unittest.TestCase):
         self.assertEqual(["50341020"], [row[0] for row in summary["Нет шаблона"].iter_rows(min_row=2, values_only=True)])
 
     def test_app_worker_finds_and_fills_new_products(self) -> None:
-        from chint_etm_mdm.app import NewProductsWorker
+        from chint_etm_mdm.app import Worker, find_and_fill_new_products
         from chint_etm_mdm.etm_categories import run_lines
 
         results = []
-        worker = NewProductsWorker(self.db, dt.date(2026, 9, 4), self.templates, self.root / "out", None, None, None)
+        worker = Worker(find_and_fill_new_products, self.db, dt.date(2026, 9, 4), self.templates, self.root / "out", None, None, None)
         worker.done.connect(results.append)
         worker.failed.connect(self.fail)
         worker.run()
@@ -224,7 +224,7 @@ class CategoryTemplateTests(unittest.TestCase):
         self.assertIn("Не удалось подобрать класс: 1", "\n".join(lines))
 
         empty = []
-        worker = NewProductsWorker(self.db, dt.date(2026, 12, 1), self.templates, self.root / "out2", None, None, None)
+        worker = Worker(find_and_fill_new_products, self.db, dt.date(2026, 12, 1), self.templates, self.root / "out2", None, None, None)
         worker.done.connect(empty.append)
         worker.run()
         self.assertEqual([None], empty)

@@ -279,10 +279,11 @@ class RaekTests(unittest.TestCase):
         self.assertEqual(self.zip, latest_raek_zip([self.root]))
 
     def test_app_worker(self) -> None:
-        from chint_etm_mdm.app import RaekWorker
+        from chint_etm_mdm.app import Worker
+        from chint_etm_mdm.raek import fill_raek_zip
 
         results = []
-        worker = RaekWorker(self.db, self.zip, self.root / "out", self.codes, self.rules)
+        worker = Worker(fill_raek_zip, self.db, self.zip, self.root / "out", self.codes, self.rules, report_progress=True)
         worker.done.connect(results.append)
         worker.failed.connect(self.fail)
         worker.run()
