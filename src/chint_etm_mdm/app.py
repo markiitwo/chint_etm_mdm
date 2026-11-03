@@ -73,6 +73,7 @@ from .etim_importer import (
     EtimImportResult,
     apply_etim_conflict_decisions,
     decision_result_lines,
+    etim_already_imported,
     import_etim_workbook,
     restore_database_backup,
     result_lines as etim_result_lines,
@@ -500,11 +501,12 @@ class EtimImportWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, etim_path: Path, report_dir: Path) -> None:
+    def __init__(self, db_path: Path, etim_path: Path, report_dir: Path, allow_repeat: bool = False) -> None:
         super().__init__()
         self.db_path = db_path
         self.etim_path = etim_path
         self.report_dir = report_dir
+        self.allow_repeat = allow_repeat
 
     def run(self) -> None:
         try:
@@ -514,6 +516,7 @@ class EtimImportWorker(QThread):
                     self.db_path,
                     make_backup=True,
                     report_dir=self.report_dir,
+                    allow_repeat=self.allow_repeat,
                 )
             )
         except Exception:
@@ -2361,8 +2364,20 @@ class MainWindow(QMainWindow):
             if not etim_path.is_file():
                 QMessageBox.warning(self, "ETIM не найден", "Выберите существующий XLSX ETIM-файл.")
                 return
+            earlier = etim_already_imported(etim_path, db_path)
+            if earlier is not None:
+                answer = QMessageBox.question(
+                    self,
+                    "ETIM уже импортирован",
+                    f"Этот же файл уже был импортирован ({earlier[1] or '—'}, импорт id {earlier[0]}).\n\n"
+                    "Повторный импорт нужен только если базу откатывали из бэкапа. Импортировать ещё раз?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
             self.price_log.append("Импортирую ETIM-файл...")
-            worker = EtimImportWorker(db_path, etim_path, self.etim_report_dir())
+            worker = EtimImportWorker(db_path, etim_path, self.etim_report_dir(), allow_repeat=earlier is not None)
             self.start_worker(worker, self.on_etim_import_done, self.on_price_import_failed)
         except Exception:
             self.on_price_import_failed(traceback.format_exc())

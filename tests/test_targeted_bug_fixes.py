@@ -278,7 +278,7 @@ class ConnectionLifetimeTests(unittest.TestCase):
 
             def ensure_tables(connection):
                 connection.execute(
-                    "CREATE TABLE IF NOT EXISTS dimension_imports (id INTEGER PRIMARY KEY, source_kind TEXT, local_file TEXT, workbook_name TEXT, notes TEXT)"
+                    "CREATE TABLE IF NOT EXISTS dimension_imports (id INTEGER PRIMARY KEY, source_kind TEXT, local_file TEXT, workbook_name TEXT, notes TEXT, content_sha256 TEXT)"
                 )
             with (
                 patch("chint_etm_mdm.etim_importer.connect_database", side_effect=connect),
@@ -305,7 +305,7 @@ class ConnectionLifetimeTests(unittest.TestCase):
 
         def ensure_tables(connection):
             connection.execute(
-                "CREATE TABLE IF NOT EXISTS dimension_imports (id INTEGER PRIMARY KEY, source_kind TEXT, local_file TEXT, workbook_name TEXT, notes TEXT)"
+                "CREATE TABLE IF NOT EXISTS dimension_imports (id INTEGER PRIMARY KEY, source_kind TEXT, local_file TEXT, workbook_name TEXT, notes TEXT, content_sha256 TEXT)"
             )
 
         with tempfile.TemporaryDirectory() as tmp:
