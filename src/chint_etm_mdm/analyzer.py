@@ -13,7 +13,6 @@ from .filler import (
     find_article_index,
     is_reportable_header,
     is_yellow_header_cell,
-    missing_note,
     normalize_article,
     normalize_header,
     product_value,
