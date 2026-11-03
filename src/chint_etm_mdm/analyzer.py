@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import Counter, defaultdict
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -473,3 +474,174 @@ def write_mapping_report(
             sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 80)
 
     workbook.save(path)
+
+
+CATEGORY_FROM_FILENAME_RE = re.compile(r"(?:category_template|template)_(\d{4,})", re.IGNORECASE)
+
+
+def infer_category_from_review_path(review_path: Path) -> str:
+    match = CATEGORY_FROM_FILENAME_RE.search(review_path.name)
+    return match.group(1) if match else ""
+
+
+def read_mapping_review_coverage_sheet(workbook, review_path: Path) -> list[dict[str, str]]:
+    if "Покрытие" not in workbook.sheetnames:
+        raise ValueError("В отчете нет листа 'Покрытие'. Сначала сделайте анализ маппинга.")
+    sheet = workbook["Покрытие"]
+    header_row = next(sheet.iter_rows(values_only=True), None)
+    if not header_row:
+        raise ValueError("Лист 'Покрытие' пустой.")
+    headers = [str(value or "").strip() for value in header_row]
+    index = {name: idx for idx, name in enumerate(headers)}
+    category_column = "Категория" if "Категория" in index else "81 класс"
+    missing_column = "Не заполнится" if "Не заполнится" in index else "К продактам"
+    required = [
+        category_column,
+        "Поле шаблона",
+        "Статус",
+        "Товаров",
+        "Заполнится",
+        "Нужен выбор источника",
+        missing_column,
+        "Комментарий",
+    ]
+    missing = [name for name in required if name not in index]
+    if missing:
+        raise ValueError(f"В листе 'Покрытие' нет колонок: {', '.join(missing)}")
+
+    rows: list[dict[str, str]] = []
+    for values in sheet.iter_rows(min_row=2, values_only=True):
+        class81_code = str(values[index[category_column]] or "").strip()
+        if not class81_code:
+            class81_code = infer_category_from_review_path(review_path)
+        template_field = str(values[index["Поле шаблона"]] or "").strip()
+        if not class81_code and not template_field:
+            continue
+        rows.append(
+            {
+                "class81_code": class81_code,
+                "template_field": template_field,
+                "status": str(values[index["Статус"]] or "").strip(),
+                "products_count": str(values[index["Товаров"]] or "").strip(),
+                "will_fill": str(values[index["Заполнится"]] or "").strip(),
+                "needs_source_choice": str(
+                    values[index["Нужен выбор источника"]] or ""
+                ).strip(),
+                "missing_count": str(values[index[missing_column]] or "").strip(),
+                "note": str(values[index["Комментарий"]] or "").strip(),
+            }
+        )
+    return rows
+
+
+def read_mapping_review_candidates_sheet(workbook, review_path: Path) -> list[dict[str, str]]:
+    if "Правила" not in workbook.sheetnames:
+        raise ValueError("В отчете нет листа 'Правила'. Сначала сделайте анализ маппинга.")
+    sheet = workbook["Правила"]
+    header_row = next(sheet.iter_rows(values_only=True), None)
+    if not header_row:
+        raise ValueError("Лист 'Правила' пустой.")
+    headers = [str(value or "").strip() for value in header_row]
+    index = {name: idx for idx, name in enumerate(headers)}
+    required = ["81 класс", "Поле шаблона", "Кандидат источника", "Покрытие кандидата", "Действие"]
+    missing = [name for name in required if name not in index]
+    if missing:
+        raise ValueError(f"В листе 'Правила' нет колонок: {', '.join(missing)}")
+
+    rows: list[dict[str, str]] = []
+    for values in sheet.iter_rows(min_row=2, values_only=True):
+        action = str(values[index["Действие"]] or "").strip()
+        if "уже утверждено" in action.lower():
+            continue
+        class81_code = str(values[index["81 класс"]] or "").strip()
+        if not class81_code:
+            class81_code = infer_category_from_review_path(review_path)
+        template_field = str(values[index["Поле шаблона"]] or "").strip()
+        source_attribute = str(values[index["Кандидат источника"]] or "").strip()
+        coverage = str(values[index["Покрытие кандидата"]] or "").strip()
+        examples = ""
+        if "Примеры значений" in index:
+            examples = str(values[index["Примеры значений"]] or "").strip()
+        if not class81_code or not template_field or not source_attribute:
+            continue
+        rows.append(
+            {
+                "class81_code": class81_code,
+                "template_field": template_field,
+                "source_attribute": source_attribute,
+                "coverage": coverage,
+                "examples": examples,
+                "action": action,
+            }
+        )
+    # Both sheets: a field with some candidates on "Правила" may have more on "Выбор источника".
+    seen = {(row["class81_code"], row["template_field"], row["source_attribute"]) for row in rows}
+    for row in read_mapping_review_candidates_from_source_choice(workbook, review_path):
+        key = (row["class81_code"], row["template_field"], row["source_attribute"])
+        if key not in seen:
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
+def read_mapping_review_candidates_from_source_choice(
+    workbook, review_path: Path
+) -> list[dict[str, str]]:
+    if "Выбор источника" not in workbook.sheetnames:
+        return []
+    sheet = workbook["Выбор источника"]
+    header_row = next(sheet.iter_rows(values_only=True), None)
+    if not header_row:
+        return []
+    headers = [str(value or "").strip() for value in header_row]
+    index = {name: idx for idx, name in enumerate(headers)}
+    category_column = "Категория" if "Категория" in index else "81 класс"
+    required = [category_column, "Поле шаблона", "Возможный источник", "Значение", "Артикул"]
+    if any(name not in index for name in required):
+        return []
+
+    counts: Counter[tuple[str, str, str]] = Counter()
+    examples: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    articles: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for values in sheet.iter_rows(min_row=2, values_only=True):
+        class81_code = str(values[index[category_column]] or "").strip()
+        if not class81_code:
+            class81_code = infer_category_from_review_path(review_path)
+        template_field = str(values[index["Поле шаблона"]] or "").strip()
+        source_attribute = str(values[index["Возможный источник"]] or "").strip()
+        value = str(values[index["Значение"]] or "").strip()
+        article = str(values[index["Артикул"]] or "").strip()
+        if not class81_code or not template_field or not source_attribute:
+            continue
+        key = (class81_code, template_field, source_attribute)
+        counts[key] += 1
+        if value and value not in examples[key]:
+            examples[key].append(value)
+        if article and article not in articles[key]:
+            articles[key].append(article)
+
+    rows: list[dict[str, str]] = []
+    for (class81_code, template_field, source_attribute), count in counts.most_common():
+        rows.append(
+            {
+                "class81_code": class81_code,
+                "template_field": template_field,
+                "source_attribute": source_attribute,
+                "coverage": str(count),
+                "examples": "; ".join(examples[(class81_code, template_field, source_attribute)][:5]),
+                "action": "собрано из листа Выбор источника",
+            }
+        )
+    return rows
+
+
+def read_mapping_review(review_path: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Coverage rows and rule candidates of a mapping report; the file is opened once and always closed."""
+    workbook = load_workbook(review_path, data_only=True, read_only=True)
+    try:
+        return (
+            read_mapping_review_coverage_sheet(workbook, review_path),
+            read_mapping_review_candidates_sheet(workbook, review_path),
+        )
+    finally:
+        workbook.close()

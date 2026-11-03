@@ -9,7 +9,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from chint_etm_mdm.analyzer import analyze_config_field, write_mapping_report
+from chint_etm_mdm.analyzer import analyze_config_field, read_mapping_review, write_mapping_report
 from chint_etm_mdm.db import ProductRecord
 from chint_etm_mdm.mapping_rules import add_approved_class_rule
 
@@ -37,4 +37,10 @@ class CandidatesTests(unittest.TestCase):
             self.assertEqual("уже утверждено", rows[0][6])
             self.assertEqual(
                 {"Номинальный ток расцепителя", "Номинальный ток (In)"}, {row[2] for row in rows[1:]}
+            )
+
+            coverage_rows, candidates = read_mapping_review(report)
+            self.assertEqual([("C1", "Конфиг:Номинальный ток")], [(r["class81_code"], r["template_field"]) for r in coverage_rows])
+            self.assertEqual(
+                {"Номинальный ток расцепителя", "Номинальный ток (In)"}, {r["source_attribute"] for r in candidates}
             )
