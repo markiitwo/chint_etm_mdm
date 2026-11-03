@@ -10,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
+from chint_etm_mdm.analyzer import read_mapping_review_candidates_sheet
 from chint_etm_mdm.db_utils import CHINT_TABLES, create_sqlite_backup, restore_sqlite_backup
 
 
@@ -385,7 +386,13 @@ class MappingReviewTests(CloseDuringOperationTests):
         choice.append(["C1", "2", "Конфиг:Ток", "Номинальный ток", "25", ""])
         choice.append(["C1", "3", "Конфиг:Ток", "Ток расцепителя", "32", ""])
         workbook.save(report)
-        rows = self.window.read_mapping_review_candidates(report)
+        from openpyxl import load_workbook
+
+        book = load_workbook(report, read_only=True)
+        try:
+            rows = read_mapping_review_candidates_sheet(book, report)
+        finally:
+            book.close()
         self.assertEqual(["Номинальный ток", "Ток расцепителя"], [row["source_attribute"] for row in rows])
 
 
