@@ -199,6 +199,64 @@ class ImportSafetyTests(unittest.TestCase):
         again = etim_importer.import_etim_workbook(path, self.db, make_backup=False, report_dir=self.reports, allow_repeat=True)
         self.assertNotEqual(first.import_id, again.import_id)
 
+    def attrs(self) -> list[tuple]:
+        return rows(
+            self.db,
+            "SELECT article, attribute_name, value_raw, source_ref FROM product_attribute_values "
+            "WHERE source_kind = 'etim_manual' ORDER BY article, attribute_name",
+        )
+
+    def import_named(self, name: str, table: list[list[object]], **kwargs):
+        path = write_etim(self.root / name, [("Лист", table)])
+        return etim_importer.import_etim_workbook(path, self.db, make_backup=False, report_dir=self.reports, **kwargs)
+
+    def test_new_file_updates_values_in_place_and_keeps_missing_ones(self) -> None:
+        self.import_named("a.xlsx", [["Артикул", "Цвет", "Материал"], ["A-1", "белый", "пластик"]])
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute(
+                "INSERT INTO product_attribute_values (article, attribute_name, value_raw, source_kind) VALUES ('A-1', 'Цвет', 'X', 'catalog_manual')"
+            )
+        result = self.import_named("b.xlsx", [["Артикул", "Цвет"], ["A-1", "серый"]])
+        self.assertEqual([("A-1", "Материал", "пластик", "a.xlsx"), ("A-1", "Цвет", "серый", "b.xlsx")], self.attrs())
+        self.assertEqual((0, 1, 1), (result.attributes_written, result.attributes_changed, result.not_in_file))
+        self.assertEqual(
+            [("A-1", "Цвет", "X")],
+            rows(self.db, "SELECT article, attribute_name, value_raw FROM product_attribute_values WHERE source_kind = 'catalog_manual'"),
+        )
+        report = load_workbook(result.report_path, read_only=True)
+        missing = [list(row) for row in report["Нет в файле"].iter_rows(values_only=True)]
+        report.close()
+        self.assertEqual([["Артикул", "Характеристика", "Значение в базе", "Из файла"], ["A-1", "Материал", "пластик", "a.xlsx"]], missing)
+        self.assertTrue(any("Есть в базе, нет в файле: 1" in line for line in etim_importer.result_lines(result)))
+
+        before = self.attrs()
+        again = self.import_named("b.xlsx", [["Артикул", "Цвет"], ["A-1", "серый"]], allow_repeat=True)
+        self.assertEqual(before, self.attrs())
+        self.assertEqual((0, 0), (again.attributes_written, again.attributes_changed))
+
+    def test_failed_report_keeps_the_old_value(self) -> None:
+        self.import_named("a.xlsx", [["Артикул", "Цвет"], ["A-1", "белый"]])
+        with mock.patch.object(etim_importer, "write_etim_report", side_effect=PermissionError("файл открыт")):
+            with self.assertRaises(RuntimeError):
+                self.import_named("b.xlsx", [["Артикул", "Цвет"], ["A-1", "серый"]])
+        self.assertEqual([("A-1", "Цвет", "белый", "a.xlsx")], self.attrs())
+
+    def test_duplicates_of_older_versions_are_removed_keeping_the_newest(self) -> None:
+        self.import_named("a.xlsx", [["Артикул", "Цвет"], ["A-1", "белый"]])
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            for value in ("красный", "чёрный"):  # what older versions left: the same field written again
+                conn.execute(
+                    "INSERT INTO product_attribute_values (article, attribute_name, value_raw, value_normalized, source_kind, source_ref) "
+                    "VALUES ('A-1', 'Цвет', ?, ?, 'etim_manual', 'old.xlsx')",
+                    (value, value),
+                )
+        result = self.import_named("b.xlsx", [["Артикул", "Материал"], ["A-2", "сталь"]])
+        self.assertEqual(2, result.duplicates_removed)
+        self.assertEqual([("A-1", "Цвет", "чёрный", "old.xlsx"), ("A-2", "Материал", "сталь", "b.xlsx")], self.attrs())
+        self.assertEqual("ok", rows(self.db, "PRAGMA integrity_check")[0][0])
+        plan = rows(self.db, "EXPLAIN QUERY PLAN SELECT * FROM product_attribute_values WHERE article = 'A-1'")
+        self.assertIn("idx_product_attribute_values_article", str(plan))
+
     def test_broken_file_stops_before_backup_and_tables(self) -> None:
         broken = self.root / "etim.xlsx"
         broken.write_bytes(b"not a workbook")

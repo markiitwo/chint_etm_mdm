@@ -246,15 +246,8 @@ def fetch_products(db_path: Path, articles: list[str]) -> dict[str, ProductRecor
                     LIMIT 1
                 ), '') AS gtin_outer
             FROM products p
-            LEFT JOIN (
-                SELECT *
-                FROM ipro_goods
-                WHERE id IN (
-                    SELECT MAX(id)
-                    FROM ipro_goods
-                    GROUP BY article
-                )
-            ) ig ON ig.article = p.article
+            -- The latest row of the product only: grouping the whole table took most of the read.
+            LEFT JOIN ipro_goods ig ON ig.id = (SELECT MAX(id) FROM ipro_goods WHERE article = p.article)
             LEFT JOIN product_dimensions_resolved d ON d.article = p.article
             WHERE p.article IN ({placeholders})
             """,

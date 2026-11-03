@@ -280,6 +280,9 @@ class ConnectionLifetimeTests(unittest.TestCase):
                 connection.execute(
                     "CREATE TABLE IF NOT EXISTS dimension_imports (id INTEGER PRIMARY KEY, source_kind TEXT, local_file TEXT, workbook_name TEXT, notes TEXT, content_sha256 TEXT)"
                 )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS product_attribute_values (id INTEGER PRIMARY KEY, article TEXT, attribute_name TEXT, source_kind TEXT)"
+                )
             with (
                 patch("chint_etm_mdm.etim_importer.connect_database", side_effect=connect),
                 patch("chint_etm_mdm.etim_importer.ensure_etim_import_tables", side_effect=ensure_tables),
@@ -307,6 +310,9 @@ class ConnectionLifetimeTests(unittest.TestCase):
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS dimension_imports (id INTEGER PRIMARY KEY, source_kind TEXT, local_file TEXT, workbook_name TEXT, notes TEXT, content_sha256 TEXT)"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS product_attribute_values (id INTEGER PRIMARY KEY, article TEXT, attribute_name TEXT, source_kind TEXT)"
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -320,7 +326,7 @@ class ConnectionLifetimeTests(unittest.TestCase):
                 patch("chint_etm_mdm.etim_importer.fetch_all_articles", return_value=set()),
                 patch("chint_etm_mdm.etim_importer.scan_etim_workbook", return_value={}),
                 patch("chint_etm_mdm.etim_importer.build_dimension_report_rows", return_value=(0, 0, [], [])),
-                patch("chint_etm_mdm.etim_importer.insert_etim_data", return_value=(0, 0)),
+                patch("chint_etm_mdm.etim_importer.insert_etim_data", return_value=(0, 0, 0)),
                 patch("chint_etm_mdm.etim_importer.write_etim_report"),
             ):
                 result = etim_importer.import_etim_workbook(source, database, make_backup=False)
