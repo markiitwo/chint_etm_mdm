@@ -182,22 +182,24 @@ def import_manual_completions(
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
     workbook = load_workbook(filled_path, read_only=True, data_only=True)
-    sheet = workbook.active
-    header_cells = list(sheet[1])
-    headers = [normalize_header(cell.value) for cell in header_cells]
-    fillable_columns = {
-        idx
-        for idx, cell in enumerate(header_cells)
-        if is_yellow_header_cell(cell)
-    }
-    article_idx = find_article_index(headers)
-    if article_idx is None:
-        workbook.close()
-        raise ValueError("Не найдена колонка Артикул или Расширенный артикул.")
-    class_idx = class81_index(headers)
+    try:
+        sheet = workbook.active
+        header_cells = list(sheet[1])
+        headers = [normalize_header(cell.value) for cell in header_cells]
+        fillable_columns = {
+            idx
+            for idx, cell in enumerate(header_cells)
+            if is_yellow_header_cell(cell)
+        }
+        article_idx = find_article_index(headers)
+        if article_idx is None:
+            raise ValueError("Не найдена колонка Артикул или Расширенный артикул.")
+        class_idx = class81_index(headers)
 
-    articles: list[str] = []
-    rows = list(sheet.iter_rows(min_row=2))
+        articles: list[str] = []
+        rows = list(sheet.iter_rows(min_row=2))
+    finally:
+        workbook.close()
     for row in rows:
         if article_idx < len(row):
             articles.append(normalize_article(row[article_idx].value))
@@ -260,7 +262,6 @@ def import_manual_completions(
                     action="Сохранено как ручное дозаполнение",
                 )
             )
-    workbook.close()
 
     upsert_manual_values(values_path, imported, filled_path, removed)
     learned_path = template.learned_matches_path(rules_path)

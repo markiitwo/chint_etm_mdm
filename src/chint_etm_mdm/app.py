@@ -2630,103 +2630,109 @@ class MainWindow(QMainWindow):
 
     def read_mapping_review_coverage(self, review_path: Path) -> list[dict[str, str]]:
         workbook = load_workbook(review_path, data_only=True, read_only=True)
-        if "Покрытие" not in workbook.sheetnames:
-            raise ValueError("В отчете нет листа 'Покрытие'. Сначала сделайте анализ маппинга.")
-        sheet = workbook["Покрытие"]
-        header_row = next(sheet.iter_rows(values_only=True), None)
-        if not header_row:
-            raise ValueError("Лист 'Покрытие' пустой.")
-        headers = [str(value or "").strip() for value in header_row]
-        index = {name: idx for idx, name in enumerate(headers)}
-        category_column = "Категория" if "Категория" in index else "81 класс"
-        missing_column = "Не заполнится" if "Не заполнится" in index else "К продактам"
-        required = [
-            category_column,
-            "Поле шаблона",
-            "Статус",
-            "Товаров",
-            "Заполнится",
-            "Нужен выбор источника",
-            missing_column,
-            "Комментарий",
-        ]
-        missing = [name for name in required if name not in index]
-        if missing:
-            raise ValueError(f"В листе 'Покрытие' нет колонок: {', '.join(missing)}")
+        try:
+            if "Покрытие" not in workbook.sheetnames:
+                raise ValueError("В отчете нет листа 'Покрытие'. Сначала сделайте анализ маппинга.")
+            sheet = workbook["Покрытие"]
+            header_row = next(sheet.iter_rows(values_only=True), None)
+            if not header_row:
+                raise ValueError("Лист 'Покрытие' пустой.")
+            headers = [str(value or "").strip() for value in header_row]
+            index = {name: idx for idx, name in enumerate(headers)}
+            category_column = "Категория" if "Категория" in index else "81 класс"
+            missing_column = "Не заполнится" if "Не заполнится" in index else "К продактам"
+            required = [
+                category_column,
+                "Поле шаблона",
+                "Статус",
+                "Товаров",
+                "Заполнится",
+                "Нужен выбор источника",
+                missing_column,
+                "Комментарий",
+            ]
+            missing = [name for name in required if name not in index]
+            if missing:
+                raise ValueError(f"В листе 'Покрытие' нет колонок: {', '.join(missing)}")
 
-        rows: list[dict[str, str]] = []
-        for values in sheet.iter_rows(min_row=2, values_only=True):
-            class81_code = str(values[index[category_column]] or "").strip()
-            if not class81_code:
-                class81_code = self.infer_category_from_review_path(review_path)
-            template_field = str(values[index["Поле шаблона"]] or "").strip()
-            if not class81_code and not template_field:
-                continue
-            rows.append(
-                {
-                    "class81_code": class81_code,
-                    "template_field": template_field,
-                    "status": str(values[index["Статус"]] or "").strip(),
-                    "products_count": str(values[index["Товаров"]] or "").strip(),
-                    "will_fill": str(values[index["Заполнится"]] or "").strip(),
-                    "needs_source_choice": str(
-                        values[index["Нужен выбор источника"]] or ""
-                    ).strip(),
-                    "missing_count": str(values[index[missing_column]] or "").strip(),
-                    "note": str(values[index["Комментарий"]] or "").strip(),
-                }
-            )
-        return rows
+            rows: list[dict[str, str]] = []
+            for values in sheet.iter_rows(min_row=2, values_only=True):
+                class81_code = str(values[index[category_column]] or "").strip()
+                if not class81_code:
+                    class81_code = self.infer_category_from_review_path(review_path)
+                template_field = str(values[index["Поле шаблона"]] or "").strip()
+                if not class81_code and not template_field:
+                    continue
+                rows.append(
+                    {
+                        "class81_code": class81_code,
+                        "template_field": template_field,
+                        "status": str(values[index["Статус"]] or "").strip(),
+                        "products_count": str(values[index["Товаров"]] or "").strip(),
+                        "will_fill": str(values[index["Заполнится"]] or "").strip(),
+                        "needs_source_choice": str(
+                            values[index["Нужен выбор источника"]] or ""
+                        ).strip(),
+                        "missing_count": str(values[index[missing_column]] or "").strip(),
+                        "note": str(values[index["Комментарий"]] or "").strip(),
+                    }
+                )
+            return rows
+        finally:
+            workbook.close()
 
     def read_mapping_review_candidates(self, review_path: Path) -> list[dict[str, str]]:
         workbook = load_workbook(review_path, data_only=True, read_only=True)
-        if "Правила" not in workbook.sheetnames:
-            raise ValueError("В отчете нет листа 'Правила'. Сначала сделайте анализ маппинга.")
-        sheet = workbook["Правила"]
-        header_row = next(sheet.iter_rows(values_only=True), None)
-        if not header_row:
-            raise ValueError("Лист 'Правила' пустой.")
-        headers = [str(value or "").strip() for value in header_row]
-        index = {name: idx for idx, name in enumerate(headers)}
-        required = ["81 класс", "Поле шаблона", "Кандидат источника", "Покрытие кандидата", "Действие"]
-        missing = [name for name in required if name not in index]
-        if missing:
-            raise ValueError(f"В листе 'Правила' нет колонок: {', '.join(missing)}")
+        try:
+            if "Правила" not in workbook.sheetnames:
+                raise ValueError("В отчете нет листа 'Правила'. Сначала сделайте анализ маппинга.")
+            sheet = workbook["Правила"]
+            header_row = next(sheet.iter_rows(values_only=True), None)
+            if not header_row:
+                raise ValueError("Лист 'Правила' пустой.")
+            headers = [str(value or "").strip() for value in header_row]
+            index = {name: idx for idx, name in enumerate(headers)}
+            required = ["81 класс", "Поле шаблона", "Кандидат источника", "Покрытие кандидата", "Действие"]
+            missing = [name for name in required if name not in index]
+            if missing:
+                raise ValueError(f"В листе 'Правила' нет колонок: {', '.join(missing)}")
 
-        rows: list[dict[str, str]] = []
-        for values in sheet.iter_rows(min_row=2, values_only=True):
-            action = str(values[index["Действие"]] or "").strip()
-            if "уже утверждено" in action.lower():
-                continue
-            class81_code = str(values[index["81 класс"]] or "").strip()
-            if not class81_code:
-                class81_code = self.infer_category_from_review_path(review_path)
-            template_field = str(values[index["Поле шаблона"]] or "").strip()
-            source_attribute = str(values[index["Кандидат источника"]] or "").strip()
-            coverage = str(values[index["Покрытие кандидата"]] or "").strip()
-            examples = ""
-            if "Примеры значений" in index:
-                examples = str(values[index["Примеры значений"]] or "").strip()
-            if not class81_code or not template_field or not source_attribute:
-                continue
-            rows.append(
-                {
-                    "class81_code": class81_code,
-                    "template_field": template_field,
-                    "source_attribute": source_attribute,
-                    "coverage": coverage,
-                    "examples": examples,
-                    "action": action,
-                }
-            )
-        # Both sheets: a field with some candidates on "Правила" may have more on "Выбор источника".
-        seen = {(row["class81_code"], row["template_field"], row["source_attribute"]) for row in rows}
-        for row in self.read_mapping_review_candidates_from_source_choice(workbook, review_path):
-            key = (row["class81_code"], row["template_field"], row["source_attribute"])
-            if key not in seen:
-                seen.add(key)
-                rows.append(row)
-        return rows
+            rows: list[dict[str, str]] = []
+            for values in sheet.iter_rows(min_row=2, values_only=True):
+                action = str(values[index["Действие"]] or "").strip()
+                if "уже утверждено" in action.lower():
+                    continue
+                class81_code = str(values[index["81 класс"]] or "").strip()
+                if not class81_code:
+                    class81_code = self.infer_category_from_review_path(review_path)
+                template_field = str(values[index["Поле шаблона"]] or "").strip()
+                source_attribute = str(values[index["Кандидат источника"]] or "").strip()
+                coverage = str(values[index["Покрытие кандидата"]] or "").strip()
+                examples = ""
+                if "Примеры значений" in index:
+                    examples = str(values[index["Примеры значений"]] or "").strip()
+                if not class81_code or not template_field or not source_attribute:
+                    continue
+                rows.append(
+                    {
+                        "class81_code": class81_code,
+                        "template_field": template_field,
+                        "source_attribute": source_attribute,
+                        "coverage": coverage,
+                        "examples": examples,
+                        "action": action,
+                    }
+                )
+            # Both sheets: a field with some candidates on "Правила" may have more on "Выбор источника".
+            seen = {(row["class81_code"], row["template_field"], row["source_attribute"]) for row in rows}
+            for row in self.read_mapping_review_candidates_from_source_choice(workbook, review_path):
+                key = (row["class81_code"], row["template_field"], row["source_attribute"])
+                if key not in seen:
+                    seen.add(key)
+                    rows.append(row)
+            return rows
+        finally:
+            workbook.close()
 
     def read_mapping_review_candidates_from_source_choice(
         self, workbook, review_path: Path
