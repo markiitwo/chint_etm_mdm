@@ -2,6 +2,7 @@ import datetime as dt
 import tempfile
 import unittest
 import urllib.error
+from unittest import mock
 from pathlib import Path
 
 from chint_etm_mdm.site_info import (
@@ -127,6 +128,18 @@ class SiteInfoTests(unittest.TestCase):
         self.assertEqual({}, cache.records)  # errors are not remembered, asked next time
         self.assertIn("дальше без него", lines[-1])
         self.assertTrue(any("Ошибок связи" in line for line in site_lines(result)))
+
+    def test_pause_inside_product_only_after_error(self) -> None:
+        pages = {
+            "https://ensmas.ru/catalog/?q=616173": SEARCH,
+            "https://ensmas.ru/catalog/?q=2": SEARCH.replace("616173", "2"),
+            PAGE_URL: PRODUCT,
+        }
+        for articles, sleeps in ((["616173", "2"], 1), (["616173", "1", "2"], 3)):
+            with mock.patch("chint_etm_mdm.site_info.time.sleep") as sleep:
+                update_site_cache(SiteCache(None), articles, fetch=FakeSite(pages), delay=1)
+            # between products always; inside a product ("2") only after "1" failed
+            self.assertEqual(sleeps, sleep.call_count, articles)
 
     def test_stop(self) -> None:
         site = FakeSite({"https://ensmas.ru/catalog/?q=1": "<html></html>"})

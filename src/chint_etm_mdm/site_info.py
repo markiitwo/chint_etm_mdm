@@ -361,6 +361,10 @@ def update_site_cache(
         else:
             todo.append(article)
     pause = (lambda: time.sleep(delay)) if delay > 0 else (lambda: None)
+    # Search and card of one product go without a pause until the site first fails to answer.
+    def card_pause() -> None:
+        if result.errors:
+            pause()
     for number, article in enumerate(todo, 1):
         if should_stop and should_stop():
             result.stopped = True
@@ -369,7 +373,7 @@ def update_site_cache(
             pause()
         result.asked += 1
         try:
-            record = look_up(article, fetch, pause)
+            record = look_up(article, fetch, card_pause)
         except (urllib.error.URLError, OSError, ValueError) as exc:
             result.errors.append(f"{article}: {exc}")
             if progress:
