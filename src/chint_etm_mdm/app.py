@@ -811,9 +811,9 @@ class MainWindow(QMainWindow):
             worker.progress.connect(self.raek_log.append)
         if isinstance(worker, PriceImportWorker):
             worker.progress.connect(self.price_log.append)
+            worker.downloaded.connect(self.on_price_downloaded)
         if isinstance(worker, MaterialsWorker):
             worker.progress.connect(self.fill_log.append)
-            worker.downloaded.connect(self.on_price_downloaded)
         self.update_write_action_buttons()
         worker.start()
         return True

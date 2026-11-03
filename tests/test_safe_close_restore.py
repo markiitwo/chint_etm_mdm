@@ -336,6 +336,22 @@ class BaseProblemTests(unittest.TestCase):
             self.assertIn("не похож на базу SQLite", base_problem(text))
 
 
+class WorkerSignalsTests(CloseDuringOperationTests):
+    def test_materials_and_price_download_start_and_report(self) -> None:
+        from chint_etm_mdm.app import MaterialsWorker, PriceImportWorker
+
+        root = Path(self.temp_dir.name)
+        materials = MaterialsWorker(root / "base.sqlite", [], root, root, None)
+        with mock.patch.object(materials, "start"):
+            self.assertTrue(self.window.start_worker(materials, lambda _result: None, self.fail))
+        self.window.on_worker_finished(materials)
+        price = PriceImportWorker(root / "base.sqlite", None, "https://example.test/price.xlsx", root)
+        with mock.patch.object(price, "start"):
+            self.assertTrue(self.window.start_worker(price, lambda _result: None, self.fail))
+        price.downloaded.emit(root / "price.xlsx")
+        self.assertEqual(str(root / "price.xlsx"), self.window.price_file_edit.text())
+
+
 class CopyBaseTests(CloseDuringOperationTests):
     def test_copy_in_the_background_keeps_the_old_one(self) -> None:
         from chint_etm_mdm.app import CopyBaseWorker
