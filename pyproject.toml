@@ -15,7 +15,6 @@ dependencies = [
 
 [project.scripts]
 chint-etm-mdm = "chint_etm_mdm.app:main"
-chint-etm-mdm-fill = "chint_etm_mdm.cli:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "chint_etm_mdm.__version__"}
