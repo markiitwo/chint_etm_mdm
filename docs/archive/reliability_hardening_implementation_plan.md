@@ -1,3 +1,5 @@
+> Архив. Актуальное — CHANGELOG.md и docs/REFACTOR_PLAN.md
+
 # План внедрения reliability hardening
 
 Документ фиксирует практический план внедрения идей из дизайн-дока
