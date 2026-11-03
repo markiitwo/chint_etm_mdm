@@ -83,6 +83,7 @@ from .raek import RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answ
 from .site_info import default_cache_path as site_cache_path
 from .certificates import TABLE_NAME as CERTIFICATES_TABLE, TableResult, table_lines, update_table
 from .notify import NotifySettings, find_telegram_chat, load_settings as load_notify_settings, save_settings as save_notify_settings, send_summary
+from .inputs import bring_in, input_folders
 from .pm_requests import answer_lines, answers_path, import_answers, latest_assignment_file, load_assignment, request_lines, write_requests
 from .update_ui import Updates, offer_install
 from .value_matching import import_etm_reference
@@ -321,7 +322,7 @@ def codes_folders(work_dir: str, inbox_dir: str = "") -> list[Path]:
     """Where a new "Честный знак" file usually lands: the inbox folder, Downloads and the work folder's input."""
     folders = incoming_folders(inbox_dir)
     if work_dir:
-        folders.append(Path(work_dir) / "input")
+        folders += input_folders(work_dir)
     return folders
 
 
@@ -1015,8 +1016,7 @@ class MainWindow(QMainWindow):
             if needs is not None and not any(needs.wanted.values()) and not needs.codes_missing:
                 QMessageBox.information(self, "Отчёт ЭТМ", "По отчёту в карточках всего хватает.")
                 return
-            codes_text = self.codes_file_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
+            codes_path = self.codes_file(work_text)
             output = run_folder(Path(work_text) / "output", "ЭТМ материалы")
             if needs is None:
                 self.fill_log.append(f"Готовлю материалы для {len(articles)} товаров...")
@@ -1288,7 +1288,7 @@ class MainWindow(QMainWindow):
     def choose_raek_zip(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Архив от менеджера РАЭК", str(self.incoming()[0]), "ZIP (*.zip)")
         if path:
-            self.raek_zip_edit.setText(path)
+            self.raek_zip_edit.setText(str(self.take(path, "РАЭК")))
 
     def run_raek(self) -> None:
         try:
@@ -1297,15 +1297,14 @@ class MainWindow(QMainWindow):
             if db_path is None:
                 return
             zip_text = self.raek_zip_edit.text().strip()
-            zip_path = Path(zip_text) if zip_text else latest_raek_zip(self.incoming())
+            zip_path = self.take(zip_text or latest_raek_zip(self.incoming() + input_folders(self.work_dir_edit.text().strip())), "РАЭК")
             if zip_path is None or not zip_path.is_file():
                 QMessageBox.warning(self, "Нет архива", "Сохраните архив РАЭК в папку входящих или в «Загрузки», или выберите его кнопкой «Выбрать...».")
                 return
             work_text = self.work_dir_edit.text().strip()
             output_dir = (Path(work_text) / "output" if work_text else zip_path.parent) / f"раэк_{dt.date.today().isoformat()}"
             rules_path = ensure_default_rules(Path(work_text)) if work_text else None
-            codes_text = self.codes_file_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
+            codes_path = self.codes_file(work_text)
             ask_site = self.raek_site_check.isChecked()
             self.raek_log.append(f"Заполняю {zip_path.name}...")
             if ask_site:
@@ -1354,8 +1353,7 @@ class MainWindow(QMainWindow):
             if not work_text:
                 QMessageBox.warning(self, "Нет рабочей папки", "Выберите рабочую папку на вкладке «Настройки и база».")
                 return
-            codes_text = self.codes_file_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
+            codes_path = self.codes_file(work_text)
             self.certificates_log.append("Обновляю таблицу сертификатов...")
             worker = CertificatesWorker(db_path, codes_path, Path(work_text) / CERTIFICATES_TABLE, dates_file, self.cert_folder())
             self.start_worker(worker, self.on_certificates_done, self.on_certificates_failed)
@@ -1405,7 +1403,7 @@ class MainWindow(QMainWindow):
             return
         work = Path(work_text)
         try:
-            assignment_file = latest_assignment_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()) + [work])
+            assignment_file = self.take(latest_assignment_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()) + [work]), "закрепление ПМ")
             if assignment_file is None:
                 QMessageBox.warning(
                     self,
@@ -1451,7 +1449,7 @@ class MainWindow(QMainWindow):
         lines = []
         for path in paths:
             try:
-                lines += answer_lines(import_answers(Path(path), Path(work_text)))
+                lines += answer_lines(import_answers(self.take(path, "ответы продактов"), Path(work_text)))
             except ValueError as error:
                 lines.append(str(error))
             except Exception:
@@ -1705,7 +1703,7 @@ class MainWindow(QMainWindow):
             self, "Файл ЧЗ с кодами ТН ВЭД и ОКПД2", "", "Excel (*.xlsx *.xlsm);;All files (*)"
         )
         if path:
-            self.codes_file_edit.setText(path)
+            self.codes_file_edit.setText(str(self.take(path, "ЧЗ")))
             self.save_current_config()
 
     def open_new_products_dir(self) -> None:
@@ -1733,9 +1731,8 @@ class MainWindow(QMainWindow):
                 if not articles:
                     QMessageBox.warning(self, "Нет артикулов", "Впишите артикулы или выберите «Новинки, появившиеся после».")
                     return
-            codes_text = self.codes_file_edit.text().strip()
             work_text = self.work_dir_edit.text().strip()
-            codes_path = latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(codes_text) if codes_text else None)
+            codes_path = self.codes_file(work_text)
             base = Path(work_text) / "output" if work_text else Path(templates_text).parent
             since = self.new_since_edit.date().toPython()
             output_dir = run_folder(base, "ЭТМ карточки")
@@ -1831,7 +1828,7 @@ class MainWindow(QMainWindow):
             "ETM templates (*.xlsx *.xlsm *.csv);;All files (*)",
         )
         if path:
-            self.template_path_edit.setText(path)
+            self.template_path_edit.setText(str(self.take(path, "шаблон ЭТМ")))
 
     def choose_output_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Выберите папку результата")
@@ -1856,7 +1853,7 @@ class MainWindow(QMainWindow):
             "CHINT price-list (*.xlsx *.xlsm);;All files (*)",
         )
         if path:
-            self.price_file_edit.setText(path)
+            self.price_file_edit.setText(str(self.take(path, "прайс")))
             self.open_price_file_button.setEnabled(True)
 
     def choose_etim_file(self) -> None:
@@ -1867,7 +1864,7 @@ class MainWindow(QMainWindow):
             "ETIM workbook (*.xlsx *.xlsm *.xls);;All files (*)",
         )
         if path:
-            self.etim_file_edit.setText(path)
+            self.etim_file_edit.setText(str(self.take(path, "ETIM")))
             self.open_etim_file_button.setEnabled(True)
 
     def choose_backup_file(self) -> None:
@@ -2260,6 +2257,23 @@ class MainWindow(QMainWindow):
         if problem:
             QMessageBox.warning(self, "База не подходит", f"{problem}\n\n{path}\n\nВыберите chint_mdm.sqlite на вкладке «Настройки и база».")
             return None
+        return path
+
+    def take(self, path: str | Path | None, kind: str) -> Path | None:
+        """The file in the work folder (see inputs.bring_in); a failed copy is told, the original is used."""
+        try:
+            return bring_in(path, self.work_dir_edit.text().strip(), kind)
+        except OSError as error:
+            QMessageBox.warning(self, "Не удалось скопировать файл", f"Работаю с исходным файлом, не с копией в рабочей папке.\n\n{error}")
+            return Path(path) if path else None
+
+    def codes_file(self, work_text: str) -> Path | None:
+        """The newest ЧЗ file (chosen, or in the inbox, Downloads, work folder), as a copy in the work folder."""
+        chosen = self.codes_file_edit.text().strip()
+        path = self.take(latest_codes_file(codes_folders(work_text, self.inbox_dir_edit.text().strip()), Path(chosen) if chosen else None), "ЧЗ")
+        if path and str(path) != chosen:
+            self.codes_file_edit.setText(str(path))
+            self.save_current_config()
         return path
 
     def chosen_file(self, text: str, title: str, what: str) -> Path | None:
@@ -2774,7 +2788,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            characteristics, values = import_etm_reference(Path(path), etm_reference_path(rules_path))
+            characteristics, values = import_etm_reference(self.take(path, "справочник ЭТМ"), etm_reference_path(rules_path))
         except Exception as exc:
             QMessageBox.warning(self, "Справочник не загружен", str(exc))
             return
