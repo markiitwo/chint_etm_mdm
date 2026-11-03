@@ -13,7 +13,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 
-from .db_utils import CHINT_TABLES, connect_database, restore_sqlite_backup, sha256_file
+from .db_utils import CHINT_TABLES, check_sqlite_integrity, connect_database, restore_sqlite_backup, sha256_file
 from .excel_files import readable_xlsx
 from .number_parsing import parse_number
 from .price_importer import backup_database
@@ -100,6 +100,9 @@ class EtimImportResult:
     attributes_written: int
     file_conflicts: int = 0
     unknown_articles: int = 0
+    attributes_changed: int = 0
+    not_in_file: int = 0
+    duplicates_removed: int = 0
     # Set when the base was updated but the report could not take its final name.
     report_warning: str = ""
 
@@ -575,6 +578,28 @@ def ensure_etim_import_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_product_attribute_values_article ON product_attribute_values(article)"
+    )
+    # Product reads look up the latest iPRO row per article; the table comes with the base, without an index.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ipro_goods'").fetchone():
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ipro_goods_article ON ipro_goods(article)")
+
+
+def remove_duplicate_attributes(conn: sqlite3.Connection) -> int:
+    """Older versions wrote every ETIM value again on each import; keep the newest row per product and field.
+
+    The newest row is the one the program reads now, so what it shows does not change.
+    """
+    return conn.execute(
+        """
+        DELETE FROM product_attribute_values
+        WHERE source_kind = ? AND id NOT IN (
+            SELECT MAX(id) FROM product_attribute_values WHERE source_kind = ? GROUP BY article, attribute_name
+        )
+        """,
+        (SOURCE_KIND, SOURCE_KIND),
+    ).rowcount
 
 
 def fetch_all_articles(conn: sqlite3.Connection) -> list[str]:
@@ -663,6 +688,7 @@ def write_etim_report(
     new_rows: list[DimensionReportRow],
     conflict_rows: list[DimensionReportRow],
     notes: ScanNotes | None = None,
+    not_in_file: list[tuple[str, str, str, str]] = (),
 ) -> None:
     notes = notes or ScanNotes()
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -679,6 +705,8 @@ def write_etim_report(
     summary.append(["Новых габаритных значений записано", result.dimension_values_written])
     summary.append(["Конфликтов с уже заполненными габаритами", result.dimension_conflicts])
     summary.append(["Характеристик записано", result.attributes_written])
+    summary.append(["Изменено значений", result.attributes_changed])
+    summary.append(["Есть в базе, нет в файле", result.not_in_file])
     summary.append(["Разные значения в самом файле", result.file_conflicts])
     summary.append(["Артикулов в файле, которых нет в базе", result.unknown_articles])
     summary.append(["Бэкап базы", str(result.backup_path or "")])
@@ -736,6 +764,11 @@ def write_etim_report(
     for article, sheet_name in sorted(notes.unknown_articles.items()):
         unknown.append([article, sheet_name])
 
+    missing = workbook.create_sheet("Нет в файле")
+    missing.append(["Артикул", "Характеристика", "Значение в базе", "Из файла"])
+    for row in not_in_file:
+        missing.append(list(row))
+
     decision_validation = DataValidation(
         type="list",
         formula1=f'"{KEEP_DB_DECISION},{ACCEPT_ETIM_DECISION}"',
@@ -755,7 +788,7 @@ def write_etim_report(
         conflicts.cell(row_index, 1).fill = keep_fill
         conflicts.cell(row_index, 5).fill = accept_fill
 
-    for sheet in (summary, instruction, new_sheet, conflicts, differences, unknown):
+    for sheet in (summary, instruction, new_sheet, conflicts, differences, unknown, missing):
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for column_cells in sheet.columns:
@@ -770,9 +803,17 @@ def insert_etim_data(
     import_id: int,
     article_data: dict[str, EtimArticleData],
     source_ref: str,
-) -> tuple[int, int]:
+    disputed: set[tuple[str, str]] = frozenset(),
+    not_in_file: list[tuple[str, str, str, str]] | None = None,
+) -> tuple[int, int, int]:
+    """Dimensions are added; a characteristic keeps one row per product and is updated in place.
+
+    A characteristic the file no longer has stays in the base and goes to ``not_in_file``:
+    whether the export dropped it on purpose is not known.
+    """
     dimension_values_found = 0
     attributes_written = 0
+    attributes_changed = 0
     for data in article_data.values():
         for key, value in data.dimensions.items():
             dimension_values_found += 1
@@ -829,27 +870,40 @@ def insert_etim_data(
                 ),
             )
 
-        for attribute_name, value in data.attributes.items():
-            conn.execute(
-                """
-                INSERT INTO product_attribute_values (
-                    article, attribute_name, sheet_name, value_raw, value_normalized,
-                    source_kind, source_ref, confidence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    data.article,
-                    attribute_name,
-                    data.attribute_sheets.get(attribute_name, data.sheet_name),
-                    value,
-                    value,
-                    SOURCE_KIND,
-                    source_ref,
-                    0.8,
-                ),
+        existing = {
+            str(row[1]): (int(row[0]), row[2], str(row[3] or ""))
+            for row in conn.execute(
+                "SELECT id, attribute_name, value_raw, source_ref FROM product_attribute_values "
+                "WHERE article = ? AND source_kind = ? ORDER BY id",
+                (data.article, SOURCE_KIND),
             )
-            attributes_written += 1
-    return dimension_values_found, attributes_written
+        }
+        for attribute_name, value in data.attributes.items():
+            sheet_name = data.attribute_sheets.get(attribute_name, data.sheet_name)
+            old = existing.get(attribute_name)
+            if old is None:
+                conn.execute(
+                    """
+                    INSERT INTO product_attribute_values (
+                        article, attribute_name, sheet_name, value_raw, value_normalized,
+                        source_kind, source_ref, confidence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (data.article, attribute_name, sheet_name, value, value, SOURCE_KIND, source_ref, 0.8),
+                )
+                attributes_written += 1
+            elif old[1] != value:
+                conn.execute(
+                    "UPDATE product_attribute_values SET value_raw = ?, value_normalized = ?, source_ref = ?, "
+                    "sheet_name = ? WHERE id = ?",
+                    (value, value, source_ref, sheet_name, old[0]),
+                )
+                attributes_changed += 1
+        if not_in_file is not None:
+            for attribute_name, (_id, value, ref) in existing.items():
+                if attribute_name not in data.attributes and (data.article, attribute_name) not in disputed:
+                    not_in_file.append((data.article, attribute_name, str(value or ""), ref))
+    return dimension_values_found, attributes_written, attributes_changed
 
 
 def import_etim_workbook(
@@ -895,6 +949,7 @@ def import_etim_workbook(
                 new_dimension_rows,
                 conflict_rows,
             ) = build_dimension_report_rows(conn, article_data)
+            duplicates_removed = remove_duplicate_attributes(conn)
             cur = conn.cursor()
             cur.execute(
                 """
@@ -910,8 +965,10 @@ def import_etim_workbook(
                 ),
             )
             import_id = int(cur.lastrowid)
-            dimension_values_found, attributes_written = insert_etim_data(
-                conn, import_id, article_data, etim_path.name
+            not_in_file: list[tuple[str, str, str, str]] = []
+            disputed = {(conflict.article, conflict.field) for conflict in notes.conflicts}
+            dimension_values_found, attributes_written, attributes_changed = insert_etim_data(
+                conn, import_id, article_data, etim_path.name, disputed, not_in_file
             )
             result = EtimImportResult(
                 etim_file=etim_path,
@@ -927,9 +984,12 @@ def import_etim_workbook(
                 attributes_written=attributes_written,
                 file_conflicts=len(notes.conflicts),
                 unknown_articles=len(notes.unknown_articles),
+                attributes_changed=attributes_changed,
+                not_in_file=len(not_in_file),
+                duplicates_removed=duplicates_removed,
             )
             try:
-                write_etim_report(saving_path, result, new_dimension_rows, conflict_rows, notes)
+                write_etim_report(saving_path, result, new_dimension_rows, conflict_rows, notes, not_in_file)
             except Exception as exc:
                 raise RuntimeError(
                     f"Не удалось сохранить отчёт ETIM в {report_dir}: {exc}\n"
@@ -939,6 +999,12 @@ def import_etim_workbook(
     except BaseException:
         saving_path.unlink(missing_ok=True)
         raise
+
+    if duplicates_removed:
+        # Deleted rows only free pages inside the file; VACUUM gives the space back (needs a transaction-free connection).
+        with closing(connect_database(db_path)) as conn:
+            conn.execute("VACUUM")
+        check_sqlite_integrity(db_path)
 
     try:
         os.replace(saving_path, report_path)
@@ -1135,6 +1201,8 @@ def result_lines(result: EtimImportResult) -> list[str]:
         f"Новых габаритных значений записано: {result.dimension_values_written}",
         f"Конфликтов с уже заполненными габаритами: {result.dimension_conflicts}",
         f"Характеристик записано: {result.attributes_written}",
+        f"Изменено значений: {result.attributes_changed}",
+        f"Есть в базе, нет в файле: {result.not_in_file}" + (" (лист «Нет в файле»)" if result.not_in_file else ""),
         f"Отчет ETIM: {result.report_path}",
     ]
     if result.found_articles == 0:
