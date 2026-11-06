@@ -207,14 +207,27 @@ class EtmReportTests(MaterialsTests):
         )
         return path
 
+    def add_price(self, articles: list[str]) -> None:
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute("INSERT INTO price_snapshots (id, snapshot_date) VALUES (1, '02-11-2026')")
+            conn.executemany(
+                "INSERT INTO price_snapshot_items (snapshot_id, article, price_with_vat) VALUES (1, ?, '1')",
+                [(article,) for article in articles],
+            )
+
     def test_reports_are_read(self) -> None:
         needs = m.ReportNeeds()
         needs.add(m.read_etm_report(self.goods_list()))
         needs.add(m.read_etm_report(self.sert_report()))
+        # ETM's «Поставляемый: Нет» does not drop 888; the price list does.
+        self.assertEqual({"616173", "888"}, needs.wanted["Описание"])
+        self.assertIsNone(m.in_price(self.db))
+        self.add_price(["616173", "777"])
+        self.assertEqual(1, needs.keep(m.in_price(self.db)))
         self.assertEqual({"616173"}, needs.wanted["Описание"])
         self.assertEqual({"616173"}, needs.wanted["2D/3D"])
-        self.assertEqual({"777"}, needs.wanted["Фото"])  # 888 is no longer supplied, 4 has no article
-        self.assertNotIn("Тех. информация", needs.wanted)
+        self.assertEqual({"777"}, needs.wanted["Фото"])  # 4 has no article
+        self.assertEqual(set(), needs.wanted["Тех. информация"])
         self.assertEqual({"616173", "777"}, needs.wanted["Сертификаты"])
         self.assertEqual({"616173": ["Код ТН ВЭД"]}, needs.codes_missing)
         self.assertIn("Товаров без фото: 1", m.report_lines(needs))
@@ -243,6 +256,17 @@ class EtmReportTests(MaterialsTests):
         self.assertNotIn(("616173", "Фото"), checks)  # the card has a photo: nothing asked
         codes = load_workbook(result.summary_path)["Коды в карточке"]
         self.assertEqual(("616173", "Код ТН ВЭД"), (codes["A2"].value, codes["C2"].value))
+
+    def test_codes_nobody_has_are_asked(self) -> None:
+        # ЧЗ has no tariff code for 616173 and the base has none: a question for the product manager.
+        missing = {"616173": ["Код ТН ВЭД"], "777": ["Код ОКПД2"]}
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute("INSERT INTO product_okpd2_codes (article, okpd2_9) VALUES ('777', '27.12.24.190')")
+        result = m.make_materials(
+            self.db, [], self.work, self.root / "out", self.chz, ask_site=False,
+            today=dt.date(2026, 10, 22), wanted={}, codes_missing=missing,
+        )
+        self.assertEqual([("616173", "Код ТН ВЭД", "NVF7")], [(n.article, n.key, n.series) for n in result.needs])
 
 
 def make_cert_folder(folder: Path, rows: list[list[object]], pdfs: list[str]) -> None:
