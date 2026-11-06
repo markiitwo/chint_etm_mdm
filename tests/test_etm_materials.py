@@ -267,6 +267,9 @@ class EtmReportTests(MaterialsTests):
             today=dt.date(2026, 10, 22), wanted={}, codes_missing=missing,
         )
         self.assertEqual([("616173", "Код ТН ВЭД", "NVF7")], [(n.article, n.key, n.series) for n in result.needs])
+        # 777's code from the base goes to the file for ETM's manager; 616173 has nothing to send yet.
+        codes = load_workbook(result.files["Коды"]).active
+        self.assertEqual([("Артикул", "ОКПД2", "ТН ВЭД"), ("777", "27.12.24.190", None)], list(codes.values))
 
 
 def make_cert_folder(folder: Path, rows: list[list[object]], pdfs: list[str]) -> None:

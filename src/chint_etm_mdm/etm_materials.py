@@ -50,7 +50,7 @@ from .db_utils import connect_database
 from .export_templates import clean_product_name
 from .filler import normalize_article
 from .net import open_url
-from .pm_requests import Need, answers_path, load_answers
+from .pm_requests import Need, answers_path, checked_answer, load_answers
 from .site_info import USER_AGENT, SiteCache, SiteRecord, site_lines, update_site_cache
 from .upload_names import cp1251_text, series_label, series_names
 
@@ -602,17 +602,52 @@ def make_materials(
         answered = load_answers(answers_path(work_dir))
         products = fetch_products(db_path, list(codes_missing))
         code_series = series_names(db_path, list(codes_missing))
+        code_rows = []
         for article, fields in sorted(codes_missing.items()):
             product = products.get(article)
             name = clean_product_name(product.full_name or product.name) if product else ""
             values = {field: known.get((article, field), "") for field in fields}
             result.codes.append((article, name, fields, values))
             in_base = {"Код ТН ВЭД": product.tnved_code, "Код ОКПД2": product.okpd2_code} if product else {}
+            # ЧЗ first, then a manager's answer, then the base; only codes of the right form.
+            best = {
+                code: next((value for value in (known.get((article, code), ""), answered.get((article, code), ""), in_base.get(code, ""))
+                            if checked_answer(code, "", (), value)[0]), "")
+                for code in CODE_FILE_HEADERS[1:]
+            }
             for code in fields:
-                if not values[code] and not in_base.get(code) and (article, code) not in answered:
+                if not best[code]:
                     result.needs.append(Need(article, name, code_series.get(article, ""), code, code))
+            if any(best[code] for code in fields):
+                code_rows.append([article, *(best[code] for code in CODE_FILE_HEADERS[1:])])
+        if code_rows:
+            result.counts["Коды"] = len(code_rows)
+            result.files["Коды"] = write_codes_file(upload_dir / f"коды_для_ЭТМ_{series_label(all_series)}_{today.isoformat()}.xlsx", code_rows)
     write_summary(result, names)
     return result
+
+
+CODE_FILE_HEADERS = ["Артикул", "Код ОКПД2", "Код ТН ВЭД"]
+
+
+def write_codes_file(path: Path, rows: list[list[str]]) -> Path:
+    """ТН ВЭД and ОКПД2 for ETM's manager: a plain table, codes as text so Excel keeps them as they are."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Коды"
+    sheet.append(["Артикул", "ОКПД2", "ТН ВЭД"])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        sheet.append(row)
+    for line in sheet.iter_rows(min_row=2):
+        for cell in line:
+            cell.number_format = "@"
+    for column, width in zip("ABC", (16, 16, 16)):
+        sheet.column_dimensions[column].width = width
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+    return path
 
 
 def load_codes(codes_path: Path | None) -> dict[tuple[str, str], str]:
@@ -652,7 +687,12 @@ def todo_lines(result: MaterialsResult) -> list[str]:
         known = sum(1 for _a, _n, fields, values in result.codes if all(values.get(field) for field in fields))
         lines.append(
             f"У {len(result.codes)} карточек в ЭТМ нет ТН ВЭД или ОКПД2 (лист «Коды в карточке»); у {known} коды есть "
-            "в файле ЧЗ. Коды — поля самой карточки, их меняют через карточку товара в ЭТМ."
+            "в файле ЧЗ."
+        )
+    if "Коды" in result.files:
+        lines.append(
+            f"Файл «{result.files['Коды'].name}» в папке «{UPLOAD_DIR}» ({result.counts['Коды']} товаров) "
+            "отправьте менеджеру ЭТМ: артикул, ОКПД2, ТН ВЭД."
         )
     if not lines:
         lines.append("Делать ничего не нужно.")
@@ -700,6 +740,8 @@ def materials_lines(result: MaterialsResult) -> list[str]:
         lines.append(f"{form}: {result.counts.get(form, 0)} строк")
     if result.counts.get("Описание на проверку"):
         lines.append(f"Описаний на проверку: {result.counts['Описание на проверку']}")
+    if result.counts.get("Коды"):
+        lines.append(f"Коды для менеджера ЭТМ: {result.counts['Коды']} товаров")
     lines.append(f"Скачано файлов: {result.downloaded}")
     if result.checks:
         lines.append(f"Проверить: {len(result.checks)} (лист «Проверить» в Итог.xlsx)")
