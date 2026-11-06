@@ -26,6 +26,7 @@ import shutil
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,8 +45,12 @@ from .certificates import (
     register_documents,
     table_dates,
 )
+from .db import fetch_products
+from .db_utils import connect_database
+from .export_templates import clean_product_name
 from .filler import normalize_article
 from .net import open_url
+from .pm_requests import Need, answers_path, load_answers
 from .site_info import USER_AGENT, SiteCache, SiteRecord, site_lines, update_site_cache
 from .upload_names import cp1251_text, series_label, series_names
 
@@ -104,6 +109,7 @@ class MaterialsResult:
     site_lines: list[str] = field(default_factory=list)
     # Cards in ETM without ТН ВЭД/ОКПД2: (article, name, missing fields, values the ЧЗ file has)
     codes: list[tuple[str, str, list[str], dict[str, str]]] = field(default_factory=list)
+    needs: list[Need] = field(default_factory=list)  # codes neither ЧЗ nor a manager's answer has
 
 
 # --- documents -------------------------------------------------------------------------------------
@@ -593,8 +599,18 @@ def make_materials(
             result.files[form] = path
     if codes_missing:
         known = load_codes(codes_path)
+        answered = load_answers(answers_path(work_dir))
+        products = fetch_products(db_path, list(codes_missing))
+        code_series = series_names(db_path, list(codes_missing))
         for article, fields in sorted(codes_missing.items()):
-            result.codes.append((article, names.get(article, ""), fields, {field: known.get((article, field), "") for field in fields}))
+            product = products.get(article)
+            name = clean_product_name(product.full_name or product.name) if product else ""
+            values = {field: known.get((article, field), "") for field in fields}
+            result.codes.append((article, name, fields, values))
+            in_base = {"Код ТН ВЭД": product.tnved_code, "Код ОКПД2": product.okpd2_code} if product else {}
+            for code in fields:
+                if not values[code] and not in_base.get(code) and (article, code) not in answered:
+                    result.needs.append(Need(article, name, code_series.get(article, ""), code, code))
     write_summary(result, names)
     return result
 
@@ -611,9 +627,6 @@ def load_codes(codes_path: Path | None) -> dict[tuple[str, str], str]:
 
 
 def product_names(db_path: Path, articles: list[str]) -> dict[str, str]:
-    from .db import fetch_products
-    from .export_templates import clean_product_name
-
     return {article: clean_product_name(product.full_name or product.name) for article, product in fetch_products(db_path, articles).items()}
 
 
@@ -715,6 +728,15 @@ class ReportNeeds:
     reasons: dict[str, str] = field(default_factory=dict)  # article -> ETM's reason about certificates
     files: list[str] = field(default_factory=list)
 
+    def keep(self, articles: set[str]) -> int:
+        """Leave only these products; returns how many others were dropped."""
+        found = {a for members in self.wanted.values() for a in members} | set(self.codes_missing)
+        for form in self.wanted:
+            self.wanted[form] &= articles
+        self.codes_missing = {a: fields for a, fields in self.codes_missing.items() if a in articles}
+        self.reasons = {a: reason for a, reason in self.reasons.items() if a in articles}
+        return len(found - articles)
+
     def add(self, other: "ReportNeeds") -> None:
         for form, members in other.wanted.items():
             self.wanted.setdefault(form, set()).update(members)
@@ -723,6 +745,18 @@ class ReportNeeds:
             self.codes_missing[article] += [item for item in fields if item not in self.codes_missing[article]]
         self.reasons.update(other.reasons)
         self.files += other.files
+
+
+def in_price(db_path: Path) -> set[str] | None:
+    """Articles of the newest full price list in the base; None when there is none."""
+    from .price_importer import latest_snapshot_id
+
+    with closing(connect_database(db_path, readonly=True)) as conn:
+        snapshot = latest_snapshot_id(conn)
+        if snapshot is None:
+            return None
+        rows = conn.execute("SELECT article FROM price_snapshot_items WHERE snapshot_id = ?", (snapshot,))
+        return {normalize_article(article) for (article,) in rows if normalize_article(article)}
 
 
 def report_rows(path: Path) -> list[list[str]]:
@@ -761,11 +795,11 @@ def read_etm_report(path: Path) -> ReportNeeds:
         return row[idx] if idx is not None and idx < len(row) else ""
 
     if any(name in header for name in GOODS_FLAGS):
-        supplied_idx = header.index("поставляемый") if "поставляемый" in header else None
+        # ETM's «Поставляемый» is not whether CHINT still sells it: that is the price list (see in_price).
         for row in rows[1:]:
             article = normalize_article(cell(row, article_idx))
-            if not article or cell(row, supplied_idx).casefold() == "нет":
-                continue  # products ETM no longer takes are left alone
+            if not article:
+                continue
             for name, form in GOODS_FLAGS.items():
                 if name in header and cell(row, header.index(name)).casefold() == "нет":
                     needs.wanted.setdefault(form, set()).add(article)

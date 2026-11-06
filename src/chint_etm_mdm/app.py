@@ -44,6 +44,7 @@ from .etm_materials import (
     DESCRIPTIONS_TABLE,
     MaterialsResult,
     ReportNeeds,
+    in_price,
     read_etm_report,
     report_lines,
     import_description_file,
@@ -623,6 +624,16 @@ class MainWindow(QMainWindow):
         except ValueError as error:
             QMessageBox.warning(self, "Отчёт ЭТМ", str(error))
             return
+        db_path = self.validated_db_path()
+        if db_path is None:
+            return
+        price = in_price(db_path)
+        if price is None:
+            QMessageBox.warning(self, "Нет прайса", "В базе нет прайса: загрузите его на вкладке «Обновление базы».")
+            return
+        dropped = needs.keep(price)
+        if dropped:
+            self.fill_log.append(f"Нет в текущем прайсе, пропущено товаров: {dropped}")
         models = needs.wanted.pop("2D/3D", set())
         if models:
             answer = QMessageBox.question(
@@ -689,6 +700,14 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Материалы готовы", "\n".join(lines + ["", "Что делать дальше — на первом листе Итог.xlsx (он уже открыт)."])
         )
+        if result.needs:
+            answer = QMessageBox.question(
+                self,
+                "Коды у продактов",
+                f"Кодов ТН ВЭД и ОКПД2 нет ни в базе, ни в файле ЧЗ: {len(result.needs)}. Запросить их у продактов?",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.ask_managers(result.needs, f"Коды ТН ВЭД и ОКПД2 для карточек ЭТМ ({result.output_dir.name})", self.fill_log)
 
     def open_descriptions_table(self) -> None:
         work_text = self.work_dir_edit.text().strip()
