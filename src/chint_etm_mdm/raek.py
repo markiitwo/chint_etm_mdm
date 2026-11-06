@@ -55,6 +55,7 @@ from .value_matching import (
 )
 
 HEADER_START = "RAEC_ID"
+RAEK_FILES_SEPARATOR = "; "  # several single files chosen on the RAEK tab
 ARTICLE_HEADER = "Код поставщика"
 NAME_HEADER = "Название от поставщика"
 FIRST_DATA_COLUMN = 6  # A..F are RAEK's own columns
@@ -133,6 +134,7 @@ class RaekResult:
     codes_file: Path | None = None
     site: SiteResult | None = None
     needs: list[Need] = field(default_factory=list)  # what to ask product managers
+    outputs: list[Path] = field(default_factory=list)  # filled single files (not for an archive)
 
 
 @dataclass(frozen=True)
@@ -625,43 +627,63 @@ def manager_need(article: str, name: str, header: str, feature: Feature | None, 
     return Need(article, name, series_of(article, sources), canonical(header), header)
 
 
+def book_articles(data: bytes, articles: set[str]) -> None:
+    workbook = load_workbook(BytesIO(data), read_only=True)
+    try:
+        for sheet in workbook.worksheets:
+            header: list[str] | None = None
+            for values in sheet.iter_rows(values_only=True):
+                cells = [text(value) for value in values]
+                if header is None:
+                    if cells and cells[0] == HEADER_START:
+                        header = cells
+                    continue
+                idx = header.index(ARTICLE_HEADER) if ARTICLE_HEADER in header else 1
+                if idx < len(cells) and normalize_article(cells[idx]):
+                    articles.add(normalize_article(cells[idx]))
+    finally:
+        workbook.close()
+
+
 def zip_articles(path: Path) -> list[str]:
     articles: set[str] = set()
     with zipfile.ZipFile(path) as archive:
         for info in archive.infolist():
-            if not info.filename.lower().endswith(".xlsx"):
-                continue
-            workbook = load_workbook(BytesIO(archive.read(info)), read_only=True)
-            try:
-                for sheet in workbook.worksheets:
-                    header: list[str] | None = None
-                    for values in sheet.iter_rows(values_only=True):
-                        cells = [text(value) for value in values]
-                        if header is None:
-                            if cells and cells[0] == HEADER_START:
-                                header = cells
-                            continue
-                        idx = header.index(ARTICLE_HEADER) if ARTICLE_HEADER in header else 1
-                        if idx < len(cells) and normalize_article(cells[idx]):
-                            articles.add(normalize_article(cells[idx]))
-            finally:
-                workbook.close()
+            if info.filename.lower().endswith(".xlsx"):
+                book_articles(archive.read(info), articles)
     return sorted(articles)
 
 
-def output_paths(zip_path: Path, output_dir: Path) -> tuple[Path, Path]:
+def output_paths(source: Path, output_dir: Path) -> tuple[Path, Path]:
+    """The filled copy of `source` (same extension) and the report next to it, never over an earlier run."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{zip_path.stem}_заполнено_{dt.date.today().isoformat()}"
+    stem = f"{source.stem}_заполнено_{dt.date.today().isoformat()}"
     candidate, version = stem, 1
-    while (output_dir / f"{candidate}.zip").exists():
+    while True:
+        filled = output_dir / f"{candidate}{source.suffix}"
+        report = output_dir / f"{candidate.replace('_заполнено_', '_отчёт_')}.xlsx"
+        if not filled.exists() and not report.exists():
+            return filled, report
         version += 1
         candidate = f"{stem}_v{version}"
-    return output_dir / f"{candidate}.zip", output_dir / f"{candidate.replace('_заполнено_', '_отчёт_')}.xlsx"
+
+
+def fill_book(name: str, data: bytes, sources: Sources, result: RaekResult) -> bytes | None:
+    """One RAEK file filled, or None when it has nothing the program fills."""
+    workbook = load_workbook(BytesIO(data))
+    touched = [fill_sheet(Path(name).name, sheet, sources, result) for sheet in workbook.worksheets]
+    if not any(touched):
+        result.skipped_files.append(name)
+        return None
+    buffer = BytesIO()
+    workbook.save(buffer)
+    result.files += 1
+    return buffer.getvalue()
 
 
 def fill_raek_zip(
     db_path: Path,
-    zip_path: Path,
+    zip_path: Path | list[Path],
     output_dir: Path,
     codes_path: Path | None = None,
     rules_path: Path | None = None,
@@ -673,8 +695,16 @@ def fill_raek_zip(
     answers_path: Path | None = None,
     cert_folder: Path | None = None,
 ) -> RaekResult:
-    """Fill the archive. With `ask_site`, ensmas.ru is asked first about articles it has no recent answer for."""
-    articles = zip_articles(zip_path)
+    """Fill the archive, or RAEK's single .xlsx files (a list): each comes out as a filled copy with the same name.
+    With `ask_site`, ensmas.ru is asked first about articles it has no recent answer for."""
+    books = zip_path if isinstance(zip_path, list) else None
+    if books is None:
+        articles = zip_articles(zip_path)
+    else:
+        found: set[str] = set()
+        for path in books:
+            book_articles(path.read_bytes(), found)
+        articles = sorted(found)
     cache = SiteCache(site_cache)
     site_result = None
     if ask_site:
@@ -691,21 +721,24 @@ def fill_raek_zip(
         cert_dates=table_dates(certificates_table, register_documents(cert_folder)),
         answers=load_answers(answers_path),
     )
-    output_path, report_path = output_paths(zip_path, output_dir)
+    output_path, report_path = output_paths(books[0] if books else zip_path, output_dir)
+    if books and len(books) > 1:
+        report_path = output_paths(output_dir / "РАЭК.xlsx", output_dir)[1]
     result = RaekResult(output_path, report_path, products=len(articles), codes_file=codes_path, site=site_result)
+    if books is not None:
+        for number, path in enumerate(books):
+            target = output_path if number == 0 else output_paths(path, output_dir)[0]
+            filled = fill_book(path.name, path.read_bytes(), sources, result)
+            if filled is not None:  # a file with nothing to fill is not copied: RAEK already has it
+                target.write_bytes(filled)
+                result.outputs.append(target)
+        write_report(result)
+        return result
     with zipfile.ZipFile(zip_path) as source, zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as target:
         for info in source.infolist():
             data = source.read(info)
             if info.filename.lower().endswith(".xlsx"):
-                workbook = load_workbook(BytesIO(data))
-                touched = [fill_sheet(Path(info.filename).name, sheet, sources, result) for sheet in workbook.worksheets]
-                if any(touched):
-                    buffer = BytesIO()
-                    workbook.save(buffer)
-                    data = buffer.getvalue()
-                    result.files += 1
-                else:
-                    result.skipped_files.append(info.filename)
+                data = fill_book(info.filename, data, sources, result) or data
             else:
                 result.skipped_files.append(info.filename)
             target.writestr(info, data)
@@ -874,6 +907,9 @@ def result_lines(result: RaekResult) -> list[str]:
         lines.append(f"Коды и штрих-коды взяты из файла {result.codes_file.name}.")
     if result.site:
         lines.extend(site_lines(result.site))
-    lines.append(f"Архив для РАЭК: {result.output_path.name}")
+    if result.outputs:
+        lines.append(f"Файлы для РАЭК ({len(result.outputs)}): " + ", ".join(path.name for path in result.outputs))
+    else:
+        lines.append(f"Архив для РАЭК: {result.output_path.name}")
     lines.append(f"Отчёт: {result.report_path.name}")
     return lines
