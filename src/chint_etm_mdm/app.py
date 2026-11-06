@@ -78,7 +78,7 @@ from .etim_importer import (
 )
 from .export_templates import etm_reference_path
 from .filler import FillResult, fill_template
-from .raek import RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answers, result_lines as raek_result_lines
+from .raek import RAEK_FILES_SEPARATOR, RaekResult, fill_raek_zip, latest_raek_zip, remember_name_answers, result_lines as raek_result_lines
 from .site_info import default_cache_path as site_cache_path
 from .certificates import TABLE_NAME as CERTIFICATES_TABLE, TableResult, table_lines, update_table
 from .notify import NotifySettings, find_telegram_chat, load_settings as load_notify_settings, save_settings as save_notify_settings, send_summary
@@ -957,9 +957,11 @@ class MainWindow(QMainWindow):
         return root
 
     def choose_raek_zip(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Архив от менеджера РАЭК", str(self.incoming()[0]), "ZIP (*.zip)")
-        if path:
-            self.raek_zip_edit.setText(str(self.take(path, "РАЭК")))
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Архив от менеджера РАЭК или его файлы", str(self.incoming()[0]), "Архив или файлы РАЭК (*.zip *.xlsx)"
+        )
+        if paths:
+            self.raek_zip_edit.setText(RAEK_FILES_SEPARATOR.join(str(self.take(path, "РАЭК")) for path in paths))
 
     def run_raek(self) -> None:
         try:
@@ -968,7 +970,12 @@ class MainWindow(QMainWindow):
             if db_path is None:
                 return
             zip_text = self.raek_zip_edit.text().strip()
-            zip_path = self.take(zip_text or latest_raek_zip(self.incoming() + input_folders(self.work_dir_edit.text().strip())), "РАЭК")
+            books = [Path(part.strip()) for part in zip_text.split(RAEK_FILES_SEPARATOR) if part.strip().lower().endswith(".xlsx")]
+            missing = [path.name for path in books if not path.is_file()]
+            if missing:
+                QMessageBox.warning(self, "Нет файла", "Не найдены файлы: " + ", ".join(missing))
+                return
+            zip_path = books[0] if books else self.take(zip_text or latest_raek_zip(self.incoming() + input_folders(self.work_dir_edit.text().strip())), "РАЭК")
             if zip_path is None or not zip_path.is_file():
                 QMessageBox.warning(self, "Нет архива", "Сохраните архив РАЭК в папку входящих или в «Загрузки», или выберите его кнопкой «Выбрать...».")
                 return
@@ -986,7 +993,7 @@ class MainWindow(QMainWindow):
             worker = Worker(
                 fill_raek_zip,
                 db_path,
-                zip_path,
+                books or zip_path,
                 output_dir,
                 codes_path,
                 rules_path,

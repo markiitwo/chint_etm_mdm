@@ -170,6 +170,22 @@ class RaekTests(unittest.TestCase):
         with zipfile.ZipFile(result.output_path) as archive:
             return archive.read(name)
 
+    def test_single_files_come_out_as_they_came_in(self) -> None:
+        names = ["ChINT (CHINT)_THVED.xlsx", "ChINT (CHINT)_EAN.xlsx"]
+        with zipfile.ZipFile(self.zip) as archive:
+            for name in names:
+                (self.root / name).write_bytes(archive.read(name))
+        in_zip = self.fill()
+        result = fill_raek_zip(self.db, [self.root / name for name in names], self.root / "single", self.codes, self.rules)
+        today = dt.date.today().isoformat()
+        self.assertEqual([f"ChINT (CHINT)_THVED_заполнено_{today}.xlsx", f"ChINT (CHINT)_EAN_заполнено_{today}.xlsx"], [p.name for p in result.outputs])
+        self.assertEqual(result.outputs[0], result.output_path)
+        self.assertEqual(f"РАЭК_отчёт_{today}.xlsx", result.report_path.name)
+        self.assertTrue(result.report_path.is_file())
+        for name, path in zip(names, result.outputs):
+            self.assertEqual(cells(self.member(in_zip, name)), cells(path.read_bytes()))
+        self.assertIn("Файлы для РАЭК (2)", "\n".join(result_lines(result)))
+
     def test_plain_columns(self) -> None:
         result = self.fill()
         self.assertEqual(f"CHINT_заполнено_{dt.date.today().isoformat()}.zip", result.output_path.name)
